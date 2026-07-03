@@ -67,21 +67,23 @@ type stringList []string
 func (l *stringList) String() string     { return strings.Join(*l, ",") }
 func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 
-// bodyFrom resolves --body / --body-file (exactly one required).
-func bodyFrom(body, bodyFile string) (string, error) {
+// bodyFrom resolves --body / --body-file (exactly one required). On error the
+// second return value is the exit code: ExitUsage for flag mistakes,
+// ExitError for I/O failures reading --body-file.
+func bodyFrom(body, bodyFile string) (string, int, error) {
 	switch {
 	case body != "" && bodyFile != "":
-		return "", errors.New("use --body or --body-file, not both")
+		return "", ExitUsage, errors.New("use --body or --body-file, not both")
 	case body != "":
-		return body, nil
+		return body, ExitOK, nil
 	case bodyFile != "":
 		data, err := os.ReadFile(bodyFile)
 		if err != nil {
-			return "", err
+			return "", ExitError, err
 		}
-		return string(data), nil
+		return string(data), ExitOK, nil
 	default:
-		return "", errors.New("--body or --body-file is required (--body must be non-empty)")
+		return "", ExitUsage, errors.New("--body or --body-file is required (--body must be non-empty)")
 	}
 }
 
@@ -120,10 +122,10 @@ func cmdSend(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tincan send: --to and --from are required")
 		return ExitUsage
 	}
-	b, err := bodyFrom(*body, *bodyFile)
+	b, ec, err := bodyFrom(*body, *bodyFile)
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan send: %v\n", err)
-		return ExitUsage
+		return ec
 	}
 	sp, err := spool.Open(*room)
 	if err != nil {
@@ -200,10 +202,10 @@ func cmdAsk(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tincan ask: --to and --from are required")
 		return ExitUsage
 	}
-	b, err := bodyFrom(*body, *bodyFile)
+	b, ec, err := bodyFrom(*body, *bodyFile)
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
-		return ExitUsage
+		return ec
 	}
 	sp, err := spool.Open(*room)
 	if err != nil {
@@ -258,10 +260,10 @@ func cmdReply(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tincan reply: --channel is required")
 		return ExitUsage
 	}
-	b, err := bodyFrom(*body, *bodyFile)
+	b, ec, err := bodyFrom(*body, *bodyFile)
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan reply: %v\n", err)
-		return ExitUsage
+		return ec
 	}
 	sp, err := spool.Open(*room)
 	if err != nil {

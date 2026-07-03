@@ -179,6 +179,14 @@ func TestAskTimeoutPrintsPendingAndLateReplyIsCollectable(t *testing.T) {
 	}
 }
 
+func TestBodyFileReadErrorExitsOne(t *testing.T) {
+	code, _, stderr := run("send", "--room", t.TempDir(), "--to", "x", "--from", "y",
+		"--body-file", "/nonexistent-tincan-body")
+	if code != 1 {
+		t.Fatalf("want exit 1 for unreadable --body-file, got %d (stderr=%q)", code, stderr)
+	}
+}
+
 func TestReplyUsageErrors(t *testing.T) {
 	cases := [][]string{
 		{"reply"},                             // missing channel

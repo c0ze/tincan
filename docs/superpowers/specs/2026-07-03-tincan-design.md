@@ -193,7 +193,7 @@ Some tasks return files, not text (e.g., image generation). tincan carries **coo
 tincan/
   cmd/tincan/main.go          # CLI entry / flag parsing
   internal/envelope/          # message struct + JSON + filenames
-  internal/spool/             # inbox paths, atomic send, blocking recv, claim, gc
+  internal/spool/             # inbox paths, atomic send, blocking recv, claim (gc: Phase 2)
   PROTOCOL.md                 # canonical, agent-agnostic procedure
   skills/
     tell/SKILL.md             # Claude orchestrator shim
