@@ -262,13 +262,21 @@ func lostClaimRace(err error) bool {
 	return runtime.GOOS == "windows" && errors.Is(err, fs.ErrPermission)
 }
 
-// RemoveInbox deletes a participant's inbox directory. Used to clean up
-// ephemeral r-<id> reply channels after a successful ask.
+// RemoveInbox deletes a participant's inbox directory, and also its
+// present/<name>/ dir (which removePresence deliberately leaves behind — see
+// removePresence). Used to clean up ephemeral r-<id> reply channels after a
+// successful ask, so those per-request presence dirs don't accumulate
+// forever. This cannot race a Recv: an r-<id> channel has exactly one
+// receiver (the ask caller's Recv), which has already returned — and thus
+// already run its own removePresence — before ask calls RemoveInbox.
 func (s *Spool) RemoveInbox(name string) error {
 	if err := validName(name); err != nil {
 		return err
 	}
-	return os.RemoveAll(s.InboxDir(name))
+	if err := os.RemoveAll(s.InboxDir(name)); err != nil {
+		return err
+	}
+	return os.RemoveAll(s.presentNameDir(name))
 }
 
 // Presence describes one name's listener state, as reported by `status`/`ping`.
@@ -320,16 +328,27 @@ func (s *Spool) writePresence(name, token string) {
 }
 
 // removePresence clears only the token file this Recv wrote via
-// writePresence — never a sibling receiver's — so two receivers parked as
-// the same name never delete each other's presence. Called via defer on
-// every Recv exit path (message, timeout, error); best-effort, like
-// writePresence. Afterward it best-effort removes the now-possibly-empty
-// present/<name>/ dir; "not empty" (a sibling token remains) or any other
-// race is ignored.
+// writePresence — never a sibling receiver's, and never the present/<name>/
+// directory itself. Called via defer on every Recv exit path (message,
+// timeout, error); best-effort, like writePresence.
+//
+// Deliberately does NOT remove the now-possibly-empty present/<name>/ dir.
+// An earlier version did (best-effort, swallowing "not empty"/any other
+// error), which raced a concurrent receiver's startup: that receiver could
+// have MkdirAll'd this same dir in writePresence but not yet renamed its
+// token in, so this call's rmdir could remove the directory out from under
+// it, ENOENT-ing its rename and losing its presence entirely — a listener
+// that would then show as wrongly absent in status/ping. Removing only the
+// token, never the directory, makes that race impossible by construction:
+// there is no code path left that deletes present/<name>/ while a Recv may
+// be parked under it. The resulting empty dirs are harmless — presenceFor
+// already treats an empty present/<name>/ dir as absent, the same way it
+// treats a missing one — and mirror how inbox/<name>/ dirs already persist
+// (both bounded by the set of participant names; see RemoveInbox for the
+// one place present/<name>/ IS cleaned up, for ephemeral r-<id> channels
+// where no such race can occur).
 func (s *Spool) removePresence(name, token string) {
-	dir := s.presentNameDir(name)
-	os.Remove(filepath.Join(dir, token))
-	os.Remove(dir) // best-effort; fails silently if other tokens remain
+	os.Remove(filepath.Join(s.presentNameDir(name), token))
 }
 
 // ListPresence returns Presence for the union of names that have an inbox

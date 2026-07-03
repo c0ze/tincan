@@ -321,6 +321,38 @@ func TestRemoveInbox(t *testing.T) {
 	}
 }
 
+// TestRemoveInboxAlsoRemovesPresentDir asserts RemoveInbox cleans up both
+// inbox/<name>/ and present/<name>/. Since removePresence (Task 7) no longer
+// rmdirs present/<name>/ on its own, ephemeral r-<id> reply channels (every
+// ask's reply Recv writes a presence token under present/r-<id>/ while
+// parked) would otherwise accumulate empty dirs forever. RemoveInbox is safe
+// to also clean present/<name>/ here because an r-<id> channel has exactly
+// one receiver — the ask caller's Recv — which has already returned (and its
+// own removePresence already run) before ask calls RemoveInbox.
+func TestRemoveInboxAlsoRemovesPresentDir(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+	if err := sp.Send(msg("a", "r-chan1", "reply", 1)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	// Simulate the leftover empty present/<name>/ dir that a completed Recv
+	// on this channel leaves behind post-Task-7 (removePresence no longer
+	// rmdirs it).
+	presentDir := filepath.Join(room, ".tincan", "present", "r-chan1")
+	if err := os.MkdirAll(presentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.RemoveInbox("r-chan1"); err != nil {
+		t.Fatalf("RemoveInbox: %v", err)
+	}
+	if _, err := os.Stat(sp.InboxDir("r-chan1")); !os.IsNotExist(err) {
+		t.Fatalf("inbox dir still exists (err=%v)", err)
+	}
+	if _, err := os.Stat(presentDir); !os.IsNotExist(err) {
+		t.Fatalf("present/r-chan1 dir still exists after RemoveInbox (err=%v)", err)
+	}
+}
+
 func TestRejectsPathTraversalNames(t *testing.T) {
 	sp, _ := Open(t.TempDir())
 	bad := []string{"../escape", "a/b", `a\b`, ".", "..", ""}
@@ -448,15 +480,19 @@ func TestPresenceFileRemovedAfterRecvReturnsMessage(t *testing.T) {
 	}
 
 	// Its own token file is gone, so no live tokens remain and the name is
-	// absent. The (best-effort) now-empty present/<name>/ dir should also be
-	// gone: this Recv was the only one parked, so it owns the cleanup.
+	// absent. The now-empty present/<name>/ dir is deliberately LEFT in
+	// place: removePresence removes only its own token file, never the
+	// directory (see Task 7 — removing the dir here is what let a
+	// concurrent receiver's in-flight rename lose the startup/exit race).
+	// presenceFor already treats an empty dir as absent, so this is
+	// harmless and mirrors how inbox/<name>/ dirs already persist.
 	if _, ok, err := sp.Present("b"); err != nil {
 		t.Fatalf("Present: %v", err)
 	} else if ok {
 		t.Fatal("Present(\"b\") ok = true after Recv returned, want false (no live tokens)")
 	}
-	if _, err := os.Stat(filepath.Join(room, ".tincan", "present", "b")); !os.IsNotExist(err) {
-		t.Fatalf("present/b dir still exists after its only Recv returned (err=%v)", err)
+	if _, err := os.Stat(filepath.Join(room, ".tincan", "present", "b")); err != nil {
+		t.Fatalf("present/b dir should still exist (removePresence must not rmdir it), stat err=%v", err)
 	}
 }
 
@@ -730,6 +766,118 @@ func TestConcurrentSameNamePresenceSurvivesOneReceiverReturning(t *testing.T) {
 	}
 	if got == nil || !got.Alive {
 		t.Fatalf("ListPresence did not show \"b\" as alive after one of two receivers returned: %+v", list)
+	}
+}
+
+// TestPresenceSurvivesConcurrentChurnOfOtherTokens is the Task 7 regression
+// test for the startup/exit race codex's re-review found: removePresence
+// used to best-effort rmdir present/<name>/ after removing its own token.
+// The race needs the directory to be momentarily *empty* at the instant a
+// concurrent writePresence is past its MkdirAll but hasn't yet renamed its
+// token in — a permanently-occupied directory can never satisfy an empty-dir
+// rmdir, so the sharpest reproduction is several "held" tokens starting
+// their writePresence in the SAME wave as heavy churn of other tokens for
+// the same name, repeated over many independent trials (fresh dir each
+// time) to make hitting that narrow window overwhelmingly likely within a
+// bounded run.
+//
+// Per trial this asserts the brief's two invariants:
+//  1. Every held token, once it starts, is reported present — never lost
+//     because a sibling's removePresence rmdir'd the directory out from
+//     under its in-flight rename.
+//  2. No writePresence call (held or churn) loses its own token: a stat
+//     right after writePresence returns must find the file, since a lost
+//     rename is exactly what "ENOENT'd by a vanishing directory" produces.
+//
+// Trial/goroutine counts were tuned empirically against the pre-fix
+// removePresence (which still best-effort os.Remove(dir)s): this shape
+// reproduced losses in every one of 20+ consecutive runs pre-fix, at ~2.5s
+// wall clock under -race. Bounded by fixed trial/iteration counts plus a
+// hard safety deadline on the whole test, so a reintroduced race that
+// somehow wedges a goroutine still can't hang the suite.
+func TestPresenceSurvivesConcurrentChurnOfOtherTokens(t *testing.T) {
+	const trials = 60
+	const heldPerTrial = 4
+	const churners = 32
+	const itersPerChurner = 30
+
+	resultCh := make(chan error, 1)
+	go func() {
+		for trial := 0; trial < trials; trial++ {
+			room := t.TempDir()
+			sp, err := Open(room)
+			if err != nil {
+				resultCh <- fmt.Errorf("trial %d: Open: %v", trial, err)
+				return
+			}
+			const name = "b"
+
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+			var failures []string
+			fail := func(msg string) {
+				mu.Lock()
+				failures = append(failures, msg)
+				mu.Unlock()
+			}
+
+			// Held tokens: writePresence starts in the same wave as the
+			// churners below, then each is verified present and never
+			// removed for the rest of the trial.
+			heldPaths := make([]string, heldPerTrial)
+			for h := 0; h < heldPerTrial; h++ {
+				tok := envelope.NewID()
+				heldPaths[h] = filepath.Join(sp.presentNameDir(name), tok)
+				wg.Add(1)
+				go func(tok string) {
+					defer wg.Done()
+					sp.writePresence(name, tok)
+				}(tok)
+			}
+
+			// Churners: write+remove a fresh token per iteration, verifying
+			// their own write landed before removing it.
+			for c := 0; c < churners; c++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for i := 0; i < itersPerChurner; i++ {
+						tok := envelope.NewID()
+						sp.writePresence(name, tok)
+						tokPath := filepath.Join(sp.presentNameDir(name), tok)
+						if _, err := os.Stat(tokPath); err != nil {
+							fail(fmt.Sprintf("churn token missing right after writePresence: %v", err))
+							continue // don't try to remove a token that was never there
+						}
+						sp.removePresence(name, tok)
+					}
+				}()
+			}
+			wg.Wait()
+
+			for _, p := range heldPaths {
+				if _, err := os.Stat(p); err != nil {
+					fail(fmt.Sprintf("held token lost to concurrent churn: %v", err))
+				}
+			}
+			if len(failures) > 0 {
+				resultCh <- fmt.Errorf("trial %d: %d failure(s), first: %s", trial, len(failures), failures[0])
+				return
+			}
+		}
+		resultCh <- nil
+	}()
+
+	// Safety deadline: the bounded trial/goroutine counts above should
+	// finish in a few seconds even under -race; this stops a reintroduced
+	// race that somehow deadlocks a goroutine from hanging the suite.
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("safety deadline hit; possible hang/deadlock regression")
 	}
 }
 
