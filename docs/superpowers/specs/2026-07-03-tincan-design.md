@@ -170,7 +170,7 @@ Some tasks return files, not text (e.g., image generation). tincan carries **coo
 - **Target not listening:** the message queues in its inbox. If the target never comes up, the orchestrator's `ask` times out and reports `pending`; the orchestrator decides to retry or skip. No message is lost — it stays queued, and the reply channel persists for late collection.
 - **Concurrent `recv` on one inbox:** the atomic-rename claim ensures exactly one receiver processes a given file.
 - **Half-written files:** never observed by receivers — delivery is temp-write-then-rename (atomic on one filesystem).
-- **Stale reply channels:** channels left by timed-out `ask`s are swept by age (a `tincan gc` / startup sweep removes `inbox/r-*` dirs older than a configurable TTL).
+- **Stale reply channels:** channels left by timed-out `ask`s are swept by age (a `tincan gc` / startup sweep removes `inbox/r-*` dirs older than a configurable TTL). The same sweep clears orphaned `tmp/` files, which can only appear after a mid-send crash.
 - **Crash of any party:** no shared daemon to corrupt; queued files simply await the next receiver.
 - **Large instructions:** pass via `--body-file`; keep bodies to instructions/answers and artifacts as pointers.
 
