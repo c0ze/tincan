@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -99,6 +100,38 @@ func bodyFrom(body, bodyFile string) (string, int, error) {
 	}
 }
 
+// roomRootWarning returns a non-empty advisory string iff room is inside a
+// git repo but is not that repo's root — the "cd into a subdir silently
+// creates a second room" footgun. It never errors: any failure to stat while
+// walking (permissions, races) is treated as "not a root" and yields "".
+//
+// A directory counts as a repo root if it has a `.git` entry, whether that
+// entry is a directory (a normal clone) or a file (a git worktree, whose
+// `.git` is a pointer file to the real git-dir elsewhere).
+func roomRootWarning(room string) string {
+	abs, err := filepath.Abs(room)
+	if err != nil {
+		return ""
+	}
+	if _, err := os.Lstat(filepath.Join(abs, ".git")); err == nil {
+		return "" // room is itself a repo root
+	}
+	dir := abs
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "" // reached filesystem root; not inside a repo
+		}
+		dir = parent
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return fmt.Sprintf(
+				"tincan: warning: room %s is inside a repo but not its root; "+
+					"peers using the repo root won't see these messages (pass --room %s)",
+				abs, dir)
+		}
+	}
+}
+
 func printEnvelope(e *envelope.Envelope, format string, stdout, stderr io.Writer) int {
 	if format == "body" {
 		fmt.Fprintln(stdout, e.Body)
@@ -139,6 +172,9 @@ func cmdSend(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tincan send: %v\n", err)
 		return ec
 	}
+	if w := roomRootWarning(*room); w != "" {
+		fmt.Fprintln(stderr, w)
+	}
 	sp, err := spool.Open(*room)
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan send: %v\n", err)
@@ -176,6 +212,9 @@ func cmdRecv(args []string, stdout, stderr io.Writer) int {
 	if *format != "json" && *format != "body" {
 		fmt.Fprintln(stderr, "tincan recv: --format must be json or body")
 		return ExitUsage
+	}
+	if w := roomRootWarning(*room); w != "" {
+		fmt.Fprintln(stderr, w)
 	}
 	sp, err := spool.Open(*room)
 	if err != nil {
@@ -222,6 +261,9 @@ func cmdAsk(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
 		return ec
+	}
+	if w := roomRootWarning(*room); w != "" {
+		fmt.Fprintln(stderr, w)
 	}
 	sp, err := spool.Open(*room)
 	if err != nil {
@@ -281,6 +323,9 @@ func cmdReply(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tincan reply: %v\n", err)
 		return ec
 	}
+	if w := roomRootWarning(*room); w != "" {
+		fmt.Fprintln(stderr, w)
+	}
 	sp, err := spool.Open(*room)
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan reply: %v\n", err)
@@ -311,6 +356,9 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	if *format != "table" && *format != "json" {
 		fmt.Fprintln(stderr, "tincan status: --format must be table or json")
 		return ExitUsage
+	}
+	if w := roomRootWarning(*room); w != "" {
+		fmt.Fprintln(stderr, w)
 	}
 	sp, err := spool.Open(*room)
 	if err != nil {
@@ -366,6 +414,9 @@ func cmdPing(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tincan ping: --to is required")
 		return ExitUsage
 	}
+	if w := roomRootWarning(*room); w != "" {
+		fmt.Fprintln(stderr, w)
+	}
 	sp, err := spool.Open(*room)
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan ping: %v\n", err)
@@ -398,6 +449,9 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 	if *to == "" || *from == "" {
 		fmt.Fprintln(stderr, "tincan stop: --to and --from are required")
 		return ExitUsage
+	}
+	if w := roomRootWarning(*room); w != "" {
+		fmt.Fprintln(stderr, w)
 	}
 	sp, err := spool.Open(*room)
 	if err != nil {

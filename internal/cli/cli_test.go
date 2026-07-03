@@ -60,7 +60,13 @@ func TestRecvFormatBody(t *testing.T) {
 }
 
 func TestRecvTimeoutExitsThreeSilently(t *testing.T) {
-	code, stdout, stderr := run("recv", "--room", t.TempDir(), "--as", "nobody", "--timeout", "1")
+	// Room must be git-free (see gitFreeTempDir): a bare t.TempDir() only
+	// guarantees the leaf directory has no .git, not that none of its
+	// ancestors do, and roomRootWarning walks ancestors up to the
+	// filesystem root. This test's contract is silence on timeout, which
+	// roomRootWarning must not disturb when the room is genuinely outside
+	// any repo.
+	code, stdout, stderr := run("recv", "--room", gitFreeTempDir(t), "--as", "nobody", "--timeout", "1")
 	if code != 3 {
 		t.Fatalf("want exit 3 on timeout, got %d", code)
 	}
@@ -388,5 +394,105 @@ func TestStopUsageErrors(t *testing.T) {
 		if code, _, _ := run(args...); code != ExitUsage {
 			t.Fatalf("args %v: want exit %d, got %d", args, ExitUsage, code)
 		}
+	}
+}
+
+func TestRoomRootWarningNonRootChildOfGitDir(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.Mkdir(filepath.Join(tmp, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	sub := filepath.Join(tmp, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	got := roomRootWarning(sub)
+	if got == "" {
+		t.Fatalf("want non-empty warning for %s (child of repo root %s), got empty", sub, tmp)
+	}
+	resolvedTmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", tmp, err)
+	}
+	if !strings.Contains(got, resolvedTmp) {
+		t.Fatalf("warning %q does not name gitroot %q", got, resolvedTmp)
+	}
+}
+
+func TestRoomRootWarningAtGitDirRoot(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.Mkdir(filepath.Join(tmp, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	if got := roomRootWarning(tmp); got != "" {
+		t.Fatalf("want empty warning at repo root %s, got %q", tmp, got)
+	}
+}
+
+// gitFreeTempDir returns a fresh temp directory none of whose ancestors
+// (up to the filesystem root) contain a .git entry. t.TempDir() alone
+// doesn't guarantee this: it roots under os.TempDir() (typically /tmp),
+// and some machines have an unrelated stray .git sitting directly in /tmp
+// or another ancestor shared by every temp dir on that host. Since
+// roomRootWarning's contract is to walk all the way to the filesystem
+// root, a test for "no .git anywhere" must control that entire chain
+// itself rather than trust ambient host state.
+func gitFreeTempDir(t *testing.T) string {
+	t.Helper()
+	isClean := func(dir string) bool {
+		for {
+			if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+				return false
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				return true
+			}
+			dir = parent
+		}
+	}
+	if dir := t.TempDir(); isClean(dir) {
+		return dir
+	}
+	// Ambient os.TempDir() is contaminated (e.g. a stray /tmp/.git on this
+	// host) — fall back to a private root under the user's home directory,
+	// well clear of both the shared temp tree and this repo checkout.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("gitFreeTempDir: no clean ancestor under os.TempDir() and UserHomeDir failed: %v", err)
+	}
+	fallbackRoot := filepath.Join(home, ".cache", "tincan-test-tmp")
+	if err := os.MkdirAll(fallbackRoot, 0o755); err != nil {
+		t.Fatalf("gitFreeTempDir: mkdir fallback root: %v", err)
+	}
+	if !isClean(fallbackRoot) {
+		t.Fatalf("gitFreeTempDir: no git-free temp location found under os.TempDir() or %s", fallbackRoot)
+	}
+	dir, err := os.MkdirTemp(fallbackRoot, "roomroot")
+	if err != nil {
+		t.Fatalf("gitFreeTempDir: MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
+func TestRoomRootWarningNoGitAnywhere(t *testing.T) {
+	base := gitFreeTempDir(t)
+	if got := roomRootWarning(base); got != "" {
+		t.Fatalf("want empty warning outside any repo, got %q", got)
+	}
+}
+
+func TestRoomRootWarningGitAsFileIsRoot(t *testing.T) {
+	// Git worktrees use a `.git` file (not a directory) pointing at the main
+	// repo's git-dir. A room at such a worktree root must still count as a
+	// root — no warning.
+	tmp := t.TempDir()
+	gitFile := filepath.Join(tmp, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: /somewhere/else\n"), 0o644); err != nil {
+		t.Fatalf("write .git file: %v", err)
+	}
+	if got := roomRootWarning(tmp); got != "" {
+		t.Fatalf("want empty warning at worktree root %s (.git is a file), got %q", tmp, got)
 	}
 }

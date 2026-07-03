@@ -30,6 +30,11 @@ bare will silently create a *second* room there. Always pass the room explicitly
 --room "$(git rev-parse --show-toplevel)"     # or an absolute path
 ```
 
+If `--room` resolves to a directory that's inside a git repo but isn't that
+repo's root, every command prints a one-line advisory to stderr naming the
+repo root it found — the warning never fails the command or changes its exit
+code, it just flags the footgun before it silently splits your room in two.
+
 ## CLI
 
 ```
