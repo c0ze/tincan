@@ -2,9 +2,11 @@ package spool
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -181,5 +183,81 @@ func TestReArmAfterTimeoutLosesNothing(t *testing.T) {
 	}
 	if e.Body != "queued-in-gap" {
 		t.Fatalf("got %q", e.Body)
+	}
+}
+
+func TestConcurrentReceiversClaimExactlyOnce(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	const n = 10
+	for i := 0; i < n; i++ {
+		if err := sp.Send(msg("a", "b", fmt.Sprintf("m%02d", i), int64(i+1))); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+	}
+	got := make(chan string, n)
+	var wg sync.WaitGroup
+	for w := 0; w < 2; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				e, err := sp.Recv("b", 500*time.Millisecond, false)
+				if errors.Is(err, ErrTimeout) {
+					return // drained
+				}
+				if err != nil {
+					t.Errorf("Recv: %v", err)
+					return
+				}
+				got <- e.Body
+			}
+		}()
+	}
+	wg.Wait()
+	close(got)
+	seen := map[string]bool{}
+	for body := range got {
+		if seen[body] {
+			t.Fatalf("message %q delivered twice", body)
+		}
+		seen[body] = true
+	}
+	if len(seen) != n {
+		t.Fatalf("delivered %d of %d messages", len(seen), n)
+	}
+}
+
+func TestLogConsumedKeepsCopyInLog(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+	if err := sp.Send(msg("a", "b", "keep-me", 1)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if _, err := sp.Recv("b", 2*time.Second, true); err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	logs, err := os.ReadDir(filepath.Join(room, ".tincan", "log"))
+	if err != nil {
+		t.Fatalf("ReadDir log: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("want 1 logged message, got %d", len(logs))
+	}
+	inbox, _ := os.ReadDir(sp.InboxDir("b"))
+	if len(inbox) != 0 {
+		t.Fatalf("inbox should be empty, got %v", inbox)
+	}
+}
+
+func TestRemoveInbox(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	if err := sp.Send(msg("a", "r-chan1", "reply", 1)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := sp.RemoveInbox("r-chan1"); err != nil {
+		t.Fatalf("RemoveInbox: %v", err)
+	}
+	if _, err := os.Stat(sp.InboxDir("r-chan1")); !os.IsNotExist(err) {
+		t.Fatalf("inbox dir still exists (err=%v)", err)
 	}
 }

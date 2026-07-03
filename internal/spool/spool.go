@@ -156,3 +156,9 @@ func (s *Spool) claimOldest(name string, logConsumed bool) (*envelope.Envelope, 
 	}
 	return nil, false, nil
 }
+
+// RemoveInbox deletes a participant's inbox directory. Used to clean up
+// ephemeral r-<id> reply channels after a successful ask.
+func (s *Spool) RemoveInbox(name string) error {
+	return os.RemoveAll(s.InboxDir(name))
+}
