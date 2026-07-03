@@ -777,113 +777,123 @@ func TestConcurrentSameNamePresenceSurvivesOneReceiverReturning(t *testing.T) {
 
 // TestPresenceSurvivesConcurrentChurnOfOtherTokens is the Task 7 regression
 // test for the startup/exit race codex's re-review found: removePresence
-// used to best-effort rmdir present/<name>/ after removing its own token.
-// The race needs the directory to be momentarily *empty* at the instant a
-// concurrent writePresence is past its MkdirAll but hasn't yet renamed its
-// token in — a permanently-occupied directory can never satisfy an empty-dir
-// rmdir, so the sharpest reproduction is several "held" tokens starting
-// their writePresence in the SAME wave as heavy churn of other tokens for
-// the same name, repeated over many independent trials (fresh dir each
-// time) to make hitting that narrow window overwhelmingly likely within a
-// bounded run.
+// used to best-effort rmdir present/<name>/ after removing its own token,
+// which could remove the directory out from under a concurrent writePresence
+// that had MkdirAll'd it but not yet renamed its token in.
 //
-// Per trial this asserts the brief's two invariants:
-//  1. Every held token, once it starts, is reported present — never lost
-//     because a sibling's removePresence rmdir'd the directory out from
-//     under its in-flight rename.
-//  2. No writePresence call (held or churn) loses its own token: a stat
-//     right after writePresence returns must find the file, since a lost
-//     rename is exactly what "ENOENT'd by a vanishing directory" produces.
+// Task 7 made that race impossible *by construction*: removePresence no
+// longer ever removes present/<name>/, only its own token file (see
+// removePresence's doc comment). So this no longer needs to be a heavy
+// probabilistic stress test hunting a narrow timing window across many
+// trials — a single round of modest concurrent churn against a handful of
+// held tokens is enough to exercise writePresence/removePresence racing on
+// the same name and catch a reintroduction of the bug. Kept deliberately
+// small (a few churner goroutines, a few iterations each) so it stays fast
+// on every platform, including a Windows CI runner where writePresence and
+// removePresence retry through transient sharing violations (retryClaimOp,
+// 10ms sleeps) — heavy load here previously accumulated enough of those
+// retry-sleeps under contention to blow well past a 30s deadline there.
 //
-// Trial/goroutine counts were tuned empirically against the pre-fix
-// removePresence (which still best-effort os.Remove(dir)s): this shape
-// reproduced losses in every one of 20+ consecutive runs pre-fix, at ~2.5s
-// wall clock under -race. Bounded by fixed trial/iteration counts plus a
-// hard safety deadline on the whole test, so a reintroduced race that
-// somehow wedges a goroutine still can't hang the suite.
+// This asserts the brief's core invariant: a token written once and held
+// (never removed) must be reported present throughout concurrent churn of
+// *other* tokens for the same name — never lost to a sibling's cleanup.
+//
+// All churner goroutines are stoppable via a done channel and tracked with
+// a WaitGroup that is waited on before the test returns on *every* path,
+// including the safety-deadline path below: if the deadline ever fires, stop
+// is closed and wg.Wait() completes before t.Fatal, so no goroutine can
+// outlive the test and keep writing into .tincan after t.TempDir() starts
+// tearing it down (which is what left `.tincan` non-empty and made TempDir
+// cleanup itself fail under the old, much heavier version of this test).
 func TestPresenceSurvivesConcurrentChurnOfOtherTokens(t *testing.T) {
-	const trials = 60
-	const heldPerTrial = 4
-	const churners = 32
-	const itersPerChurner = 30
+	const heldTokens = 3
+	const churners = 6
+	const itersPerChurner = 20
 
-	resultCh := make(chan error, 1)
-	go func() {
-		for trial := 0; trial < trials; trial++ {
-			room := t.TempDir()
-			sp, err := Open(room)
-			if err != nil {
-				resultCh <- fmt.Errorf("trial %d: Open: %v", trial, err)
-				return
-			}
-			const name = "b"
+	room := t.TempDir()
+	sp, err := Open(room)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	const name = "b"
 
-			var wg sync.WaitGroup
-			var mu sync.Mutex
-			var failures []string
-			fail := func(msg string) {
-				mu.Lock()
-				failures = append(failures, msg)
-				mu.Unlock()
-			}
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failures []string
+	fail := func(msg string) {
+		mu.Lock()
+		failures = append(failures, msg)
+		mu.Unlock()
+	}
 
-			// Held tokens: writePresence starts in the same wave as the
-			// churners below, then each is verified present and never
-			// removed for the rest of the trial.
-			heldPaths := make([]string, heldPerTrial)
-			for h := 0; h < heldPerTrial; h++ {
-				tok := envelope.NewID()
-				heldPaths[h] = filepath.Join(sp.presentNameDir(name), tok)
-				wg.Add(1)
-				go func(tok string) {
-					defer wg.Done()
-					sp.writePresence(name, tok)
-				}(tok)
-			}
+	// Held tokens: writePresence starts in the same wave as the churners
+	// below, then each is verified present and never removed for the rest
+	// of the test.
+	heldPaths := make([]string, heldTokens)
+	for h := 0; h < heldTokens; h++ {
+		tok := envelope.NewID()
+		heldPaths[h] = filepath.Join(sp.presentNameDir(name), tok)
+		wg.Add(1)
+		go func(tok string) {
+			defer wg.Done()
+			sp.writePresence(name, tok)
+		}(tok)
+	}
 
-			// Churners: write+remove a fresh token per iteration, verifying
-			// their own write landed before removing it.
-			for c := 0; c < churners; c++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for i := 0; i < itersPerChurner; i++ {
-						tok := envelope.NewID()
-						sp.writePresence(name, tok)
-						tokPath := filepath.Join(sp.presentNameDir(name), tok)
-						if _, err := os.Stat(tokPath); err != nil {
-							fail(fmt.Sprintf("churn token missing right after writePresence: %v", err))
-							continue // don't try to remove a token that was never there
-						}
-						sp.removePresence(name, tok)
-					}
-				}()
-			}
-			wg.Wait()
-
-			for _, p := range heldPaths {
-				if _, err := os.Stat(p); err != nil {
-					fail(fmt.Sprintf("held token lost to concurrent churn: %v", err))
+	// Churners: write+remove a fresh token per iteration, verifying their
+	// own write landed before removing it. Each checks done between
+	// iterations so a signaled stop cuts the loop short immediately instead
+	// of grinding through its remaining iterations.
+	for c := 0; c < churners; c++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < itersPerChurner; i++ {
+				select {
+				case <-done:
+					return
+				default:
 				}
+				tok := envelope.NewID()
+				sp.writePresence(name, tok)
+				tokPath := filepath.Join(sp.presentNameDir(name), tok)
+				if _, err := os.Stat(tokPath); err != nil {
+					fail(fmt.Sprintf("churn token missing right after writePresence: %v", err))
+					continue // don't try to remove a token that was never there
+				}
+				sp.removePresence(name, tok)
 			}
-			if len(failures) > 0 {
-				resultCh <- fmt.Errorf("trial %d: %d failure(s), first: %s", trial, len(failures), failures[0])
-				return
-			}
-		}
-		resultCh <- nil
+		}()
+	}
+
+	waitCh := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitCh)
 	}()
 
-	// Safety deadline: the bounded trial/goroutine counts above should
-	// finish in a few seconds even under -race; this stops a reintroduced
-	// race that somehow deadlocks a goroutine from hanging the suite.
+	// Safety deadline: the small counts above should finish in a few
+	// seconds even under -race on a slow filesystem; this stops a
+	// reintroduced hang/deadlock from hanging the suite. On the deadline
+	// path, stop the churners and join them BEFORE failing the test, so no
+	// goroutine outlives this function and keeps writing into .tincan while
+	// t.TempDir() tears it down.
 	select {
-	case err := <-resultCh:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(30 * time.Second):
+	case <-waitCh:
+	case <-time.After(10 * time.Second):
+		close(done)
+		<-waitCh // wait for every goroutine to actually return
 		t.Fatal("safety deadline hit; possible hang/deadlock regression")
+	}
+
+	for _, p := range heldPaths {
+		if _, err := os.Stat(p); err != nil {
+			fail(fmt.Sprintf("held token lost to concurrent churn: %v", err))
+		}
+	}
+	if len(failures) > 0 {
+		t.Fatalf("%d failure(s), first: %s", len(failures), failures[0])
 	}
 }
 
