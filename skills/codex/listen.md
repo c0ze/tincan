@@ -1,3 +1,5 @@
+<!-- Needed only for a legacy or future Codex build that documents ~/.codex/prompts/*.md slash-command support; Codex CLI 0.142.5 does not load this file, and this repo's skills/listen/SKILL.md is discovered natively. -->
+
 Act as a tincan listener for this repo. tincan is a local message-passing CLI
 (on PATH; also `~/.local/bin/tincan`). Full protocol: PROTOCOL.md in the tincan repo.
 

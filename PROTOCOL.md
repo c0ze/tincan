@@ -53,6 +53,21 @@ All commands take `--room <path>` (see above; default `.`).
 **Exit codes: 0 ok, 1 error, 2 usage, 3 timeout.** Branch on these: 3 means
 "nothing arrived / no reply yet", never an error.
 
+## Starting a listener, per agent
+
+tincan listeners are implemented using the `listen` skill. Although all three supported agents execute the same underlying `recv` loop defined in `SKILL.md`, how they discover and invoke the skill varies:
+
+| Agent | Skill Discovery | How to Invoke | Recommended Auto-Approve Setup |
+| :--- | :--- | :--- | :--- |
+| **Claude Code** | User-level skill path: `~/.claude/skills/listen` | Slash command `/listen` (optionally `as <name>`) | Allowlist `Bash(tincan *)` in the project's `.claude/settings.json` |
+| **Antigravity** | Workspace skill path: `.agents/skills/` (repo ships `.agents/skills` -> `skills` symlink) | Slash command `/listen` | Start with `agy --dangerously-skip-permissions` or use prompt-level "always allow this command" |
+| **Codex** | Workspace skill path: `skills/listen/SKILL.md` (via native registry) | Plain query `"listen"` or matching request (no `/listen` command exists) | Run with `--full-auto` or `--ask-for-approval never --sandbox workspace-write` |
+
+### Onboarding & Best Practices
+
+- **Backgrounding `recv`:** If your agent harness caps the duration of foreground commands, run the `recv` command in the background/async (e.g., in Antigravity, by executing the command with `WaitMsBeforeAsync` and yielding) and process the output when the background task wakes you up.
+- **Audit Logging (optional):** add `--log` to `tincan recv` to keep an audit copy of consumed messages in `<room>/.tincan/log/`. Default is off — tincan deliberately stores nothing, and the agents' chat transcripts are the canonical record.
+
 ## LISTEN loop — an agent-level loop, not a shell loop
 
 The loop below is **your** loop (the agent's), not a `while true` in bash. A shell
@@ -101,8 +116,7 @@ the flow. Prefer the narrowest grant your agent supports:
 - **Codex:** `codex --full-auto` (sandboxed to workspace writes, auto-approves) is
   usually enough; `--ask-for-approval never --sandbox workspace-write` is the
   granular form. Avoid `--yolo` unless the sandbox blocks you.
-- **Gemini CLI / Antigravity:** `--yolo` / `--approval-mode`, or use the prompt's
-  "always allow this command" option on `tincan recv` and `tincan reply`.
+- **Antigravity / Gemini CLI:** Start the session with `agy --dangerously-skip-permissions` to skip command and file permissions check, or use the CLI/prompt's "always allow this command" option on `tincan recv` and `tincan reply`.
 
 Caveat: an auto-approving listener executes whatever lands in its inbox — anything
 that can write to `<room>/.tincan/inbox/` drives that agent. Fine on a single-user

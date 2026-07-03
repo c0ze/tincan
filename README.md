@@ -5,7 +5,7 @@ Local, cross-platform, agent-agnostic message passing between AI coding agents
 filesystem spool. No daemon, no message store, near-zero tokens while idle.
 
 - **`/tell <agent> <task>`** — hand work to another running agent and act on its reply.
-- **`/listen`** — park on the repo's inbox and answer requests, at ~no token cost while idle.
+- **`listen` / `/listen`** — park on the repo's inbox and answer requests, at ~no token cost while idle.
 
 Design: [`docs/superpowers/specs/2026-07-03-tincan-design.md`](docs/superpowers/specs/2026-07-03-tincan-design.md).
 Operating guide: [`PROTOCOL.md`](PROTOCOL.md).
@@ -48,7 +48,14 @@ This copies the skills to `~/.claude/skills/{tell,listen}/` (override with
 `/tell` and `/listen`.
 
 Per-agent shims installed by the same script:
-- **Codex**: `~/.codex/prompts/listen.md` → `/listen` inside Codex.
+- **Codex**: no shim is installed. Codex CLI 0.142.5 discovers this repo's
+  `skills/listen/SKILL.md` natively through the workspace skill registry
+  (`skills/` and this repo's `.agents/skills -> skills` symlink are visible in
+  `codex debug prompt-input`). Invoke it with plain `listen` or `listen as codex`,
+  not `/listen`. For unattended listening, start with `codex --full-auto`
+  (workspace-write sandbox, auto-approve); if the sandbox interferes with the
+  loop, escalate to `--ask-for-approval never --sandbox danger-full-access` in a
+  trusted repo only.
 - **Gemini CLI**: `~/.gemini/commands/listen.toml` → `/listen` inside Gemini CLI.
 - **Antigravity**: reads workspace skills from `.agents/skills/`; this repo ships
   a `.agents/skills → skills` symlink, so `/listen` works out of the box here. For
@@ -64,7 +71,7 @@ In repo `~/work/app`, two agents:
 
 ```sh
 # Agent A (e.g. Codex), acting as a listener:
-/listen as codex
+listen as codex
 
 # Agent B (e.g. Claude), orchestrating:
 /tell codex review the diff on the current branch

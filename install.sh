@@ -55,13 +55,11 @@ install_skills() {
   done
   echo ">> Claude: restart your session, then use /tell and /listen."
 
-  # Codex: custom prompts become /slash commands.
+  # Codex: current builds discover this repo's SKILL.md files directly.
   if [ -d "$HOME/.codex" ]; then
-    mkdir -p "$HOME/.codex/prompts"
-    cp "$REPO_DIR/skills/codex/listen.md" "$HOME/.codex/prompts/listen.md"
-    echo ">> installed Codex prompt: ~/.codex/prompts/listen.md (use /listen in Codex)"
+    echo ">> Codex detected: no prompt install needed; use plain 'listen' in this repo."
   else
-    echo "-- Codex not detected (~/.codex missing); skipped its /listen prompt."
+    echo "-- Codex not detected (~/.codex missing); skipped Codex note."
   fi
 
   # Gemini CLI (and Antigravity if it reads gemini-style commands).
