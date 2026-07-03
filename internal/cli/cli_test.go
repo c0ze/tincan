@@ -55,12 +55,15 @@ func TestRecvFormatBody(t *testing.T) {
 }
 
 func TestRecvTimeoutExitsThreeSilently(t *testing.T) {
-	code, stdout, _ := run("recv", "--room", t.TempDir(), "--as", "nobody", "--timeout", "1")
+	code, stdout, stderr := run("recv", "--room", t.TempDir(), "--as", "nobody", "--timeout", "1")
 	if code != 3 {
 		t.Fatalf("want exit 3 on timeout, got %d", code)
 	}
 	if stdout != "" {
 		t.Fatalf("want no stdout on timeout, got %q", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("want no stderr on timeout, got %q", stderr)
 	}
 }
 

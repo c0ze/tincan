@@ -81,7 +81,7 @@ func bodyFrom(body, bodyFile string) (string, error) {
 		}
 		return string(data), nil
 	default:
-		return "", errors.New("--body or --body-file is required")
+		return "", errors.New("--body or --body-file is required (--body must be non-empty)")
 	}
 }
 
