@@ -137,6 +137,9 @@ func (s *Spool) claimOldest(name string, logConsumed bool) (*envelope.Envelope, 
 		}
 		e, err := envelope.Unmarshal(data)
 		if err != nil {
+			// Deliberate quarantine: the claimed file stays in tmp/ (never
+			// retried, swept by the Phase-2 gc) so a corrupt message can't
+			// cause an infinite reparse loop.
 			return nil, false, fmt.Errorf("tincan: bad message %s: %w", f, err)
 		}
 		if logConsumed {
