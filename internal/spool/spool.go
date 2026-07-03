@@ -38,11 +38,23 @@ func (s *Spool) InboxDir(name string) string {
 func (s *Spool) tmpDir() string { return filepath.Join(s.root, "tmp") }
 func (s *Spool) logDir() string { return filepath.Join(s.root, "log") }
 
+// validName rejects names that could escape the spool root: a name must be a
+// single, portable path component (no separators on any OS, no traversal).
+func validName(name string) error {
+	if name == "" || name == "." || name == ".." {
+		return fmt.Errorf("tincan: invalid name %q", name)
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("tincan: invalid name %q: path separators not allowed", name)
+	}
+	return nil
+}
+
 // Send delivers e into the To inbox atomically: write to tmp/, then rename.
 // Messages queue until a receiver claims them. Fills ID and TS if unset.
 func (s *Spool) Send(e *envelope.Envelope) error {
-	if e.To == "" {
-		return errors.New("tincan: send: empty To")
+	if err := validName(e.To); err != nil {
+		return err
 	}
 	if e.ID == "" {
 		e.ID = envelope.NewID()
@@ -75,6 +87,9 @@ var ErrTimeout = errors.New("tincan: recv timeout")
 // removes it from the spool (or moves it to log/ when logConsumed), and
 // returns it. Returns ErrTimeout if nothing arrives within timeout.
 func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*envelope.Envelope, error) {
+	if err := validName(name); err != nil {
+		return nil, err
+	}
 	inbox := s.InboxDir(name)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -154,7 +169,12 @@ func (s *Spool) claimOldest(name string, logConsumed bool) (*envelope.Envelope, 
 		}
 		claimed := filepath.Join(s.tmpDir(), fmt.Sprintf("claim-%s-%s", envelope.NewID(), f))
 		if err := os.Rename(filepath.Join(s.InboxDir(name), f), claimed); err != nil {
-			continue // another receiver claimed it first
+			if errors.Is(err, fs.ErrNotExist) {
+				continue // another receiver claimed it first
+			}
+			// Anything else (permissions, read-only fs, ...) is a real error;
+			// swallowing it would decay into a bogus timeout.
+			return nil, false, err
 		}
 		data, err := os.ReadFile(claimed)
 		if err != nil {
@@ -185,5 +205,8 @@ func (s *Spool) claimOldest(name string, logConsumed bool) (*envelope.Envelope, 
 // RemoveInbox deletes a participant's inbox directory. Used to clean up
 // ephemeral r-<id> reply channels after a successful ask.
 func (s *Spool) RemoveInbox(name string) error {
+	if err := validName(name); err != nil {
+		return err
+	}
 	return os.RemoveAll(s.InboxDir(name))
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
 	"testing"
@@ -259,5 +260,68 @@ func TestRemoveInbox(t *testing.T) {
 	}
 	if _, err := os.Stat(sp.InboxDir("r-chan1")); !os.IsNotExist(err) {
 		t.Fatalf("inbox dir still exists (err=%v)", err)
+	}
+}
+
+func TestRejectsPathTraversalNames(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	bad := []string{"../escape", "a/b", `a\b`, ".", "..", ""}
+	for _, name := range bad {
+		if err := sp.Send(&envelope.Envelope{From: "a", To: name, Body: "x"}); err == nil {
+			t.Errorf("Send to %q: want validation error", name)
+		}
+		if _, err := sp.Recv(name, time.Millisecond, false); err == nil || errors.Is(err, ErrTimeout) {
+			t.Errorf("Recv as %q: want validation error, got %v", name, err)
+		}
+		if err := sp.RemoveInbox(name); err == nil {
+			t.Errorf("RemoveInbox %q: want validation error", name)
+		}
+	}
+}
+
+func TestQuarantinesCorruptMessage(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+	inbox := sp.InboxDir("b")
+	if err := os.MkdirAll(inbox, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inbox, "00000000000000000001-bad.json"), []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := sp.Recv("b", time.Second, false)
+	if err == nil || errors.Is(err, ErrTimeout) {
+		t.Fatalf("want parse error, got %v", err)
+	}
+	// The corrupt file is quarantined out of the inbox into tmp/.
+	entries, _ := os.ReadDir(inbox)
+	if len(entries) != 0 {
+		t.Fatalf("corrupt file still in inbox: %v", entries)
+	}
+	tmpEntries, _ := os.ReadDir(filepath.Join(room, ".tincan", "tmp"))
+	if len(tmpEntries) != 1 {
+		t.Fatalf("want 1 quarantined file in tmp, got %v", tmpEntries)
+	}
+}
+
+func TestRenameFailureSurfacesAsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission semantics differ on Windows")
+	}
+	room := t.TempDir()
+	sp, _ := Open(room)
+	if err := sp.Send(msg("a", "b", "x", 1)); err != nil {
+		t.Fatal(err)
+	}
+	inbox := sp.InboxDir("b")
+	// Read-only inbox dir: claiming (rename out) fails with EACCES, which must
+	// surface as an error, not decay into a bogus timeout.
+	if err := os.Chmod(inbox, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(inbox, 0o755)
+	_, err := sp.Recv("b", time.Second, false)
+	if err == nil || errors.Is(err, ErrTimeout) {
+		t.Fatalf("want permission error, got %v", err)
 	}
 }

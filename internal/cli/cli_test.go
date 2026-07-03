@@ -193,6 +193,7 @@ func TestReplyUsageErrors(t *testing.T) {
 		{"reply", "--channel", "r-x"},         // missing body
 		{"ask", "--to", "x", "--from", "y"},   // missing body
 		{"ask", "--from", "y", "--body", "b"}, // missing to
+		{"ask", "--to", "x", "--from", "y", "--body", "b", "--format", "yaml"}, // bad format
 	}
 	for _, args := range cases {
 		if code, _, _ := run(args...); code != 2 {

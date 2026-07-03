@@ -202,6 +202,10 @@ func cmdAsk(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tincan ask: --to and --from are required")
 		return ExitUsage
 	}
+	if *format != "json" && *format != "body" {
+		fmt.Fprintln(stderr, "tincan ask: --format must be json or body")
+		return ExitUsage
+	}
 	b, ec, err := bodyFrom(*body, *bodyFile)
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
