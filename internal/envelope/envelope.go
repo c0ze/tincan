@@ -31,7 +31,8 @@ func NewID() string {
 }
 
 // Filename returns the spool filename for e: zero-padded UnixNano, then ID,
-// so lexical order == chronological order.
+// so lexical order == chronological order. It assumes e.TS is set and
+// post-1970; unset or pre-epoch timestamps do not sort correctly.
 func Filename(e *Envelope) string {
 	return fmt.Sprintf("%020d-%s.json", e.TS.UnixNano(), e.ID)
 }

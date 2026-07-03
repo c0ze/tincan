@@ -94,7 +94,7 @@ func TestNewIDUniqueAndWellFormed(t *testing.T) {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/arda/projects/tincan && go test ./internal/envelope/`
+Run: `cd /Users/arda/projects/tincan && mise x -- go test ./internal/envelope/`
 Expected: FAIL (compile error: undefined `Envelope`, `NewID`, `Marshal`, `Unmarshal`, `Filename`)
 
 - [ ] **Step 3: Write the implementation**
@@ -157,13 +157,13 @@ func Unmarshal(data []byte) (*Envelope, error) {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /Users/arda/projects/tincan && go test ./internal/envelope/ -v`
+Run: `cd /Users/arda/projects/tincan && mise x -- go test ./internal/envelope/ -v`
 Expected: PASS (4 tests)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/arda/projects/tincan && gofmt -l . && go vet ./... && \
+cd /Users/arda/projects/tincan && mise x -- gofmt -l . && mise x -- go vet ./... && \
 git add internal/envelope/ && \
 git commit -m "feat: envelope message format with chronologically ordered filenames"
 ```
@@ -295,7 +295,7 @@ func TestSendFillsIDAndTS(t *testing.T) {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/arda/projects/tincan && go test ./internal/spool/`
+Run: `cd /Users/arda/projects/tincan && mise x -- go test ./internal/spool/`
 Expected: FAIL (compile error: undefined `Open`, `Send`, `InboxDir`)
 
 - [ ] **Step 3: Write the implementation**
@@ -371,13 +371,13 @@ func (s *Spool) Send(e *envelope.Envelope) error {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /Users/arda/projects/tincan && go test ./internal/spool/ -v`
+Run: `cd /Users/arda/projects/tincan && mise x -- go test ./internal/spool/ -v`
 Expected: PASS (5 tests). `logDir` is unused so far — that's fine, `go vet` doesn't flag unused methods.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/arda/projects/tincan && gofmt -l . && go vet ./... && \
+cd /Users/arda/projects/tincan && mise x -- gofmt -l . && mise x -- go vet ./... && \
 git add internal/spool/ && \
 git commit -m "feat: spool Send with atomic temp-write-then-rename delivery"
 ```
@@ -393,7 +393,7 @@ git commit -m "feat: spool Send with atomic temp-write-then-rename delivery"
 
 - [ ] **Step 1: Add the fsnotify dependency**
 
-Run: `cd /Users/arda/projects/tincan && go get github.com/fsnotify/fsnotify`
+Run: `cd /Users/arda/projects/tincan && mise x -- go get github.com/fsnotify/fsnotify`
 Expected: `go: added github.com/fsnotify/fsnotify v1.x.x` (and golang.org/x/sys indirect)
 
 - [ ] **Step 2: Write the failing tests**
@@ -480,7 +480,7 @@ Also add `"errors"` to the test file's import block.
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `cd /Users/arda/projects/tincan && go test ./internal/spool/`
+Run: `cd /Users/arda/projects/tincan && mise x -- go test ./internal/spool/`
 Expected: FAIL (compile error: undefined `Recv`, `ErrTimeout`)
 
 - [ ] **Step 4: Write the implementation**
@@ -578,13 +578,13 @@ func (s *Spool) claimOldest(name string, logConsumed bool) (*envelope.Envelope, 
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cd /Users/arda/projects/tincan && go test ./internal/spool/ -v`
+Run: `cd /Users/arda/projects/tincan && mise x -- go test ./internal/spool/ -v`
 Expected: PASS (9 tests, includes the 5 from Task 2)
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/arda/projects/tincan && gofmt -l . && go vet ./... && \
+cd /Users/arda/projects/tincan && mise x -- gofmt -l . && mise x -- go vet ./... && \
 git add internal/spool/ go.mod go.sum && \
 git commit -m "feat: blocking spool Recv with fsnotify wake, timeout, oldest-first claim"
 ```
@@ -683,7 +683,7 @@ Also add `"fmt"` and `"sync"` to the test file's import block.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/arda/projects/tincan && go test ./internal/spool/`
+Run: `cd /Users/arda/projects/tincan && mise x -- go test ./internal/spool/`
 Expected: FAIL (compile error: undefined `RemoveInbox`; the other two new tests compile and should pass — only the compile failure blocks)
 
 - [ ] **Step 3: Write the implementation**
@@ -700,13 +700,13 @@ func (s *Spool) RemoveInbox(name string) error {
 
 - [ ] **Step 4: Run tests to verify they pass (with the race detector)**
 
-Run: `cd /Users/arda/projects/tincan && go test ./internal/spool/ -race -v`
+Run: `cd /Users/arda/projects/tincan && mise x -- go test ./internal/spool/ -race -v`
 Expected: PASS (12 tests), no race reports
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/arda/projects/tincan && gofmt -l . && go vet ./... && \
+cd /Users/arda/projects/tincan && mise x -- gofmt -l . && mise x -- go vet ./... && \
 git add internal/spool/ && \
 git commit -m "feat: exactly-once concurrent claims, log mode, RemoveInbox"
 ```
@@ -835,7 +835,7 @@ Also add `"os"` to the test file's import block.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/arda/projects/tincan && go test ./internal/cli/`
+Run: `cd /Users/arda/projects/tincan && mise x -- go test ./internal/cli/`
 Expected: FAIL (compile error: undefined `Run`)
 
 - [ ] **Step 3: Write the implementation**
@@ -1039,13 +1039,13 @@ func cmdReply(args []string, stdout, stderr io.Writer) int {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /Users/arda/projects/tincan && go test ./internal/cli/ -v`
+Run: `cd /Users/arda/projects/tincan && mise x -- go test ./internal/cli/ -v`
 Expected: PASS (7 tests)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/arda/projects/tincan && gofmt -l . && go vet ./... && \
+cd /Users/arda/projects/tincan && mise x -- gofmt -l . && mise x -- go vet ./... && \
 git add internal/cli/ && \
 git commit -m "feat: CLI send and recv with exit-code contract"
 ```
@@ -1154,7 +1154,7 @@ Also add `"path/filepath"` to the test file's import block.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/arda/projects/tincan && go test ./internal/cli/`
+Run: `cd /Users/arda/projects/tincan && mise x -- go test ./internal/cli/`
 Expected: FAIL — `TestAskReplyRoundTrip` and the others hit the "not implemented yet" stubs (exit 1, or exit 2 mismatches)
 
 - [ ] **Step 3: Write the implementation**
@@ -1265,13 +1265,13 @@ func cmdReply(args []string, stdout, stderr io.Writer) int {
 
 - [ ] **Step 4: Run tests to verify they pass (race detector on)**
 
-Run: `cd /Users/arda/projects/tincan && go test ./... -race`
+Run: `cd /Users/arda/projects/tincan && mise x -- go test ./... -race`
 Expected: PASS — all three packages (`envelope`, `spool`, `cli`)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/arda/projects/tincan && gofmt -l . && go vet ./... && \
+cd /Users/arda/projects/tincan && mise x -- gofmt -l . && mise x -- go vet ./... && \
 git add internal/cli/ && \
 git commit -m "feat: CLI ask and reply with ephemeral r-<id> reply channels"
 ```
@@ -1306,13 +1306,13 @@ func main() {
 
 - [ ] **Step 2: Build and run the full test suite**
 
-Run: `cd /Users/arda/projects/tincan && go build ./... && go test ./... -race && go vet ./... && gofmt -l .`
+Run: `cd /Users/arda/projects/tincan && mise x -- go build ./... && mise x -- go test ./... -race && mise x -- go vet ./... && mise x -- gofmt -l .`
 Expected: builds clean, all tests PASS, no vet/gofmt output
 
 - [ ] **Step 3: End-to-end smoke test with the real binary**
 
 ```bash
-cd /Users/arda/projects/tincan && go build -o /tmp/tincan-smoke/tincan ./cmd/tincan && \
+cd /Users/arda/projects/tincan && mise x -- go build -o /tmp/tincan-smoke/tincan ./cmd/tincan && \
 ROOM=$(mktemp -d) && \
 ( sleep 1 && REQ=$(/tmp/tincan-smoke/tincan recv --room "$ROOM" --as codex --timeout 20) && \
   CH=$(printf '%s' "$REQ" | sed -n 's/.*"reply_to": "\(r-[0-9a-f]*\)".*/\1/p') && \
@@ -1343,7 +1343,7 @@ with:
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/arda/projects/tincan && gofmt -l . && go vet ./... && \
+cd /Users/arda/projects/tincan && mise x -- gofmt -l . && mise x -- go vet ./... && \
 git add cmd/ README.md && \
 git commit -m "feat: tincan main entrypoint; Phase 1 complete"
 ```
