@@ -230,17 +230,20 @@ func TestBodyFileReadErrorExitsOne(t *testing.T) {
 	}
 }
 
-// writePresenceFile writes <room>/.tincan/present/<name> directly, in the
-// same on-disk JSON shape spool.Recv's heartbeat produces, so CLI tests stay
-// hermetic (no spawned processes, no parking a real Recv).
+// writePresenceFile writes a single token file under
+// <room>/.tincan/present/<name>/, in the same on-disk JSON shape and layout
+// spool.Recv's heartbeat produces (one file per parked Recv, named by a
+// unique token), so CLI tests stay hermetic (no spawned processes, no
+// parking a real Recv).
 func writePresenceFile(t *testing.T, room, name string, pid int, since time.Time) {
 	t.Helper()
-	dir := filepath.Join(room, ".tincan", "present")
+	dir := filepath.Join(room, ".tincan", "present", name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	data := fmt.Sprintf(`{"pid":%d,"since":%q}`, pid, since.UTC().Format(time.RFC3339))
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+	tok := filepath.Join(dir, fmt.Sprintf("tok-%d", time.Now().UnixNano()))
+	if err := os.WriteFile(tok, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -1,6 +1,7 @@
 package spool
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -361,19 +362,20 @@ func TestQuarantinesCorruptMessage(t *testing.T) {
 	}
 }
 
-// waitForPresenceFile polls until <root>/present/<name> exists or the
-// deadline elapses, so tests don't race the goroutine that starts Recv.
+// waitForPresenceFile polls until <root>/present/<name>/ contains at least
+// one token file or the deadline elapses, so tests don't race the goroutine
+// that starts Recv.
 func waitForPresenceFile(t *testing.T, root, name string) {
 	t.Helper()
-	path := filepath.Join(root, ".tincan", "present", name)
+	dir := filepath.Join(root, ".tincan", "present", name)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
+		if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("presence file %s never appeared", path)
+	t.Fatalf("presence token under %s never appeared", dir)
 }
 
 func TestListPresenceReflectsParkedRecvWithLivePID(t *testing.T) {
@@ -445,20 +447,28 @@ func TestPresenceFileRemovedAfterRecvReturnsMessage(t *testing.T) {
 		t.Fatal("Recv did not return after Send")
 	}
 
+	// Its own token file is gone, so no live tokens remain and the name is
+	// absent. The (best-effort) now-empty present/<name>/ dir should also be
+	// gone: this Recv was the only one parked, so it owns the cleanup.
+	if _, ok, err := sp.Present("b"); err != nil {
+		t.Fatalf("Present: %v", err)
+	} else if ok {
+		t.Fatal("Present(\"b\") ok = true after Recv returned, want false (no live tokens)")
+	}
 	if _, err := os.Stat(filepath.Join(room, ".tincan", "present", "b")); !os.IsNotExist(err) {
-		t.Fatalf("presence file still exists after Recv returned (err=%v)", err)
+		t.Fatalf("present/b dir still exists after its only Recv returned (err=%v)", err)
 	}
 }
 
 func TestListPresenceMarksDeadPIDNotAlive(t *testing.T) {
 	room := t.TempDir()
 	sp, _ := Open(room)
-	presentDir := filepath.Join(room, ".tincan", "present")
+	presentDir := filepath.Join(room, ".tincan", "present", "ghost")
 	if err := os.MkdirAll(presentDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	data := fmt.Sprintf(`{"pid":%d,"since":%q}`, 1<<30, time.Now().UTC().Format(time.RFC3339))
-	if err := os.WriteFile(filepath.Join(presentDir, "ghost"), []byte(data), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(presentDir, "tok1"), []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	list, err := sp.ListPresence()
@@ -539,12 +549,12 @@ func TestPresentReturnsFalseForUnknownName(t *testing.T) {
 func TestPresentReturnsFalseForDeadPIDPresenceFile(t *testing.T) {
 	room := t.TempDir()
 	sp, _ := Open(room)
-	presentDir := filepath.Join(room, ".tincan", "present")
+	presentDir := filepath.Join(room, ".tincan", "present", "ghost")
 	if err := os.MkdirAll(presentDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	data := fmt.Sprintf(`{"pid":%d,"since":%q}`, 1<<30, time.Now().UTC().Format(time.RFC3339))
-	if err := os.WriteFile(filepath.Join(presentDir, "ghost"), []byte(data), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(presentDir, "tok1"), []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, ok, err := sp.Present("ghost")
@@ -586,6 +596,219 @@ func TestPresentReturnsTrueForLivePresenceFile(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Recv did not return after Send")
+	}
+}
+
+// TestListPresenceSkipsCorruptTokenFileWithoutErroring asserts that a
+// malformed token file (e.g. a torn write) doesn't fail the whole listing:
+// it's skipped like a dead-pid token would be, and a sibling live token in
+// the same present/<name>/ dir still reports the name present.
+func TestListPresenceSkipsCorruptTokenFileWithoutErroring(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+	presentDir := filepath.Join(room, ".tincan", "present", "b")
+	if err := os.MkdirAll(presentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(presentDir, "corrupt"), []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	live := fmt.Sprintf(`{"pid":%d,"since":%q}`, os.Getpid(), time.Now().UTC().Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(presentDir, "tok-live"), []byte(live), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := sp.ListPresence()
+	if err != nil {
+		t.Fatalf("ListPresence: %v", err)
+	}
+	var got *Presence
+	for i := range list {
+		if list[i].Name == "b" {
+			got = &list[i]
+		}
+	}
+	if got == nil || !got.Alive {
+		t.Fatalf("ListPresence did not show \"b\" as alive despite a live sibling token: %+v", list)
+	}
+}
+
+// TestPresenceForPicksMostRecentSinceAmongLiveTokens asserts the
+// representative pid/since (used by status/ping) come from the most-recent
+// since among live tokens when several receivers are parked as the same
+// name concurrently.
+func TestPresenceForPicksMostRecentSinceAmongLiveTokens(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+	presentDir := filepath.Join(room, ".tincan", "present", "b")
+	if err := os.MkdirAll(presentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	older := time.Now().Add(-1 * time.Hour).UTC()
+	newer := time.Now().UTC()
+	// Encode with json.Marshal (RFC3339Nano, sub-second precision) rather
+	// than hand-formatted RFC3339 (second precision), matching what
+	// writePresence actually produces: otherwise the two "since" values can
+	// truncate to the same second and this test stops distinguishing them.
+	oldData, err := json.Marshal(presenceFile{PID: os.Getpid(), Since: older})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newData, err := json.Marshal(presenceFile{PID: os.Getpid(), Since: newer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(presentDir, "tok-old"), oldData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(presentDir, "tok-new"), newData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p, ok, err := sp.Present("b")
+	if err != nil {
+		t.Fatalf("Present: %v", err)
+	}
+	if !ok {
+		t.Fatal("Present(\"b\") ok = false, want true")
+	}
+	if !p.Since.Equal(newer) {
+		t.Fatalf("Since = %v, want most-recent %v", p.Since, newer)
+	}
+}
+
+// TestConcurrentSameNamePresenceSurvivesOneReceiverReturning reproduces the
+// codex-review bug: tincan supports concurrent receivers parked as the same
+// name (see TestConcurrentReceiversClaimExactlyOnce). With a single shared
+// present/<name> file, whichever receiver returns first deletes it out from
+// under the other still-parked receiver, so status/ping wrongly report the
+// name absent. Per-receiver token files fix this: two live tokens under
+// present/<name>/, removing one (simulating one of two receivers returning)
+// must leave the name present because the other token is still live.
+func TestConcurrentSameNamePresenceSurvivesOneReceiverReturning(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+	presentDir := filepath.Join(room, ".tincan", "present", "b")
+	if err := os.MkdirAll(presentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := fmt.Sprintf(`{"pid":%d,"since":%q}`, os.Getpid(), time.Now().UTC().Format(time.RFC3339))
+	tok1 := filepath.Join(presentDir, "tok1")
+	tok2 := filepath.Join(presentDir, "tok2")
+	if err := os.WriteFile(tok1, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tok2, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// One of the two "receivers" returns and removes only its own token.
+	if err := os.Remove(tok1); err != nil {
+		t.Fatal(err)
+	}
+
+	p, ok, err := sp.Present("b")
+	if err != nil {
+		t.Fatalf("Present: %v", err)
+	}
+	if !ok {
+		t.Fatal("Present(\"b\") ok = false after one of two receivers returned, want true (other receiver still parked)")
+	}
+	if p.PID != os.Getpid() || !p.Alive {
+		t.Fatalf("Present(\"b\") = %+v, want live os.Getpid()", p)
+	}
+
+	list, err := sp.ListPresence()
+	if err != nil {
+		t.Fatalf("ListPresence: %v", err)
+	}
+	var got *Presence
+	for i := range list {
+		if list[i].Name == "b" {
+			got = &list[i]
+		}
+	}
+	if got == nil || !got.Alive {
+		t.Fatalf("ListPresence did not show \"b\" as alive after one of two receivers returned: %+v", list)
+	}
+}
+
+// TestTwoRealRecvSameNamePresenceSurvivesOneReturning is the end-to-end
+// counterpart to TestConcurrentSameNamePresenceSurvivesOneReceiverReturning:
+// it drives the bug fix through the real Recv code path (two genuinely
+// parked goroutines sharing a name, each with its own token from Recv's
+// internal envelope.NewID() call) instead of hand-writing token files.
+// Guarded by a hard test-level timeout so a regression that reintroduces
+// cross-receiver deletion (and thus a stuck second Recv) fails loudly
+// instead of hanging the suite.
+func TestTwoRealRecvSameNamePresenceSurvivesOneReturning(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+
+	type result struct {
+		e   *envelope.Envelope
+		err error
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			e, err := sp.Recv("b", 10*time.Second, false)
+			results <- result{e, err}
+		}()
+	}
+
+	// Wait for both receivers to have written their presence token before
+	// asserting anything, so this doesn't race Recv's startup.
+	presentDir := filepath.Join(room, ".tincan", "present", "b")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entries, err := os.ReadDir(presentDir)
+		if err == nil && len(entries) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("both receivers' tokens never appeared under %s (last read: %v, err=%v)", presentDir, entries, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Unblock exactly one of the two parked receivers.
+	if err := sp.Send(msg("a", "b", "wake-one", 1)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case r := <-results:
+		if r.err != nil {
+			t.Fatalf("first Recv returned error: %v", r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no Recv returned after Send; safety timeout hit")
+	}
+
+	// The bug: the returning Recv's deferred cleanup must remove only its
+	// own token, so the other, still-parked, receiver must still show live.
+	p, ok, err := sp.Present("b")
+	if err != nil {
+		t.Fatalf("Present: %v", err)
+	}
+	if !ok {
+		t.Fatal("Present(\"b\") ok = false after one of two real Recv calls returned, want true (other Recv still parked)")
+	}
+	if !p.Alive {
+		t.Fatalf("Present(\"b\") = %+v, want Alive = true", p)
+	}
+
+	// Unblock the second receiver so the goroutine and test finish cleanly.
+	if err := sp.Send(msg("a", "b", "wake-two", 2)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case r := <-results:
+		if r.err != nil {
+			t.Fatalf("second Recv returned error: %v", r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second Recv did not return after Send; safety timeout hit")
 	}
 }
 

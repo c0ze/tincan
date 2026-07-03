@@ -16,9 +16,12 @@ that the `/tell` and `/listen` skills point to.
 - Unread messages **queue**; a receive that times out and re-arms loses nothing.
 - **Replies** use an ephemeral per-request channel (`r-<id>`) so parallel requests
   never cross.
-- While a receive is parked, its process writes a small presence file at
-  `<room>/.tincan/present/<name>` (separate from the inbox) so `status`/`ping`
-  can answer "is a listener parked?" without sending a message — see below.
+- While a receive is parked, its process writes a small per-receiver presence
+  file under `<room>/.tincan/present/<name>/` (separate from the inbox) so
+  `status`/`ping` can answer "is a listener parked?" without sending a
+  message — see below. One file per parked receive (tincan allows several
+  receivers to park as the same name) so one returning never erases another
+  still-parked receiver's presence.
 
 ## Rooms — always pass the repo root
 
@@ -85,10 +88,13 @@ All commands take `--room <path>` (see above; default `.`).
 
 Before `status`/`ping`, checking "is a listener alive?" meant `ps` plus a
 round-trip `ask`/`reply` — a real message, a real agent wake. `status` and
-`ping` answer it for free: a `Recv` writes a small presence file for the
-duration it is parked (`<room>/.tincan/present/<name>`, holding its pid and
-a since-timestamp), and these commands just read that file plus a
-pid-liveness check. **No message is sent; nothing wakes an agent.**
+`ping` answer it for free: a `Recv` writes a small presence file (holding its
+pid and a since-timestamp) for the duration it is parked, under
+`<room>/.tincan/present/<name>/<token>` — one file per parked receive, keyed
+by a token unique to that `Recv` call, since more than one receiver can be
+parked as the same name at once. `status`/`ping` just read that directory
+(a name is "present" if any token's pid is still alive) plus a pid-liveness
+check per token. **No message is sent; nothing wakes an agent.**
 
 ```
 tincan status [--room <path>] [--format table|json]

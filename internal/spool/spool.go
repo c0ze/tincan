@@ -94,8 +94,13 @@ func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*env
 	if err := validName(name); err != nil {
 		return nil, err
 	}
-	s.writePresence(name)
-	defer s.removePresence(name)
+	// A unique per-Recv token means concurrent receivers parked as the same
+	// name (see claimOldest) each own a separate presence file: one
+	// returning removes only its own token, never a sibling's, so
+	// status/ping still see the other as parked.
+	token := envelope.NewID()
+	s.writePresence(name, token)
+	defer s.removePresence(name, token)
 	inbox := s.InboxDir(name)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -275,19 +280,29 @@ type Presence struct {
 	Alive  bool      `json:"alive"`
 }
 
-// presenceFile is the on-disk JSON shape of <root>/present/<name>.
+// presenceFile is the on-disk JSON shape of one token file under
+// <root>/present/<name>/.
 type presenceFile struct {
 	PID   int       `json:"pid"`
 	Since time.Time `json:"since"`
 }
 
+// presentNameDir returns <root>/present/<name>, the directory holding one
+// token file per Recv currently parked as name.
+func (s *Spool) presentNameDir(name string) string {
+	return filepath.Join(s.presentDir(), name)
+}
+
 // writePresence records that a Recv for name is parked right now: it writes
-// <root>/present/<name> atomically (tmp/ then rename), mirroring Send. This
-// is a heartbeat, not part of message delivery, so any failure here is
+// <root>/present/<name>/<token> atomically (tmp/ then rename), mirroring
+// Send. token is unique per Recv call (see Recv), so concurrent receivers
+// parked as the same name each get their own file and never collide. This is
+// a heartbeat, not part of message delivery, so any failure here is
 // swallowed — it must never change Recv's success/err/timeout result.
-func (s *Spool) writePresence(name string) {
-	for _, dir := range []string{s.presentDir(), s.tmpDir()} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+func (s *Spool) writePresence(name, token string) {
+	dir := s.presentNameDir(name)
+	for _, d := range []string{dir, s.tmpDir()} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
 			return
 		}
 	}
@@ -299,20 +314,27 @@ func (s *Spool) writePresence(name string) {
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return
 	}
-	if err := os.Rename(tmp, filepath.Join(s.presentDir(), name)); err != nil {
+	if err := os.Rename(tmp, filepath.Join(dir, token)); err != nil {
 		os.Remove(tmp) // best-effort: don't leak the tmp file on a failed rename
 	}
 }
 
-// removePresence clears the presence file written by writePresence. Called
-// via defer on every Recv exit path (message, timeout, error); best-effort,
-// like writePresence.
-func (s *Spool) removePresence(name string) {
-	os.Remove(filepath.Join(s.presentDir(), name))
+// removePresence clears only the token file this Recv wrote via
+// writePresence — never a sibling receiver's — so two receivers parked as
+// the same name never delete each other's presence. Called via defer on
+// every Recv exit path (message, timeout, error); best-effort, like
+// writePresence. Afterward it best-effort removes the now-possibly-empty
+// present/<name>/ dir; "not empty" (a sibling token remains) or any other
+// race is ignored.
+func (s *Spool) removePresence(name, token string) {
+	dir := s.presentNameDir(name)
+	os.Remove(filepath.Join(dir, token))
+	os.Remove(dir) // best-effort; fails silently if other tokens remain
 }
 
 // ListPresence returns Presence for the union of names that have an inbox
-// directory and/or a live present/<name> file, sorted by name.
+// directory and/or a present/<name>/ dir (regardless of whether any token in
+// it is currently live), sorted by name.
 func (s *Spool) ListPresence() ([]Presence, error) {
 	names := map[string]bool{}
 	inboxRoot := filepath.Join(s.root, "inbox")
@@ -330,7 +352,7 @@ func (s *Spool) ListPresence() ([]Presence, error) {
 		return nil, err
 	}
 	for _, ent := range presentEntries {
-		if !ent.IsDir() {
+		if ent.IsDir() {
 			names[ent.Name()] = true
 		}
 	}
@@ -347,7 +369,7 @@ func (s *Spool) ListPresence() ([]Presence, error) {
 }
 
 // Present returns the presence for one name; the second return is false if
-// no live presence file exists for it (the name may still have a queue).
+// no live token file exists for it (the name may still have a queue).
 func (s *Spool) Present(name string) (Presence, bool, error) {
 	if err := validName(name); err != nil {
 		return Presence{}, false, err
@@ -360,7 +382,13 @@ func (s *Spool) Present(name string) (Presence, bool, error) {
 }
 
 // presenceFor builds the Presence for one name: queued count from its inbox,
-// plus pid/since/alive parsed from its present/<name> file, if any.
+// plus an aggregate view of its present/<name>/ token files. A name is
+// present iff at least one token's stored pid is alive (processAlive); the
+// representative PID/Since come from the live token with the most-recent
+// Since. A missing present/<name>/ dir means absent, not an error. Individual
+// token files that are missing (removed mid-scan by a racing Recv exit),
+// corrupt, or store a dead pid are skipped rather than failing the whole
+// listing — best-effort, same as writePresence/removePresence.
 func (s *Spool) presenceFor(name string) (Presence, error) {
 	p := Presence{Name: name}
 	entries, err := os.ReadDir(s.InboxDir(name))
@@ -372,21 +400,43 @@ func (s *Spool) presenceFor(name string) (Presence, error) {
 			p.Queued++
 		}
 	}
-	data, err := os.ReadFile(filepath.Join(s.presentDir(), name))
+	tokenEntries, err := os.ReadDir(s.presentNameDir(name))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return p, nil
 		}
 		return Presence{}, err
 	}
-	var pf presenceFile
-	if err := json.Unmarshal(data, &pf); err != nil {
-		// A malformed presence file (e.g. torn write) is reported as absent
-		// rather than a request-wide error: it self-heals on the next Recv.
+	var best *presenceFile
+	for _, ent := range tokenEntries {
+		if ent.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(s.presentNameDir(name), ent.Name()))
+		if err != nil {
+			// Removed mid-scan by a racing Recv exit, or unreadable; skip
+			// rather than fail the whole listing.
+			continue
+		}
+		var pf presenceFile
+		if err := json.Unmarshal(data, &pf); err != nil {
+			// A malformed token file (e.g. torn write) is skipped, same as a
+			// missing one: it self-heals on the next Recv.
+			continue
+		}
+		if !processAlive(pf.PID) {
+			continue
+		}
+		if best == nil || pf.Since.After(best.Since) {
+			pfCopy := pf
+			best = &pfCopy
+		}
+	}
+	if best == nil {
 		return p, nil
 	}
-	p.PID = pf.PID
-	p.Since = pf.Since
-	p.Alive = processAlive(pf.PID)
+	p.PID = best.PID
+	p.Since = best.Since
+	p.Alive = true
 	return p, nil
 }
