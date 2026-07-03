@@ -352,3 +352,41 @@ func TestReplyUsageErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestStopQueuesStopKindEnvelope(t *testing.T) {
+	room := t.TempDir()
+	code, stdout, stderr := run("stop", "--room", room, "--to", "codex", "--from", "orch")
+	if code != ExitOK {
+		t.Fatalf("stop exit %d, want %d; stderr=%q", code, ExitOK, stderr)
+	}
+	if !strings.Contains(stdout, "to=codex") {
+		t.Fatalf("stop stdout missing to=codex: %q", stdout)
+	}
+	code, recvOut, stderr := run("recv", "--room", room, "--as", "codex", "--timeout", "5")
+	if code != ExitOK {
+		t.Fatalf("recv exit %d, want %d; stderr=%q", code, ExitOK, stderr)
+	}
+	e, err := envelope.Unmarshal([]byte(recvOut))
+	if err != nil {
+		t.Fatalf("recv output is not an envelope: %v\n%s", err, recvOut)
+	}
+	if e.Kind != "stop" {
+		t.Fatalf("want Kind == \"stop\", got %q (envelope=%+v)", e.Kind, e)
+	}
+	if e.From != "orch" || e.To != "codex" {
+		t.Fatalf("wrong envelope: %+v", e)
+	}
+}
+
+func TestStopUsageErrors(t *testing.T) {
+	cases := [][]string{
+		{"stop", "--to", "x"},   // missing --from
+		{"stop", "--from", "y"}, // missing --to
+		{"stop"},                // missing both
+	}
+	for _, args := range cases {
+		if code, _, _ := run(args...); code != ExitUsage {
+			t.Fatalf("args %v: want exit %d, got %d", args, ExitUsage, code)
+		}
+	}
+}

@@ -34,6 +34,7 @@ Usage:
   tincan reply  --channel <id> (--body <s> | --body-file <f>) [--from <name>] [flags]
   tincan status [--format table|json] [flags]
   tincan ping   --to <name> [flags]
+  tincan stop   --to <name> --from <name> [flags]
 
 Common flags:
   --room <path>       room directory (default: current directory)
@@ -61,6 +62,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdStatus(args[1:], stdout, stderr)
 	case "ping":
 		return cmdPing(args[1:], stdout, stderr)
+	case "stop":
+		return cmdStop(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usageText)
 		return ExitOK
@@ -378,5 +381,37 @@ func cmdPing(args []string, stdout, stderr io.Writer) int {
 		return ExitError
 	}
 	fmt.Fprintf(stdout, "present pid=%d\n", p.PID)
+	return ExitOK
+}
+
+func cmdStop(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		to   = fs.String("to", "", "recipient name")
+		from = fs.String("from", "", "sender name")
+		room = fs.String("room", ".", "room directory")
+	)
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if *to == "" || *from == "" {
+		fmt.Fprintln(stderr, "tincan stop: --to and --from are required")
+		return ExitUsage
+	}
+	sp, err := spool.Open(*room)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan stop: %v\n", err)
+		return ExitError
+	}
+	e := &envelope.Envelope{
+		ID: envelope.NewID(), From: *from, To: *to,
+		TS: time.Now().UTC(), Kind: "stop",
+	}
+	if err := sp.Send(e); err != nil {
+		fmt.Fprintf(stderr, "tincan stop: %v\n", err)
+		return ExitError
+	}
+	fmt.Fprintf(stdout, "stop sent to=%s\n", e.To)
 	return ExitOK
 }

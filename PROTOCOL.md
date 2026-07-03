@@ -42,6 +42,7 @@ tincan send   --to <name> --from <name> (--body <s> | --body-file <f>)
               [--corr <id>] [--reply-to <channel>] [--artifact <path>]...
 tincan status [--format table|json]
 tincan ping   --to <name>
+tincan stop   --to <name> --from <name>
 ```
 
 All commands take `--room <path>` (see above; default `.`).
@@ -63,6 +64,9 @@ All commands take `--room <path>` (see above; default `.`).
 - `status`/`ping` are read-only observability: they answer "is a listener
   actually parked on `recv`?" without sending a message (zero agent wake). See
   below.
+- `stop` sends a typed wind-down control message (see below); it is otherwise
+  an ordinary send — the message queues and is delivered on the recipient's
+  next `recv`.
 
 **Exit codes: 0 ok, 1 error, 2 usage, 3 timeout.** Branch on these: 3 means
 "nothing arrived / no reply yet", never an error.
@@ -97,6 +101,27 @@ tincan ping   --to <name> [--room <path>]
   than exiting normally) is detected and reported as absent: `status`/`ping`
   also check that the recorded pid is actually alive, so a crashed listener
   doesn't linger as a false "parked" row.
+
+## Control messages — `kind` / `stop`
+
+Every envelope carries a `kind` field (`"kind"` in JSON, `omitempty`): `""`
+(the default, omitted from JSON entirely) marks an ordinary message; `"stop"`
+marks a wind-down control message. Existing/legacy JSON without a `kind` key
+still unmarshals to `Kind == ""` — this is purely additive, no on-disk or
+protocol break.
+
+```
+tincan stop --to <name> --from <name> [--room <path>]
+```
+
+`stop` builds an envelope with `Kind: "stop"` and an empty body, and sends it
+like any other message: it queues in `<name>`'s inbox and is delivered on
+their next `recv`. `--to` and `--from` are required. tincan itself does not
+enforce shutdown — it only carries the typed message. The `listen` skill is
+what honors it: on receiving a message with `kind == "stop"`, the listener
+acks briefly, then exits its loop instead of re-arming. **You must pass
+`--format json` on `recv` to see `kind`** — `--format body` only prints the
+message body and drops the envelope, including `kind`.
 
 ## Starting a listener, per agent
 

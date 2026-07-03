@@ -19,6 +19,10 @@ type Envelope struct {
 	TS        time.Time `json:"ts"`
 	Body      string    `json:"body"`
 	Artifacts []string  `json:"artifacts,omitempty"`
+	// Kind classifies the message: "" (default) is a normal message; "stop"
+	// is a wind-down control message (see `tincan stop`). omitempty keeps
+	// existing/normal-message JSON byte-identical to before this field.
+	Kind string `json:"kind,omitempty"`
 }
 
 // NewID returns a 32-char random hex string.
