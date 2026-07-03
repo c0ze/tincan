@@ -6,7 +6,7 @@
 
 **Architecture:** A maildir-style spool under `<room>/.tincan/`: sending = atomically renaming a JSON file into `inbox/<name>/`; receiving = fsnotify-blocked claim-by-rename of the oldest file. `ask` mints an ephemeral reply inbox `r-<id>` and blocks on it; `reply` is sugar over `send` into that inbox. No daemon, no message store.
 
-**Tech Stack:** Go 1.23, stdlib + `github.com/fsnotify/fsnotify` (only dep). Module: `github.com/c0ze/tincan` (go.mod already exists at repo root).
+**Tech Stack:** Go 1.23 (`go` directive; toolchain go1.26.4 pinned via repo `.mise.toml` — run all Go commands as `mise x -- go ...` since the system `go` is 1.21.9), stdlib + `github.com/fsnotify/fsnotify` (only dep). Module: `github.com/c0ze/tincan` (go.mod already exists at repo root).
 
 **Context for workers with zero prior knowledge:**
 
