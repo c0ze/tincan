@@ -184,7 +184,7 @@ Some tasks return files, not text (e.g., image generation). tincan carries **coo
 
 - **Unit:** envelope encode/decode; atomic delivery; oldest-first claim; timeout status; reply-channel lifecycle.
 - **Integration (temp room):** send-before-recv queues and drains; a timed-out-then-re-armed recv loses nothing; two concurrent couriers on distinct channels never cross; a message to an absent name is picked up once it starts listening.
-- **Cross-platform:** `go test` matrix on Linux / macOS / Windows.
+- **Cross-platform:** `go test` matrix on Linux / macOS / Windows. The macOS leg runs the spool tests with `-race -count=10`: kqueue watcher-arming races (see the Task 4 review fix, d6aa1d8) are invisible on Linux/inotify.
 - **End-to-end (documented manual procedure):** two agent sessions in one repo — one `/listen`, one `/tell` — exchanging a real request/reply, including a fan-out to two listeners.
 
 ## 13. Repo layout
