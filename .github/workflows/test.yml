@@ -1,0 +1,29 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Vet and build
+        run: |
+          go vet ./...
+          go build ./...
+      - name: Test
+        run: go test ./... -race -count=1
+      - name: Spool stress (macOS)
+        # kqueue watcher-arming races are invisible on Linux/inotify; see spec §12.
+        if: runner.os == 'macOS'
+        run: go test ./internal/spool/ -race -count=10

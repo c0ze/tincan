@@ -12,9 +12,10 @@ filesystem spool. No daemon, no message store, near-zero tokens while idle.
 Design: [`docs/superpowers/specs/2026-07-03-tincan-design.md`](docs/superpowers/specs/2026-07-03-tincan-design.md).
 Operating guide: [`PROTOCOL.md`](PROTOCOL.md).
 
-> **Status:** Phase 1 (core engine) implemented — `send`/`recv`/`ask`/`reply` over the
-> filesystem spool, with tests. The `go install` path below goes live once this repo
-> is pushed to GitHub. Fan-out courier docs and other-agent shims: see spec phases 2–3.
+> **Status:** v0.1 — the core engine (`send`/`recv`/`ask`/`reply` over the filesystem
+> spool) is implemented, tested (race-detector CI on Linux/macOS/Windows), and in
+> daily use coordinating Claude Code, Codex, and Antigravity. Young but working.
+> Roadmap (gc, more agent shims): spec phases 2–3 in `docs/`.
 
 ## Install
 
@@ -33,8 +34,9 @@ Requires Go 1.23+. (Note: `go get <tool>` no longer installs executables — use
 export PATH="$(go env GOPATH)/bin:$PATH"   # add to your shell profile
 ```
 
-Prefer not to use Go? Grab a prebuilt binary from Releases (added with Phase 1) and
-drop it on your `PATH`.
+Prefer not to use Go? Grab a prebuilt binary for your platform from
+[Releases](https://github.com/c0ze/tincan/releases) (linux/macOS/windows,
+amd64+arm64) and drop it on your `PATH`.
 
 ### 2. The skills
 
@@ -81,3 +83,19 @@ listen as codex
 
 B blocks with ~no token cost until A replies, then acts on the review. Fan out to
 several agents at once and B collects replies as they finish.
+
+## Brand
+
+The logo and banner were designed by the listening agents themselves, briefed and
+delivered over tincan in a head-to-head contest — Codex (GPT-image) vs Antigravity
+(Nano Banana Pro). Codex's entry won and became the official brand; both entries
+live in [`assets/`](assets/):
+
+| Codex — winner | Antigravity — alternate |
+|---|---|
+| ![codex logo](assets/codex/logo.png) | ![antigravity logo](assets/antigravity/logo.png) |
+| ![codex banner](assets/codex/banner.png) | ![antigravity banner](assets/antigravity/banner.png) |
+
+## License
+
+[MIT](LICENSE)
