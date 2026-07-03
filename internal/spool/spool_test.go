@@ -361,6 +361,234 @@ func TestQuarantinesCorruptMessage(t *testing.T) {
 	}
 }
 
+// waitForPresenceFile polls until <root>/present/<name> exists or the
+// deadline elapses, so tests don't race the goroutine that starts Recv.
+func waitForPresenceFile(t *testing.T, root, name string) {
+	t.Helper()
+	path := filepath.Join(root, ".tincan", "present", name)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("presence file %s never appeared", path)
+}
+
+func TestListPresenceReflectsParkedRecvWithLivePID(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Blocks until we send below; timeout is generous so the assertions
+		// below (which run while Recv is still parked) have time to happen.
+		if _, err := sp.Recv("b", 10*time.Second, false); err != nil {
+			t.Errorf("Recv: %v", err)
+		}
+	}()
+	waitForPresenceFile(t, room, "b")
+
+	list, err := sp.ListPresence()
+	if err != nil {
+		t.Fatalf("ListPresence: %v", err)
+	}
+	var got *Presence
+	for i := range list {
+		if list[i].Name == "b" {
+			got = &list[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("ListPresence did not include parked name %q: %+v", "b", list)
+	}
+	if got.PID != os.Getpid() {
+		t.Fatalf("PID = %d, want %d", got.PID, os.Getpid())
+	}
+	if !got.Alive {
+		t.Fatal("Alive = false, want true for os.Getpid()")
+	}
+	if got.Since.IsZero() {
+		t.Fatal("Since is zero")
+	}
+
+	// Unblock the parked Recv so the goroutine and test can finish cleanly.
+	if err := sp.Send(msg("a", "b", "wake", 1)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Recv did not return after Send")
+	}
+}
+
+func TestPresenceFileRemovedAfterRecvReturnsMessage(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := sp.Recv("b", 10*time.Second, false); err != nil {
+			t.Errorf("Recv: %v", err)
+		}
+	}()
+	waitForPresenceFile(t, room, "b")
+
+	if err := sp.Send(msg("a", "b", "wake", 1)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Recv did not return after Send")
+	}
+
+	if _, err := os.Stat(filepath.Join(room, ".tincan", "present", "b")); !os.IsNotExist(err) {
+		t.Fatalf("presence file still exists after Recv returned (err=%v)", err)
+	}
+}
+
+func TestListPresenceMarksDeadPIDNotAlive(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+	presentDir := filepath.Join(room, ".tincan", "present")
+	if err := os.MkdirAll(presentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := fmt.Sprintf(`{"pid":%d,"since":%q}`, 1<<30, time.Now().UTC().Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(presentDir, "ghost"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	list, err := sp.ListPresence()
+	if err != nil {
+		t.Fatalf("ListPresence: %v", err)
+	}
+	var got *Presence
+	for i := range list {
+		if list[i].Name == "ghost" {
+			got = &list[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("ListPresence did not include %q: %+v", "ghost", list)
+	}
+	if got.Alive {
+		t.Fatal("Alive = true for a definitely-dead pid, want false")
+	}
+}
+
+func TestListPresenceIncludesQueuedNameWithoutPresence(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	if err := sp.Send(msg("a", "b", "queued", 1)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	list, err := sp.ListPresence()
+	if err != nil {
+		t.Fatalf("ListPresence: %v", err)
+	}
+	var got *Presence
+	for i := range list {
+		if list[i].Name == "b" {
+			got = &list[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("ListPresence did not include %q: %+v", "b", list)
+	}
+	if got.Queued != 1 {
+		t.Fatalf("Queued = %d, want 1", got.Queued)
+	}
+	if got.Alive {
+		t.Fatal("Alive = true for a name with no presence file")
+	}
+}
+
+func TestListPresenceSortedByName(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	for _, name := range []string{"zeta", "alpha", "mid"} {
+		if err := sp.Send(msg("a", name, "x", 1)); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+	}
+	list, err := sp.ListPresence()
+	if err != nil {
+		t.Fatalf("ListPresence: %v", err)
+	}
+	var names []string
+	for _, p := range list {
+		names = append(names, p.Name)
+	}
+	if !sort.StringsAreSorted(names) {
+		t.Fatalf("ListPresence not sorted: %v", names)
+	}
+}
+
+func TestPresentReturnsFalseForUnknownName(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	_, ok, err := sp.Present("nobody")
+	if err != nil {
+		t.Fatalf("Present: %v", err)
+	}
+	if ok {
+		t.Fatal("Present(\"nobody\") ok = true, want false")
+	}
+}
+
+func TestPresentReturnsFalseForDeadPIDPresenceFile(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+	presentDir := filepath.Join(room, ".tincan", "present")
+	if err := os.MkdirAll(presentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := fmt.Sprintf(`{"pid":%d,"since":%q}`, 1<<30, time.Now().UTC().Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(presentDir, "ghost"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, ok, err := sp.Present("ghost")
+	if err != nil {
+		t.Fatalf("Present: %v", err)
+	}
+	if ok {
+		t.Fatal("Present(\"ghost\") ok = true for a definitely-dead pid, want false")
+	}
+}
+
+func TestPresentReturnsTrueForLivePresenceFile(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := sp.Recv("b", 10*time.Second, false); err != nil {
+			t.Errorf("Recv: %v", err)
+		}
+	}()
+	waitForPresenceFile(t, room, "b")
+
+	p, ok, err := sp.Present("b")
+	if err != nil {
+		t.Fatalf("Present: %v", err)
+	}
+	if !ok {
+		t.Fatal("Present(\"b\") ok = false, want true")
+	}
+	if p.PID != os.Getpid() || !p.Alive {
+		t.Fatalf("Present(\"b\") = %+v, want live os.Getpid()", p)
+	}
+
+	if err := sp.Send(msg("a", "b", "wake", 1)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Recv did not return after Send")
+	}
+}
+
 func TestRenameFailureSurfacesAsError(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("directory permission semantics differ on Windows")

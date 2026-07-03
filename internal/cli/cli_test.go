@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/c0ze/tincan/internal/envelope"
+	"github.com/c0ze/tincan/internal/spool"
 )
 
 // run invokes the CLI and returns (exit code, stdout, stderr).
@@ -218,6 +221,120 @@ func TestBodyFileReadErrorExitsOne(t *testing.T) {
 		"--body-file", "/nonexistent-tincan-body")
 	if code != 1 {
 		t.Fatalf("want exit 1 for unreadable --body-file, got %d (stderr=%q)", code, stderr)
+	}
+}
+
+// writePresenceFile writes <room>/.tincan/present/<name> directly, in the
+// same on-disk JSON shape spool.Recv's heartbeat produces, so CLI tests stay
+// hermetic (no spawned processes, no parking a real Recv).
+func writePresenceFile(t *testing.T, room, name string, pid int, since time.Time) {
+	t.Helper()
+	dir := filepath.Join(room, ".tincan", "present")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := fmt.Sprintf(`{"pid":%d,"since":%q}`, pid, since.UTC().Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPingExitsZeroForLivePresence(t *testing.T) {
+	room := t.TempDir()
+	writePresenceFile(t, room, "codex", os.Getpid(), time.Now())
+	code, stdout, stderr := run("ping", "--room", room, "--to", "codex")
+	if code != ExitOK {
+		t.Fatalf("ping exit %d, want %d; stderr=%q", code, ExitOK, stderr)
+	}
+	want := fmt.Sprintf("present pid=%d", os.Getpid())
+	if strings.TrimSpace(stdout) != want {
+		t.Fatalf("ping stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestPingExitsOneForAbsentPresence(t *testing.T) {
+	room := t.TempDir()
+	code, stdout, _ := run("ping", "--room", room, "--to", "nobody")
+	if code != ExitError {
+		t.Fatalf("ping exit %d, want %d", code, ExitError)
+	}
+	if strings.TrimSpace(stdout) != "absent" {
+		t.Fatalf("ping stdout = %q, want %q", stdout, "absent")
+	}
+}
+
+func TestPingExitsOneForDeadPIDPresence(t *testing.T) {
+	room := t.TempDir()
+	writePresenceFile(t, room, "ghost", 1<<30, time.Now())
+	code, stdout, _ := run("ping", "--room", room, "--to", "ghost")
+	if code != ExitError {
+		t.Fatalf("ping exit %d, want %d", code, ExitError)
+	}
+	if strings.TrimSpace(stdout) != "absent" {
+		t.Fatalf("ping stdout = %q, want %q", stdout, "absent")
+	}
+}
+
+func TestPingRequiresTo(t *testing.T) {
+	if code, _, _ := run("ping", "--room", t.TempDir()); code != ExitUsage {
+		t.Fatalf("ping without --to: want exit %d, got %d", ExitUsage, code)
+	}
+}
+
+func TestStatusListsQueuedNameWithoutPresence(t *testing.T) {
+	room := t.TempDir()
+	if code, _, stderr := run("send", "--room", room, "--to", "codex", "--from", "orch", "--body", "hi"); code != 0 {
+		t.Fatalf("send failed: %s", stderr)
+	}
+	code, stdout, stderr := run("status", "--room", room)
+	if code != ExitOK {
+		t.Fatalf("status exit %d, want %d; stderr=%q", code, ExitOK, stderr)
+	}
+	if !strings.Contains(stdout, "codex") {
+		t.Fatalf("status output missing name %q: %q", "codex", stdout)
+	}
+	if !strings.Contains(stdout, "1") {
+		t.Fatalf("status output missing queued count: %q", stdout)
+	}
+}
+
+func TestStatusEmptyRoomExitsOK(t *testing.T) {
+	code, _, stderr := run("status", "--room", t.TempDir())
+	if code != ExitOK {
+		t.Fatalf("status on empty room exit %d, want %d; stderr=%q", code, ExitOK, stderr)
+	}
+}
+
+func TestStatusJSONFormatRoundTrips(t *testing.T) {
+	room := t.TempDir()
+	if code, _, stderr := run("send", "--room", room, "--to", "codex", "--from", "orch", "--body", "hi"); code != 0 {
+		t.Fatalf("send failed: %s", stderr)
+	}
+	writePresenceFile(t, room, "codex", os.Getpid(), time.Now())
+	code, stdout, stderr := run("status", "--room", room, "--format", "json")
+	if code != ExitOK {
+		t.Fatalf("status exit %d, want %d; stderr=%q", code, ExitOK, stderr)
+	}
+	var got []spool.Presence
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("status --format json output does not parse: %v\n%s", err, stdout)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 presence entry, got %d: %+v", len(got), got)
+	}
+	if got[0].Name != "codex" || got[0].Queued != 1 || !got[0].Alive || got[0].PID != os.Getpid() {
+		t.Fatalf("unexpected presence entry: %+v", got[0])
+	}
+}
+
+func TestStatusUsageErrors(t *testing.T) {
+	cases := [][]string{
+		{"status", "--format", "yaml"},
+	}
+	for _, args := range cases {
+		if code, _, _ := run(args...); code != ExitUsage {
+			t.Fatalf("args %v: want exit %d, got %d", args, ExitUsage, code)
+		}
 	}
 }
 

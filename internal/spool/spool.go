@@ -3,6 +3,7 @@
 package spool
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -36,8 +37,9 @@ func (s *Spool) InboxDir(name string) string {
 	return filepath.Join(s.root, "inbox", name)
 }
 
-func (s *Spool) tmpDir() string { return filepath.Join(s.root, "tmp") }
-func (s *Spool) logDir() string { return filepath.Join(s.root, "log") }
+func (s *Spool) tmpDir() string     { return filepath.Join(s.root, "tmp") }
+func (s *Spool) logDir() string     { return filepath.Join(s.root, "log") }
+func (s *Spool) presentDir() string { return filepath.Join(s.root, "present") }
 
 // validName rejects names that could escape the spool root: a name must be a
 // single, portable path component (no separators on any OS, no traversal).
@@ -92,6 +94,8 @@ func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*env
 	if err := validName(name); err != nil {
 		return nil, err
 	}
+	s.writePresence(name)
+	defer s.removePresence(name)
 	inbox := s.InboxDir(name)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -260,4 +264,129 @@ func (s *Spool) RemoveInbox(name string) error {
 		return err
 	}
 	return os.RemoveAll(s.InboxDir(name))
+}
+
+// Presence describes one name's listener state, as reported by `status`/`ping`.
+type Presence struct {
+	Name   string    `json:"name"`
+	PID    int       `json:"pid"`
+	Since  time.Time `json:"since"`
+	Queued int       `json:"queued"`
+	Alive  bool      `json:"alive"`
+}
+
+// presenceFile is the on-disk JSON shape of <root>/present/<name>.
+type presenceFile struct {
+	PID   int       `json:"pid"`
+	Since time.Time `json:"since"`
+}
+
+// writePresence records that a Recv for name is parked right now: it writes
+// <root>/present/<name> atomically (tmp/ then rename), mirroring Send. This
+// is a heartbeat, not part of message delivery, so any failure here is
+// swallowed — it must never change Recv's success/err/timeout result.
+func (s *Spool) writePresence(name string) {
+	for _, dir := range []string{s.presentDir(), s.tmpDir()} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return
+		}
+	}
+	data, err := json.Marshal(presenceFile{PID: os.Getpid(), Since: time.Now().UTC()})
+	if err != nil {
+		return
+	}
+	tmp := filepath.Join(s.tmpDir(), "present-"+envelope.NewID())
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return
+	}
+	if err := os.Rename(tmp, filepath.Join(s.presentDir(), name)); err != nil {
+		os.Remove(tmp) // best-effort: don't leak the tmp file on a failed rename
+	}
+}
+
+// removePresence clears the presence file written by writePresence. Called
+// via defer on every Recv exit path (message, timeout, error); best-effort,
+// like writePresence.
+func (s *Spool) removePresence(name string) {
+	os.Remove(filepath.Join(s.presentDir(), name))
+}
+
+// ListPresence returns Presence for the union of names that have an inbox
+// directory and/or a live present/<name> file, sorted by name.
+func (s *Spool) ListPresence() ([]Presence, error) {
+	names := map[string]bool{}
+	inboxRoot := filepath.Join(s.root, "inbox")
+	inboxEntries, err := os.ReadDir(inboxRoot)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	for _, ent := range inboxEntries {
+		if ent.IsDir() {
+			names[ent.Name()] = true
+		}
+	}
+	presentEntries, err := os.ReadDir(s.presentDir())
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	for _, ent := range presentEntries {
+		if !ent.IsDir() {
+			names[ent.Name()] = true
+		}
+	}
+	list := make([]Presence, 0, len(names))
+	for name := range names {
+		p, err := s.presenceFor(name)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, p)
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
+	return list, nil
+}
+
+// Present returns the presence for one name; the second return is false if
+// no live presence file exists for it (the name may still have a queue).
+func (s *Spool) Present(name string) (Presence, bool, error) {
+	if err := validName(name); err != nil {
+		return Presence{}, false, err
+	}
+	p, err := s.presenceFor(name)
+	if err != nil {
+		return Presence{}, false, err
+	}
+	return p, p.Alive, nil
+}
+
+// presenceFor builds the Presence for one name: queued count from its inbox,
+// plus pid/since/alive parsed from its present/<name> file, if any.
+func (s *Spool) presenceFor(name string) (Presence, error) {
+	p := Presence{Name: name}
+	entries, err := os.ReadDir(s.InboxDir(name))
+	if err != nil && !os.IsNotExist(err) {
+		return Presence{}, err
+	}
+	for _, ent := range entries {
+		if !ent.IsDir() && strings.HasSuffix(ent.Name(), ".json") {
+			p.Queued++
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(s.presentDir(), name))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return p, nil
+		}
+		return Presence{}, err
+	}
+	var pf presenceFile
+	if err := json.Unmarshal(data, &pf); err != nil {
+		// A malformed presence file (e.g. torn write) is reported as absent
+		// rather than a request-wide error: it self-heals on the next Recv.
+		return p, nil
+	}
+	p.PID = pf.PID
+	p.Since = pf.Since
+	p.Alive = processAlive(pf.PID)
+	return p, nil
 }

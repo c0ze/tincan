@@ -16,6 +16,9 @@ that the `/tell` and `/listen` skills point to.
 - Unread messages **queue**; a receive that times out and re-arms loses nothing.
 - **Replies** use an ephemeral per-request channel (`r-<id>`) so parallel requests
   never cross.
+- While a receive is parked, its process writes a small presence file at
+  `<room>/.tincan/present/<name>` (separate from the inbox) so `status`/`ping`
+  can answer "is a listener parked?" without sending a message — see below.
 
 ## Rooms — always pass the repo root
 
@@ -30,13 +33,15 @@ bare will silently create a *second* room there. Always pass the room explicitly
 ## CLI
 
 ```
-tincan recv  --as <name>   [--timeout <sec=570>] [--format json|body] [--log]
-tincan ask   --to <name> --from <name> (--body <s> | --body-file <f>)
-             [--timeout <sec=570>] [--format json|body] [--artifact <path>]...
-tincan reply --channel <reply_to> (--body <s> | --body-file <f>)
-             [--from <name>] [--artifact <path>]...
-tincan send  --to <name> --from <name> (--body <s> | --body-file <f>)
-             [--corr <id>] [--reply-to <channel>] [--artifact <path>]...
+tincan recv   --as <name>   [--timeout <sec=570>] [--format json|body] [--log]
+tincan ask    --to <name> --from <name> (--body <s> | --body-file <f>)
+              [--timeout <sec=570>] [--format json|body] [--artifact <path>]...
+tincan reply  --channel <reply_to> (--body <s> | --body-file <f>)
+              [--from <name>] [--artifact <path>]...
+tincan send   --to <name> --from <name> (--body <s> | --body-file <f>)
+              [--corr <id>] [--reply-to <channel>] [--artifact <path>]...
+tincan status [--format table|json]
+tincan ping   --to <name>
 ```
 
 All commands take `--room <path>` (see above; default `.`).
@@ -55,9 +60,43 @@ All commands take `--room <path>` (see above; default `.`).
   turn that re-reads full context. Use `--timeout 0` wherever your harness can run
   the receive in the background or as a genuinely long-running foreground call;
   otherwise pick the longest timeout your harness's cap allows.
+- `status`/`ping` are read-only observability: they answer "is a listener
+  actually parked on `recv`?" without sending a message (zero agent wake). See
+  below.
 
 **Exit codes: 0 ok, 1 error, 2 usage, 3 timeout.** Branch on these: 3 means
 "nothing arrived / no reply yet", never an error.
+
+## Presence — `status` / `ping`
+
+Before `status`/`ping`, checking "is a listener alive?" meant `ps` plus a
+round-trip `ask`/`reply` — a real message, a real agent wake. `status` and
+`ping` answer it for free: a `Recv` writes a small presence file for the
+duration it is parked (`<room>/.tincan/present/<name>`, holding its pid and
+a since-timestamp), and these commands just read that file plus a
+pid-liveness check. **No message is sent; nothing wakes an agent.**
+
+```
+tincan status [--room <path>] [--format table|json]
+tincan ping   --to <name> [--room <path>]
+```
+
+- `status` lists every name that has a queue and/or a live listener: name,
+  queued count, listener state (`parked` or `—`), pid, and how long it's been
+  parked. `--format json` prints the same data as a JSON array (one object
+  per name) for scripting.
+- `ping --to <name>` is the single-name yes/no form: prints `present
+  pid=<n>` and exits `0` if a live listener is parked for `<name>`, or
+  prints `absent` and exits `1` otherwise.
+- "Parked" means a `recv` (or the receive half of `ask`) is blocked waiting
+  right now — not "the agent is running", "busy processing a message" also
+  shows as not-parked. A listener that re-arms in a loop (see below) is
+  "parked" during each wait and briefly "—" between messages; that's
+  expected, not a bug.
+- A presence file surviving its process (e.g. the listener was killed rather
+  than exiting normally) is detected and reported as absent: `status`/`ping`
+  also check that the recorded pid is actually alive, so a crashed listener
+  doesn't linger as a false "parked" row.
 
 ## Starting a listener, per agent
 
@@ -139,5 +178,7 @@ machine with a trusted orchestrator; think before widening that boundary.
   request is still queued and the channel persists — collect later with
   `tincan recv --as r-<id>`, or re-ask.
 - Nothing happens: confirm both sides use the **same room path** (see Rooms above)
-  and the listener is actually parked on `recv`.
+  and the listener is actually parked on `recv` — check with
+  `tincan ping --to <name> --room <path>` or `tincan status --room <path>`
+  instead of guessing from `ps`.
 - `invalid name`: names are single path components; no slashes or dots.

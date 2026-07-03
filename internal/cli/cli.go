@@ -2,12 +2,15 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/c0ze/tincan/internal/envelope"
@@ -25,10 +28,12 @@ const (
 const usageText = `tincan — local message passing between AI coding agents
 
 Usage:
-  tincan send  --to <name> --from <name> (--body <s> | --body-file <f>) [flags]
-  tincan recv  --as <name> [--timeout <sec>] [--format json|body] [--log] [flags]
-  tincan ask   --to <name> --from <name> (--body <s> | --body-file <f>) [--timeout <sec>] [flags]
-  tincan reply --channel <id> (--body <s> | --body-file <f>) [--from <name>] [flags]
+  tincan send   --to <name> --from <name> (--body <s> | --body-file <f>) [flags]
+  tincan recv   --as <name> [--timeout <sec>] [--format json|body] [--log] [flags]
+  tincan ask    --to <name> --from <name> (--body <s> | --body-file <f>) [--timeout <sec>] [flags]
+  tincan reply  --channel <id> (--body <s> | --body-file <f>) [--from <name>] [flags]
+  tincan status [--format table|json] [flags]
+  tincan ping   --to <name> [flags]
 
 Common flags:
   --room <path>       room directory (default: current directory)
@@ -52,6 +57,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdAsk(args[1:], stdout, stderr)
 	case "reply":
 		return cmdReply(args[1:], stdout, stderr)
+	case "status":
+		return cmdStatus(args[1:], stdout, stderr)
+	case "ping":
+		return cmdPing(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usageText)
 		return ExitOK
@@ -283,5 +292,91 @@ func cmdReply(args []string, stdout, stderr io.Writer) int {
 		return ExitError
 	}
 	fmt.Fprintf(stdout, "replied channel=%s\n", *channel)
+	return ExitOK
+}
+
+func cmdStatus(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		room   = fs.String("room", ".", "room directory")
+		format = fs.String("format", "table", "output format: table|json")
+	)
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if *format != "table" && *format != "json" {
+		fmt.Fprintln(stderr, "tincan status: --format must be table or json")
+		return ExitUsage
+	}
+	sp, err := spool.Open(*room)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan status: %v\n", err)
+		return ExitError
+	}
+	list, err := sp.ListPresence()
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan status: %v\n", err)
+		return ExitError
+	}
+	if *format == "json" {
+		data, err := json.MarshalIndent(list, "", "  ")
+		if err != nil {
+			fmt.Fprintf(stderr, "tincan status: %v\n", err)
+			return ExitError
+		}
+		fmt.Fprintln(stdout, string(data))
+		return ExitOK
+	}
+	printStatusTable(list, stdout)
+	return ExitOK
+}
+
+// printStatusTable renders presences as a tab-aligned table: name, queued
+// count, listener state (parked/—), pid (or -), and parked-since age.
+func printStatusTable(list []spool.Presence, stdout io.Writer) {
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tQUEUED\tSTATE\tPID\tSINCE")
+	for _, p := range list {
+		state, pid, since := "—", "-", "-"
+		if p.Alive {
+			state = "parked"
+			pid = strconv.Itoa(p.PID)
+			since = time.Since(p.Since).Round(time.Second).String() + " ago"
+		}
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\n", p.Name, p.Queued, state, pid, since)
+	}
+	tw.Flush()
+}
+
+func cmdPing(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("ping", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		to   = fs.String("to", "", "name to check")
+		room = fs.String("room", ".", "room directory")
+	)
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if *to == "" {
+		fmt.Fprintln(stderr, "tincan ping: --to is required")
+		return ExitUsage
+	}
+	sp, err := spool.Open(*room)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan ping: %v\n", err)
+		return ExitError
+	}
+	p, ok, err := sp.Present(*to)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan ping: %v\n", err)
+		return ExitError
+	}
+	if !ok {
+		fmt.Fprintln(stdout, "absent")
+		return ExitError
+	}
+	fmt.Fprintf(stdout, "present pid=%d\n", p.PID)
 	return ExitOK
 }
