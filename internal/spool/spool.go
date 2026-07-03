@@ -4,11 +4,15 @@ package spool
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/c0ze/tincan/internal/envelope"
+	"github.com/fsnotify/fsnotify"
 )
 
 // Spool is a room's message store rooted at <room>/.tincan.
@@ -61,4 +65,91 @@ func (s *Spool) Send(e *envelope.Envelope) error {
 		return err
 	}
 	return os.Rename(tmp, filepath.Join(inbox, name))
+}
+
+// ErrTimeout is returned by Recv when no message arrives within the timeout.
+var ErrTimeout = errors.New("tincan: recv timeout")
+
+// Recv blocks until one message is available in name's inbox, claims it,
+// removes it from the spool (or moves it to log/ when logConsumed), and
+// returns it. Returns ErrTimeout if nothing arrives within timeout.
+func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*envelope.Envelope, error) {
+	inbox := s.InboxDir(name)
+	if err := os.MkdirAll(inbox, 0o755); err != nil {
+		return nil, err
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, err
+	}
+	defer watcher.Close()
+	// Watch before scanning, so a message landing mid-scan is never missed.
+	if err := watcher.Add(inbox); err != nil {
+		return nil, err
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
+		e, ok, err := s.claimOldest(name, logConsumed)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return e, nil
+		}
+		select {
+		case <-watcher.Events:
+			// Inbox changed; rescan.
+		case werr := <-watcher.Errors:
+			return nil, werr
+		case <-deadline.C:
+			return nil, ErrTimeout
+		}
+	}
+}
+
+// claimOldest tries to claim the oldest message in name's inbox. The claim is
+// an atomic rename into tmp/, so concurrent receivers process each message
+// exactly once; losing a rename race just means trying the next file.
+func (s *Spool) claimOldest(name string, logConsumed bool) (*envelope.Envelope, bool, error) {
+	entries, err := os.ReadDir(s.InboxDir(name))
+	if err != nil {
+		return nil, false, err
+	}
+	var files []string
+	for _, ent := range entries {
+		if !ent.IsDir() && strings.HasSuffix(ent.Name(), ".json") {
+			files = append(files, ent.Name())
+		}
+	}
+	sort.Strings(files) // filenames sort chronologically
+	for _, f := range files {
+		if err := os.MkdirAll(s.tmpDir(), 0o755); err != nil {
+			return nil, false, err
+		}
+		claimed := filepath.Join(s.tmpDir(), fmt.Sprintf("claim-%s-%s", envelope.NewID(), f))
+		if err := os.Rename(filepath.Join(s.InboxDir(name), f), claimed); err != nil {
+			continue // another receiver claimed it first
+		}
+		data, err := os.ReadFile(claimed)
+		if err != nil {
+			return nil, false, err
+		}
+		e, err := envelope.Unmarshal(data)
+		if err != nil {
+			return nil, false, fmt.Errorf("tincan: bad message %s: %w", f, err)
+		}
+		if logConsumed {
+			if err := os.MkdirAll(s.logDir(), 0o755); err != nil {
+				return nil, false, err
+			}
+			if err := os.Rename(claimed, filepath.Join(s.logDir(), f)); err != nil {
+				return nil, false, err
+			}
+		} else if err := os.Remove(claimed); err != nil {
+			return nil, false, err
+		}
+		return e, true, nil
+	}
+	return nil, false, nil
 }
