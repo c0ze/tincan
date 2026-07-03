@@ -35,6 +35,11 @@ repo's root, every command prints a one-line advisory to stderr naming the
 repo root it found — the warning never fails the command or changes its exit
 code, it just flags the footgun before it silently splits your room in two.
 
+This warning is floored at `$HOME`: if the repo root it finds is your home
+directory or an ancestor of it (a `~/.git` dotfiles repo is the common case),
+nothing is printed — advising `--room ~` would be actively wrong. A real
+project repo below `$HOME` (e.g. `~/projects/foo`) still warns normally.
+
 ## CLI
 
 ```

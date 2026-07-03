@@ -124,6 +124,18 @@ func roomRootWarning(room string) string {
 		}
 		dir = parent
 		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			// Floor: don't warn when the discovered gitroot is $HOME or an
+			// ancestor of $HOME (e.g. a dotfiles repo at ~/.git, or / or
+			// /home). Advising "pass --room ~" would be actively wrong.
+			// Best-effort: if home can't be determined, don't floor.
+			if home, err := os.UserHomeDir(); err == nil && home != "" {
+				if rel, err := filepath.Rel(dir, home); err == nil {
+					goesUp := rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+					if !goesUp { // home == dir or nested under it ⇒ dir is $HOME or an ancestor
+						return ""
+					}
+				}
+			}
 			return fmt.Sprintf(
 				"tincan: warning: room %s is inside a repo but not its root; "+
 					"peers using the repo root won't see these messages (pass --room %s)",

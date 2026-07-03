@@ -496,3 +496,73 @@ func TestRoomRootWarningGitAsFileIsRoot(t *testing.T) {
 		t.Fatalf("want empty warning at worktree root %s (.git is a file), got %q", tmp, got)
 	}
 }
+
+func TestRoomRootWarningFlooredAtHome(t *testing.T) {
+	// gitroot == $HOME (the common dotfiles-in-~ case): the warning's own
+	// advice would be "pass --room ~", which is actively wrong, so it must
+	// be suppressed.
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.Mkdir(filepath.Join(tmpHome, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	sub := filepath.Join(tmpHome, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	if got := roomRootWarning(sub); got != "" {
+		t.Fatalf("want empty warning for %s (gitroot is $HOME %s), got %q", sub, tmpHome, got)
+	}
+}
+
+func TestRoomRootWarningNotFlooredBelowHome(t *testing.T) {
+	// gitroot strictly below $HOME (e.g. ~/projects/foo) is a genuine
+	// project repo — the floor must not suppress this real footgun.
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	gitroot := filepath.Join(tmpHome, "projects", "foo")
+	if err := os.MkdirAll(filepath.Join(gitroot, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	sub := filepath.Join(gitroot, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	got := roomRootWarning(sub)
+	if got == "" {
+		t.Fatalf("want non-empty warning for %s (gitroot %s is below $HOME), got empty", sub, gitroot)
+	}
+	resolvedGitroot, err := filepath.EvalSymlinks(gitroot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", gitroot, err)
+	}
+	if !strings.Contains(got, resolvedGitroot) {
+		t.Fatalf("warning %q does not name gitroot %q", got, resolvedGitroot)
+	}
+}
+
+func TestRoomRootWarningNotFlooredOutsideHome(t *testing.T) {
+	// gitroot is not above $HOME at all (a separate tree, $HOME elsewhere)
+	// — repos outside home still warn normally.
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	other := t.TempDir()
+	if err := os.Mkdir(filepath.Join(other, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	sub := filepath.Join(other, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	got := roomRootWarning(sub)
+	if got == "" {
+		t.Fatalf("want non-empty warning for %s (gitroot %s is outside $HOME %s), got empty", sub, other, tmpHome)
+	}
+	resolvedOther, err := filepath.EvalSymlinks(other)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", other, err)
+	}
+	if !strings.Contains(got, resolvedOther) {
+		t.Fatalf("warning %q does not name gitroot %q", got, resolvedOther)
+	}
+}
