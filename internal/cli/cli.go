@@ -180,11 +180,101 @@ func cmdRecv(args []string, stdout, stderr io.Writer) int {
 }
 
 func cmdAsk(args []string, stdout, stderr io.Writer) int {
-	fmt.Fprintln(stderr, "tincan ask: not implemented yet")
-	return ExitError
+	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		to       = fs.String("to", "", "recipient name")
+		from     = fs.String("from", "", "sender name")
+		room     = fs.String("room", ".", "room directory")
+		timeout  = fs.Int("timeout", 570, "seconds to wait for the reply")
+		format   = fs.String("format", "json", "output format: json|body")
+		body     = fs.String("body", "", "message body")
+		bodyFile = fs.String("body-file", "", "read body from file")
+	)
+	var artifacts stringList
+	fs.Var(&artifacts, "artifact", "artifact path (repeatable)")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if *to == "" || *from == "" {
+		fmt.Fprintln(stderr, "tincan ask: --to and --from are required")
+		return ExitUsage
+	}
+	b, err := bodyFrom(*body, *bodyFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
+		return ExitUsage
+	}
+	sp, err := spool.Open(*room)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
+		return ExitError
+	}
+	channel := "r-" + envelope.NewID()
+	e := &envelope.Envelope{
+		ID: envelope.NewID(), CorrID: channel, From: *from, To: *to,
+		ReplyTo: channel, TS: time.Now().UTC(), Body: b, Artifacts: artifacts,
+	}
+	if err := sp.Send(e); err != nil {
+		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
+		return ExitError
+	}
+	reply, err := sp.Recv(channel, time.Duration(*timeout)*time.Second, false)
+	if errors.Is(err, spool.ErrTimeout) {
+		// Leave the channel in place: a late reply still lands there and is
+		// collected with `tincan recv --as <channel>`.
+		fmt.Fprintf(stdout, "pending channel=%s\n", channel)
+		return ExitTimeout
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
+		return ExitError
+	}
+	code := printEnvelope(reply, *format, stdout, stderr)
+	if err := sp.RemoveInbox(channel); err != nil {
+		fmt.Fprintf(stderr, "tincan ask: cleanup: %v\n", err)
+		return ExitError
+	}
+	return code
 }
 
 func cmdReply(args []string, stdout, stderr io.Writer) int {
-	fmt.Fprintln(stderr, "tincan reply: not implemented yet")
-	return ExitError
+	fs := flag.NewFlagSet("reply", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		channel  = fs.String("channel", "", "reply channel (the request's reply_to)")
+		from     = fs.String("from", "", "sender name (optional)")
+		room     = fs.String("room", ".", "room directory")
+		body     = fs.String("body", "", "message body")
+		bodyFile = fs.String("body-file", "", "read body from file")
+	)
+	var artifacts stringList
+	fs.Var(&artifacts, "artifact", "artifact path (repeatable)")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if *channel == "" {
+		fmt.Fprintln(stderr, "tincan reply: --channel is required")
+		return ExitUsage
+	}
+	b, err := bodyFrom(*body, *bodyFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan reply: %v\n", err)
+		return ExitUsage
+	}
+	sp, err := spool.Open(*room)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan reply: %v\n", err)
+		return ExitError
+	}
+	e := &envelope.Envelope{
+		ID: envelope.NewID(), CorrID: *channel, From: *from, To: *channel,
+		TS: time.Now().UTC(), Body: b, Artifacts: artifacts,
+	}
+	if err := sp.Send(e); err != nil {
+		fmt.Fprintf(stderr, "tincan reply: %v\n", err)
+		return ExitError
+	}
+	fmt.Fprintf(stdout, "replied channel=%s\n", *channel)
+	return ExitOK
 }
