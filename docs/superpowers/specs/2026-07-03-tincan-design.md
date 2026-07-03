@@ -57,7 +57,7 @@ tincan is a **maildir-style spool**, not a socket and not a daemon. This choice 
 
 **Names** — each participant picks an identity string (`orch`, `codex`, `gemini`, …). Inboxes are keyed by name: `<room>/.tincan/inbox/<name>/`. Going from 2 to N participants is just more inbox directories.
 
-**Reply channels** — ephemeral per-request inboxes under `<room>/.tincan/reply/<channel-id>/`, used by `ask`/`reply` so parallel requests never share an inbox (see §8).
+**Reply channels** — ephemeral per-request inboxes in the *same* namespace, named `r-<id>` (i.e. `<room>/.tincan/inbox/r-<id>/`). `ask` mints one, `reply` answers into it, and a late reply is collected with the ordinary `recv --as r-<id>` — no separate channel concept in the spool (see §8).
 
 **Envelope** — one message = one JSON file:
 
@@ -86,7 +86,7 @@ Two primitives (`send`, `recv`) and two conveniences (`ask`, `reply`).
 tincan recv --as <name> [--room <path>] [--timeout <sec=570>] [--format json|body] [--log]
 ```
 
-Prints one message (JSON by default), deletes it, exits 0. On timeout, exits with a distinct nonzero status and no message (the caller re-arms). `--log` moves consumed messages to `<room>/.tincan/log/` instead of deleting.
+Prints one message (JSON by default), deletes it, exits 0. On timeout, exits **3** (distinct from usage/other errors) with no output — the caller re-arms. `--log` moves consumed messages to `<room>/.tincan/log/` instead of deleting.
 
 **`tincan send`** — deliver a message to a named inbox (queues if unread), then exit.
 
@@ -103,7 +103,7 @@ tincan ask --to <name> --from <name> [--room <path>] [--timeout <sec=570>]
            (--body <str> | --body-file <path>) [--artifact <path> ...]
 ```
 
-Internally: create `reply/<channel>`, `send --reply-to <channel>`, then `recv` on that channel. On timeout it leaves the channel in place and prints `pending channel=<id>`, so a late reply can be collected later with `recv`.
+Internally: mint channel `r-<id>`, `send --reply-to r-<id>`, then `recv --as r-<id>`. On timeout it leaves the channel in place and prints `pending channel=r-<id>`, so a late reply can be collected later with `tincan recv --as r-<id>`.
 
 **`tincan reply`** — a listener's response to a received message.
 
@@ -170,7 +170,7 @@ Some tasks return files, not text (e.g., image generation). tincan carries **coo
 - **Target not listening:** the message queues in its inbox. If the target never comes up, the orchestrator's `ask` times out and reports `pending`; the orchestrator decides to retry or skip. No message is lost — it stays queued, and the reply channel persists for late collection.
 - **Concurrent `recv` on one inbox:** the atomic-rename claim ensures exactly one receiver processes a given file.
 - **Half-written files:** never observed by receivers — delivery is temp-write-then-rename (atomic on one filesystem).
-- **Stale reply channels:** channels left by timed-out `ask`s are swept by age (a `tincan gc` / startup sweep removes `reply/*` older than a configurable TTL).
+- **Stale reply channels:** channels left by timed-out `ask`s are swept by age (a `tincan gc` / startup sweep removes `inbox/r-*` dirs older than a configurable TTL).
 - **Crash of any party:** no shared daemon to corrupt; queued files simply await the next receiver.
 - **Large instructions:** pass via `--body-file`; keep bodies to instructions/answers and artifacts as pointers.
 
