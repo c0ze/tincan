@@ -51,9 +51,27 @@ install_skills() {
     [ -d "$src" ] || { echo "!! missing $src" >&2; exit 1; }
     mkdir -p "$dst"
     cp "$src"/*.md "$dst"/
-    echo ">> installed skill: $dst"
+    echo ">> installed Claude skill: $dst"
   done
-  echo ">> Claude skills installed. Restart your Claude session, then use /tell and /listen."
+  echo ">> Claude: restart your session, then use /tell and /listen."
+
+  # Codex: custom prompts become /slash commands.
+  if [ -d "$HOME/.codex" ]; then
+    mkdir -p "$HOME/.codex/prompts"
+    cp "$REPO_DIR/skills/codex/listen.md" "$HOME/.codex/prompts/listen.md"
+    echo ">> installed Codex prompt: ~/.codex/prompts/listen.md (use /listen in Codex)"
+  else
+    echo "-- Codex not detected (~/.codex missing); skipped its /listen prompt."
+  fi
+
+  # Gemini CLI (and Antigravity if it reads gemini-style commands).
+  if [ -d "$HOME/.gemini" ]; then
+    mkdir -p "$HOME/.gemini/commands"
+    cp "$REPO_DIR/skills/gemini/listen.toml" "$HOME/.gemini/commands/listen.toml"
+    echo ">> installed Gemini command: ~/.gemini/commands/listen.toml (use /listen in Gemini CLI)"
+  else
+    echo "-- Gemini CLI not detected (~/.gemini missing); skipped its /listen command."
+  fi
 }
 
 [ "$DO_BIN" = 1 ] && install_bin

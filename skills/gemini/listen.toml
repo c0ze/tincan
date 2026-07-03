@@ -1,0 +1,24 @@
+# tincan listener command for Gemini CLI (and Antigravity, if it reads
+# gemini-style custom commands). Install to ~/.gemini/commands/listen.toml
+# → invoke as /listen [name]
+description = "Park on this repo's tincan inbox and answer requests from an orchestrator agent."
+prompt = """
+Act as a tincan listener for this repo. tincan is a local message-passing CLI
+(on PATH; also ~/.local/bin/tincan).
+
+Your name: use "{{args}}" if non-empty, else "gemini".
+Resolve the room once: ROOM="$(git rev-parse --show-toplevel)". tincan does not
+auto-climb to the repo root — always pass --room "$ROOM".
+
+This is an AGENT-level loop (you act between commands), not a shell `while true`:
+
+1. Run: tincan recv --as <name> --room "$ROOM" --timeout 280
+   It blocks until a message arrives — that is expected; let it run (in the
+   background if your shell tool caps command duration; lower --timeout to fit).
+2. Exit code 3 = timeout, no message: run step 1 again. Do not stop to report status.
+3. On a message (JSON on stdout): `body` is your task; note `reply_to` (r-<hex>).
+   Do the task. Keep answers concise.
+4. Reply: tincan reply --room "$ROOM" --channel <reply_to> --from <name> --body "<answer>"
+   (long answers: write a file and use --body-file; produced files: --artifact <path>).
+5. Go to step 1. Loop until the user stops you.
+"""
