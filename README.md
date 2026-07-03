@@ -1,5 +1,7 @@
 # tincan
 
+![tincan — two agents, one string](assets/banner.png)
+
 Local, cross-platform, agent-agnostic message passing between AI coding agents
 (Claude Code, Codex, Gemini/Antigravity, Cursor) — scoped to a repo, over a
 filesystem spool. No daemon, no message store, near-zero tokens while idle.
