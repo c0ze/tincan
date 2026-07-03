@@ -5,6 +5,7 @@ package spool
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -75,21 +76,30 @@ var ErrTimeout = errors.New("tincan: recv timeout")
 // returns it. Returns ErrTimeout if nothing arrives within timeout.
 func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*envelope.Envelope, error) {
 	inbox := s.InboxDir(name)
-	if err := os.MkdirAll(inbox, 0o755); err != nil {
-		return nil, err
-	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
 	defer watcher.Close()
-	// Watch before scanning, so a message landing mid-scan is never missed.
-	if err := watcher.Add(inbox); err != nil {
-		return nil, err
-	}
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
+	// Arming the watch can fail transiently on the kqueue backend: Add lstats
+	// each child, so a peer receiver renaming a file out mid-Add yields
+	// ENOENT. That churn just means the inbox is being drained — rescan and
+	// re-arm rather than failing the receive.
+	armed := false
 	for {
+		if !armed {
+			if err := os.MkdirAll(inbox, 0o755); err != nil {
+				return nil, err
+			}
+			switch err := watcher.Add(inbox); {
+			case err == nil:
+				armed = true
+			case !errors.Is(err, fs.ErrNotExist):
+				return nil, err
+			}
+		}
 		e, ok, err := s.claimOldest(name, logConsumed)
 		if err != nil {
 			return nil, err
@@ -97,10 +107,25 @@ func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*env
 		if ok {
 			return e, nil
 		}
+		if !armed {
+			// Nothing to claim and the watch isn't armed yet: back off
+			// briefly, then retry arming. Bounded by the deadline.
+			select {
+			case <-time.After(10 * time.Millisecond):
+			case <-deadline.C:
+				return nil, ErrTimeout
+			}
+			continue
+		}
 		select {
 		case <-watcher.Events:
 			// Inbox changed; rescan.
 		case werr := <-watcher.Errors:
+			if errors.Is(werr, fs.ErrNotExist) {
+				// Transient kqueue churn (a watched file was claimed by a
+				// peer); rescan.
+				continue
+			}
 			return nil, werr
 		case <-deadline.C:
 			return nil, ErrTimeout
