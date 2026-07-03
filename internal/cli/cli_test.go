@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/c0ze/tincan/internal/envelope"
 )
@@ -65,6 +66,39 @@ func TestRecvTimeoutExitsThreeSilently(t *testing.T) {
 	}
 	if stderr != "" {
 		t.Fatalf("want no stderr on timeout, got %q", stderr)
+	}
+}
+
+func TestRecvZeroTimeoutBlocksUntilMessageArrives(t *testing.T) {
+	room := t.TempDir()
+	type recvResult struct {
+		code   int
+		stdout string
+		stderr string
+	}
+	done := make(chan recvResult, 1)
+	go func() {
+		code, stdout, stderr := run("recv", "--room", room, "--as", "codex",
+			"--timeout", "0", "--format", "body")
+		done <- recvResult{code, stdout, stderr}
+	}()
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		if code, _, stderr := run("send", "--room", room, "--to", "codex", "--from", "orch",
+			"--body", "no re-arm needed"); code != 0 {
+			t.Errorf("send failed: exit %d, stderr=%q", code, stderr)
+		}
+	}()
+	select {
+	case r := <-done:
+		if r.code != 0 {
+			t.Fatalf("recv --timeout 0 exit %d, stderr=%q", r.code, r.stderr)
+		}
+		if strings.TrimSpace(r.stdout) != "no re-arm needed" {
+			t.Fatalf("recv --timeout 0 body = %q", r.stdout)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("recv --timeout 0 hung instead of blocking-then-returning on the delayed send")
 	}
 }
 

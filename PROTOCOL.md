@@ -49,6 +49,12 @@ All commands take `--room <path>` (see above; default `.`).
 - `send --corr/--reply-to` exist for hand-rolled request/reply metadata; normally
   `ask`/`reply` manage these for you.
 - `reply --from` records who answered; recommended.
+- `--timeout 0` (or negative) on `recv`/`ask` means **block until a message
+  arrives — no deadline, no re-arm.** fsnotify already wakes instantly on a real
+  message, so a timeout buys no latency, only cost: every re-arm is a fresh agent
+  turn that re-reads full context. Use `--timeout 0` wherever your harness can run
+  the receive in the background or as a genuinely long-running foreground call;
+  otherwise pick the longest timeout your harness's cap allows.
 
 **Exit codes: 0 ok, 1 error, 2 usage, 3 timeout.** Branch on these: 3 means
 "nothing arrived / no reply yet", never an error.
@@ -74,12 +80,17 @@ The loop below is **your** loop (the agent's), not a `while true` in bash. A she
 loop cannot hand the task back to your reasoning context. Each iteration: run one
 blocking `recv`, act on what it returns, reply, then run the next `recv`.
 
-If your harness caps foreground command duration, run the `recv` **in the
-background / async** and yield; act when it completes. Otherwise a foreground call
-is fine. Either way, pick `--timeout` to fit under your harness's cap.
+If your harness can run the `recv` **in the background / long-running** (async, or
+a foreground call with no duration cap), use `--timeout 0`: it blocks until a
+message arrives, with no re-arm in between. A positive timeout costs one agent
+re-arm — a full-context re-read — per timeout window, for zero latency benefit
+(fsnotify wakes instantly on a real message regardless). Only use a positive
+timeout, sized to fit under the cap, when your harness caps foreground command
+duration and you cannot background the call.
 
-1. `tincan recv --as <me> --room "$(git rev-parse --show-toplevel)" --timeout 280`
-2. **Exit 3 (timeout):** run step 1 again. Do not report status in between.
+1. `tincan recv --as <me> --room "$(git rev-parse --show-toplevel)" --timeout 0`
+2. **Exit 3 (timeout, positive-timeout mode only):** run step 1 again. Do not
+   report status in between.
 3. **On a message** (JSON): `body` is the task; note `reply_to` (`r-<hex>`). Do the
    work — review the diff, answer the question, generate the file.
 4. `tincan reply --channel <reply_to> --from <me> --body-file answer.md`

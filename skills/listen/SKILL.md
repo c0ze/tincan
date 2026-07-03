@@ -23,11 +23,16 @@ requests from an orchestrator, reply, and immediately go back to listening. See
 Do not write `while true` in bash: a shell loop can't hand tasks back to your
 reasoning context. Each iteration is one blocking command, then you act.
 
-1. Run: `tincan recv --as <name> --room "$ROOM" --timeout 280`
-   - Blocks at **no token cost** until a message arrives or it times out.
-   - If your foreground command duration is capped, run it in the background and
-     yield; act when it completes. Keep `--timeout` under the cap either way.
-2. **Exit 3 (timeout, no message):** run step 1 again. Don't stop to report status.
+1. Run: `tincan recv --as <name> --room "$ROOM" --timeout 0`
+   - Blocks at **no token cost** until a message arrives. `--timeout 0` means no
+     deadline — recommended whenever you can run this in the background or as a
+     long-running foreground call, since fsnotify already wakes instantly on a
+     real message and a timeout only adds cost, never latency: every re-arm after
+     a timeout is a fresh agent turn that re-reads full context.
+   - Only fall back to a positive `--timeout` (sized under the cap) if your
+     harness caps foreground command duration and you cannot background the call.
+2. **Exit 3 (timeout, positive-timeout mode only):** run step 1 again. Don't stop
+   to report status.
 3. **On a message:** parse the JSON — `body` is the task, `reply_to` is the reply
    channel (`r-<hex>`). Do exactly what's asked: review the diff/PR, answer the
    question, generate the artifact into the repo.

@@ -86,7 +86,8 @@ var ErrTimeout = errors.New("tincan: recv timeout")
 
 // Recv blocks until one message is available in name's inbox, claims it,
 // removes it from the spool (or moves it to log/ when logConsumed), and
-// returns it. Returns ErrTimeout if nothing arrives within timeout.
+// returns it. Returns ErrTimeout if nothing arrives within timeout. A
+// timeout <= 0 means no deadline: Recv blocks until a message is claimable.
 func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*envelope.Envelope, error) {
 	if err := validName(name); err != nil {
 		return nil, err
@@ -97,8 +98,14 @@ func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*env
 		return nil, err
 	}
 	defer watcher.Close()
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
+	// A nil channel blocks forever in a select, so leaving deadlineC nil for
+	// timeout <= 0 makes the timeout case below never fire.
+	var deadlineC <-chan time.Time
+	if timeout > 0 {
+		t := time.NewTimer(timeout)
+		defer t.Stop()
+		deadlineC = t.C
+	}
 	// The watcher is a latency optimization; the claim scan is what is
 	// correct. Under concurrent-receiver churn the OS backends surface
 	// transient errors (kqueue: ENOENT or EBADF while arming/watching a
@@ -124,7 +131,7 @@ func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*env
 			// arming.
 			select {
 			case <-time.After(10 * time.Millisecond):
-			case <-deadline.C:
+			case <-deadlineC:
 				return nil, ErrTimeout
 			}
 			continue
@@ -135,7 +142,7 @@ func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*env
 		case <-watcher.Errors:
 			// Transient backend churn; degrade to polling and re-arm.
 			armed = false
-		case <-deadline.C:
+		case <-deadlineC:
 			return nil, ErrTimeout
 		}
 	}

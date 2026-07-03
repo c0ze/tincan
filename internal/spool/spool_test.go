@@ -169,6 +169,63 @@ func TestRecvTimesOutWithErrTimeout(t *testing.T) {
 	}
 }
 
+func TestRecvZeroTimeoutReturnsAlreadyQueuedMessageImmediately(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	if err := sp.Send(msg("a", "b", "already-here", 1)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	type result struct {
+		e   *envelope.Envelope
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		e, err := sp.Recv("b", 0, false)
+		done <- result{e, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("Recv: %v", r.err)
+		}
+		if r.e.Body != "already-here" {
+			t.Fatalf("got body %q, want %q", r.e.Body, "already-here")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Recv with timeout=0 hung on an already-queued message")
+	}
+}
+
+func TestRecvZeroTimeoutBlocksForeverUntilSendArrives(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		if err := sp.Send(msg("a", "b", "delayed", time.Now().UnixNano())); err != nil {
+			t.Errorf("Send: %v", err)
+		}
+	}()
+	type result struct {
+		e   *envelope.Envelope
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		e, err := sp.Recv("b", 0, false)
+		done <- result{e, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("Recv: %v", r.err)
+		}
+		if r.e.Body != "delayed" {
+			t.Fatalf("got body %q, want %q", r.e.Body, "delayed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Recv with timeout=0 hung instead of receiving the delayed send")
+	}
+}
+
 func TestReArmAfterTimeoutLosesNothing(t *testing.T) {
 	sp, _ := Open(t.TempDir())
 	if _, err := sp.Recv("b", 100*time.Millisecond, false); !errors.Is(err, ErrTimeout) {

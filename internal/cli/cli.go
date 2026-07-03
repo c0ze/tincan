@@ -150,7 +150,7 @@ func cmdRecv(args []string, stdout, stderr io.Writer) int {
 	var (
 		as      = fs.String("as", "", "my inbox name")
 		room    = fs.String("room", ".", "room directory")
-		timeout = fs.Int("timeout", 570, "seconds to wait")
+		timeout = fs.Int("timeout", 570, "seconds to wait; 0 or negative blocks forever (no re-arm cost)")
 		format  = fs.String("format", "json", "output format: json|body")
 		logMsgs = fs.Bool("log", false, "keep consumed messages in .tincan/log/")
 	)
