@@ -169,7 +169,12 @@ func (s *Spool) claimOldest(name string, logConsumed bool) (*envelope.Envelope, 
 			// it would decay into a bogus timeout.
 			return nil, false, err
 		}
-		data, err := os.ReadFile(claimed)
+		var data []byte
+		err := retryClaimOp(func() error {
+			var rerr error
+			data, rerr = os.ReadFile(claimed)
+			return rerr
+		})
 		if err != nil {
 			if lostClaimRace(err) {
 				// Windows: renames are handle-based, so a racing receiver
@@ -193,13 +198,15 @@ func (s *Spool) claimOldest(name string, logConsumed bool) (*envelope.Envelope, 
 			if err := os.MkdirAll(s.logDir(), 0o755); err != nil {
 				return nil, false, err
 			}
-			if err := os.Rename(claimed, filepath.Join(s.logDir(), f)); err != nil {
+			if err := retryClaimOp(func() error {
+				return os.Rename(claimed, filepath.Join(s.logDir(), f))
+			}); err != nil {
 				if lostClaimRace(err) {
 					continue
 				}
 				return nil, false, err
 			}
-		} else if err := os.Remove(claimed); err != nil {
+		} else if err := retryClaimOp(func() error { return os.Remove(claimed) }); err != nil {
 			if lostClaimRace(err) {
 				continue
 			}
@@ -208,6 +215,22 @@ func (s *Spool) claimOldest(name string, logConsumed bool) (*envelope.Envelope, 
 		return e, true, nil
 	}
 	return nil, false, nil
+}
+
+// retryClaimOp runs op, retrying briefly while it fails with a Windows
+// sharing/lock violation — the signature of a racing receiver's in-flight
+// handle-based rename. The race resolves in microseconds: either the file
+// moves away (op then fails NotExist → lost race) or the handle is released
+// (op succeeds). On POSIX this never retries.
+func retryClaimOp(op func() error) error {
+	var err error
+	for i := 0; i < 5; i++ {
+		if err = op(); !isTransientShare(err) {
+			return err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return err
 }
 
 // lostClaimRace reports whether err is the signature of losing a claim race
