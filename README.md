@@ -10,9 +10,9 @@ filesystem spool. No daemon, no message store, near-zero tokens while idle.
 Design: [`docs/superpowers/specs/2026-07-03-tincan-design.md`](docs/superpowers/specs/2026-07-03-tincan-design.md).
 Operating guide: [`PROTOCOL.md`](PROTOCOL.md).
 
-> **Status:** the `tincan` engine (`cmd/tincan`) is not implemented yet — this repo
-> currently holds the design, the skills, and the installer. The `go install` path
-> below goes live once the engine (Phase 1) is built and pushed.
+> **Status:** Phase 1 (core engine) implemented — `send`/`recv`/`ask`/`reply` over the
+> filesystem spool, with tests. The `go install` path below goes live once this repo
+> is pushed to GitHub. Fan-out courier docs and other-agent shims: see spec phases 2–3.
 
 ## Install
 
