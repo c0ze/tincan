@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -273,6 +274,9 @@ func TestPingExitsOneForAbsentPresence(t *testing.T) {
 }
 
 func TestPingExitsOneForDeadPIDPresence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("processAlive is conservative on Windows (see alive_other.go); dead-PID detection is unix-only")
+	}
 	room := t.TempDir()
 	writePresenceFile(t, room, "ghost", 1<<30, time.Now())
 	code, stdout, _ := run("ping", "--room", room, "--to", "ghost")
@@ -400,8 +404,32 @@ func TestStopUsageErrors(t *testing.T) {
 	}
 }
 
+// canonTempDir returns a fresh t.TempDir() with symlinks/short-names resolved
+// via filepath.EvalSymlinks (falling back to the raw path if that errors, e.g.
+// on a platform where it isn't meaningful). The roomRootWarning tests build
+// both the room path they pass in and the gitroot they expect back from this,
+// so the string compare holds where the OS's temp dir is a symlink (macOS
+// /var → /private/var) or an 8.3 short name (Windows RUNNER~1 vs runneradmin).
+func canonTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return dir
+	}
+	return resolved
+}
+
 func TestRoomRootWarningNonRootChildOfGitDir(t *testing.T) {
-	tmp := t.TempDir()
+	// Canonicalize the temp root so the room path we pass in and the gitroot we
+	// expect back are on the same footing as what roomRootWarning reports.
+	// roomRootWarning names paths as filepath.Abs(room) walks them, which does
+	// NOT resolve symlinks; on macOS /var is a symlink to /private/var and on
+	// Windows t.TempDir() can hand back an 8.3 short name (RUNNER~1), so a raw
+	// t.TempDir() and its EvalSymlinks'd form differ and the substring check
+	// fails. Building both the room and the expected gitroot from the resolved
+	// root sidesteps that on every platform without touching production code.
+	tmp := canonTempDir(t)
 	if err := os.Mkdir(filepath.Join(tmp, ".git"), 0o755); err != nil {
 		t.Fatalf("mkdir .git: %v", err)
 	}
@@ -413,12 +441,8 @@ func TestRoomRootWarningNonRootChildOfGitDir(t *testing.T) {
 	if got == "" {
 		t.Fatalf("want non-empty warning for %s (child of repo root %s), got empty", sub, tmp)
 	}
-	resolvedTmp, err := filepath.EvalSymlinks(tmp)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(%s): %v", tmp, err)
-	}
-	if !strings.Contains(got, resolvedTmp) {
-		t.Fatalf("warning %q does not name gitroot %q", got, resolvedTmp)
+	if !strings.Contains(got, tmp) {
+		t.Fatalf("warning %q does not name gitroot %q", got, tmp)
 	}
 }
 
@@ -500,12 +524,29 @@ func TestRoomRootWarningGitAsFileIsRoot(t *testing.T) {
 	}
 }
 
+// setHomeEnv points os.UserHomeDir() at home for the duration of the test, on
+// whichever platform is running. os.UserHomeDir reads $HOME on unix but
+// %USERPROFILE% (falling back to %HOMEDRIVE%+%HOMEPATH%) on Windows, so the
+// floor tests must set the variable the current OS actually consults or the
+// floor never sees the temp home. Setting all of them is harmless.
+func setHomeEnv(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	if vol := filepath.VolumeName(home); vol != "" {
+		t.Setenv("HOMEDRIVE", vol)
+		t.Setenv("HOMEPATH", home[len(vol):])
+	}
+}
+
 func TestRoomRootWarningFlooredAtHome(t *testing.T) {
 	// gitroot == $HOME (the common dotfiles-in-~ case): the warning's own
 	// advice would be "pass --room ~", which is actively wrong, so it must
-	// be suppressed.
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	// be suppressed. Canonicalize the temp home (see canonTempDir) and set the
+	// per-OS home var (see setHomeEnv) so the floor's filepath.Rel(gitroot,
+	// home) compares two paths in the same form on macOS/Windows too.
+	tmpHome := canonTempDir(t)
+	setHomeEnv(t, tmpHome)
 	if err := os.Mkdir(filepath.Join(tmpHome, ".git"), 0o755); err != nil {
 		t.Fatalf("mkdir .git: %v", err)
 	}
@@ -521,8 +562,8 @@ func TestRoomRootWarningFlooredAtHome(t *testing.T) {
 func TestRoomRootWarningNotFlooredBelowHome(t *testing.T) {
 	// gitroot strictly below $HOME (e.g. ~/projects/foo) is a genuine
 	// project repo — the floor must not suppress this real footgun.
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := canonTempDir(t)
+	setHomeEnv(t, tmpHome)
 	gitroot := filepath.Join(tmpHome, "projects", "foo")
 	if err := os.MkdirAll(filepath.Join(gitroot, ".git"), 0o755); err != nil {
 		t.Fatalf("mkdir .git: %v", err)
@@ -535,21 +576,17 @@ func TestRoomRootWarningNotFlooredBelowHome(t *testing.T) {
 	if got == "" {
 		t.Fatalf("want non-empty warning for %s (gitroot %s is below $HOME), got empty", sub, gitroot)
 	}
-	resolvedGitroot, err := filepath.EvalSymlinks(gitroot)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(%s): %v", gitroot, err)
-	}
-	if !strings.Contains(got, resolvedGitroot) {
-		t.Fatalf("warning %q does not name gitroot %q", got, resolvedGitroot)
+	if !strings.Contains(got, gitroot) {
+		t.Fatalf("warning %q does not name gitroot %q", got, gitroot)
 	}
 }
 
 func TestRoomRootWarningNotFlooredOutsideHome(t *testing.T) {
 	// gitroot is not above $HOME at all (a separate tree, $HOME elsewhere)
 	// — repos outside home still warn normally.
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	other := t.TempDir()
+	tmpHome := canonTempDir(t)
+	setHomeEnv(t, tmpHome)
+	other := canonTempDir(t)
 	if err := os.Mkdir(filepath.Join(other, ".git"), 0o755); err != nil {
 		t.Fatalf("mkdir .git: %v", err)
 	}
@@ -561,11 +598,7 @@ func TestRoomRootWarningNotFlooredOutsideHome(t *testing.T) {
 	if got == "" {
 		t.Fatalf("want non-empty warning for %s (gitroot %s is outside $HOME %s), got empty", sub, other, tmpHome)
 	}
-	resolvedOther, err := filepath.EvalSymlinks(other)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(%s): %v", other, err)
-	}
-	if !strings.Contains(got, resolvedOther) {
-		t.Fatalf("warning %q does not name gitroot %q", got, resolvedOther)
+	if !strings.Contains(got, other) {
+		t.Fatalf("warning %q does not name gitroot %q", got, other)
 	}
 }

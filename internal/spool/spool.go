@@ -322,7 +322,14 @@ func (s *Spool) writePresence(name, token string) {
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return
 	}
-	if err := os.Rename(tmp, filepath.Join(dir, token)); err != nil {
+	// Wrap the tmp→final rename in retryClaimOp so a transient Windows sharing
+	// violation (a racing token write/remove for the same name briefly holds a
+	// handle on the final path) is retried rather than silently dropping the
+	// token — which would leak the tmp file and make this presence go missing.
+	// On POSIX retryClaimOp never retries, so this is a plain rename there.
+	if err := retryClaimOp(func() error {
+		return os.Rename(tmp, filepath.Join(dir, token))
+	}); err != nil {
 		os.Remove(tmp) // best-effort: don't leak the tmp file on a failed rename
 	}
 }
@@ -348,7 +355,13 @@ func (s *Spool) writePresence(name, token string) {
 // one place present/<name>/ IS cleaned up, for ephemeral r-<id> channels
 // where no such race can occur).
 func (s *Spool) removePresence(name, token string) {
-	os.Remove(filepath.Join(s.presentNameDir(name), token))
+	// Wrap the remove in retryClaimOp for the same reason as writePresence's
+	// rename: under concurrent same-name churn on Windows a peer's in-flight
+	// handle can briefly lock this token file (ERROR_SHARING_VIOLATION), and
+	// leaving a stale token behind would keep the name wrongly reported as
+	// parked. Still best-effort — after retries are exhausted we give up
+	// silently, and on POSIX retryClaimOp never retries.
+	retryClaimOp(func() error { return os.Remove(filepath.Join(s.presentNameDir(name), token)) })
 }
 
 // ListPresence returns Presence for the union of names that have an inbox
