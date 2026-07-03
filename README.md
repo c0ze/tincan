@@ -47,8 +47,16 @@ This copies the skills to `~/.claude/skills/{tell,listen}/` (override with
 `CLAUDE_SKILLS_DIR`). Restart your Claude Code session to pick them up, then use
 `/tell` and `/listen`.
 
+Per-agent shims installed by the same script:
+- **Codex**: `~/.codex/prompts/listen.md` → `/listen` inside Codex.
+- **Gemini CLI**: `~/.gemini/commands/listen.toml` → `/listen` inside Gemini CLI.
+- **Antigravity**: reads workspace skills from `.agents/skills/`; this repo ships
+  a `.agents/skills → skills` symlink, so `/listen` works out of the box here. For
+  other repos, create the same symlink (Antigravity consumes the SKILL.md format
+  directly).
+
 *(A self-installing `tincan skills install` subcommand — binary-embedded, no clone
-needed — lands with Phase 2. Codex `AGENTS.md` and Cursor rule shims land with Phase 3.)*
+needed — lands with Phase 2. Cursor rule shim lands with Phase 3.)*
 
 ## Quick start
 
