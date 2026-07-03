@@ -23,7 +23,8 @@ jobs:
           go build ./...
       - name: Test
         run: go test ./... -race -count=1
-      - name: Spool stress (macOS)
-        # kqueue watcher-arming races are invisible on Linux/inotify; see spec §12.
-        if: runner.os == 'macOS'
+      - name: Spool stress (macOS/Windows)
+        # Concurrency races differ per fs backend (kqueue EBADF/ENOENT churn,
+        # Windows handle-based renames); Linux/inotify alone would miss them.
+        if: runner.os != 'Linux'
         run: go test ./internal/spool/ -race -count=10

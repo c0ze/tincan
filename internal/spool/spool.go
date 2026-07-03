@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -98,22 +99,18 @@ func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*env
 	defer watcher.Close()
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
-	// Arming the watch can fail transiently on the kqueue backend: Add lstats
-	// each child, so a peer receiver renaming a file out mid-Add yields
-	// ENOENT. That churn just means the inbox is being drained — rescan and
-	// re-arm rather than failing the receive.
+	// The watcher is a latency optimization; the claim scan is what is
+	// correct. Under concurrent-receiver churn the OS backends surface
+	// transient errors (kqueue: ENOENT or EBADF while arming/watching a
+	// child that a peer just claimed), so watcher trouble never fails the
+	// receive — degrade to a short poll and keep trying to re-arm.
 	armed := false
 	for {
 		if !armed {
 			if err := os.MkdirAll(inbox, 0o755); err != nil {
 				return nil, err
 			}
-			switch err := watcher.Add(inbox); {
-			case err == nil:
-				armed = true
-			case !errors.Is(err, fs.ErrNotExist):
-				return nil, err
-			}
+			armed = watcher.Add(inbox) == nil
 		}
 		e, ok, err := s.claimOldest(name, logConsumed)
 		if err != nil {
@@ -123,8 +120,8 @@ func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*env
 			return e, nil
 		}
 		if !armed {
-			// Nothing to claim and the watch isn't armed yet: back off
-			// briefly, then retry arming. Bounded by the deadline.
+			// No watch: poll briefly, bounded by the deadline, then retry
+			// arming.
 			select {
 			case <-time.After(10 * time.Millisecond):
 			case <-deadline.C:
@@ -135,13 +132,9 @@ func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*env
 		select {
 		case <-watcher.Events:
 			// Inbox changed; rescan.
-		case werr := <-watcher.Errors:
-			if errors.Is(werr, fs.ErrNotExist) {
-				// Transient kqueue churn (a watched file was claimed by a
-				// peer); rescan.
-				continue
-			}
-			return nil, werr
+		case <-watcher.Errors:
+			// Transient backend churn; degrade to polling and re-arm.
+			armed = false
 		case <-deadline.C:
 			return nil, ErrTimeout
 		}
@@ -169,15 +162,21 @@ func (s *Spool) claimOldest(name string, logConsumed bool) (*envelope.Envelope, 
 		}
 		claimed := filepath.Join(s.tmpDir(), fmt.Sprintf("claim-%s-%s", envelope.NewID(), f))
 		if err := os.Rename(filepath.Join(s.InboxDir(name), f), claimed); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
+			if lostClaimRace(err) {
 				continue // another receiver claimed it first
 			}
-			// Anything else (permissions, read-only fs, ...) is a real error;
-			// swallowing it would decay into a bogus timeout.
+			// Anything else (read-only fs, ...) is a real error; swallowing
+			// it would decay into a bogus timeout.
 			return nil, false, err
 		}
 		data, err := os.ReadFile(claimed)
 		if err != nil {
+			if lostClaimRace(err) {
+				// Windows: renames are handle-based, so a racing receiver
+				// can move the file even after our rename "succeeded". The
+				// message is theirs now.
+				continue
+			}
 			return nil, false, err
 		}
 		e, err := envelope.Unmarshal(data)
@@ -187,19 +186,41 @@ func (s *Spool) claimOldest(name string, logConsumed bool) (*envelope.Envelope, 
 			// cause an infinite reparse loop.
 			return nil, false, fmt.Errorf("tincan: bad message %s: %w", f, err)
 		}
+		// Consuming the claim file decides ownership: whoever removes (or
+		// logs) it delivers the message; a loser discards its copy so the
+		// message is processed exactly once even where renames race.
 		if logConsumed {
 			if err := os.MkdirAll(s.logDir(), 0o755); err != nil {
 				return nil, false, err
 			}
 			if err := os.Rename(claimed, filepath.Join(s.logDir(), f)); err != nil {
+				if lostClaimRace(err) {
+					continue
+				}
 				return nil, false, err
 			}
 		} else if err := os.Remove(claimed); err != nil {
+			if lostClaimRace(err) {
+				continue
+			}
 			return nil, false, err
 		}
 		return e, true, nil
 	}
 	return nil, false, nil
+}
+
+// lostClaimRace reports whether err is the signature of losing a claim race
+// to a concurrent receiver rather than a real filesystem failure. On POSIX a
+// lost race is ENOENT. On Windows, renames are handle-based, so racing
+// receivers can also produce sharing/permission errors mid-claim; those count
+// as race losses there (a genuine ACL problem on Windows then shows up as a
+// timeout rather than an error — the price of exactly-once on that platform).
+func lostClaimRace(err error) bool {
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	return runtime.GOOS == "windows" && errors.Is(err, fs.ErrPermission)
 }
 
 // RemoveInbox deletes a participant's inbox directory. Used to clean up
