@@ -2,6 +2,7 @@ package envelope
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -16,6 +17,7 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 		TS:        time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC),
 		Body:      "review PR 56",
 		Artifacts: []string{"out/img.png"},
+		Kind:      "stop",
 	}
 	data, err := Marshal(e)
 	if err != nil {
@@ -27,6 +29,40 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(e, got) {
 		t.Fatalf("round trip mismatch:\nsent %+v\ngot  %+v", e, got)
+	}
+}
+
+func TestMarshalOmitsKindKeyWhenEmpty(t *testing.T) {
+	e := &Envelope{
+		ID:   NewID(),
+		From: "orch",
+		To:   "codex",
+		TS:   time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC),
+		Body: "review PR 56",
+	}
+	data, err := Marshal(e)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), `"kind"`) {
+		t.Fatalf("expected no \"kind\" key when Kind is empty, got:\n%s", data)
+	}
+}
+
+func TestUnmarshalLegacyJSONWithoutKindDefaultsEmpty(t *testing.T) {
+	legacy := []byte(`{
+		"id": "abc123",
+		"from": "orch",
+		"to": "codex",
+		"ts": "2026-07-03T12:00:00Z",
+		"body": "review PR 56"
+	}`)
+	e, err := Unmarshal(legacy)
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if e.Kind != "" {
+		t.Fatalf("want Kind == \"\" for legacy JSON, got %q", e.Kind)
 	}
 }
 
