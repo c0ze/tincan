@@ -1,3 +1,4 @@
 .tincan/
 bin/
 .DS_Store
+.claude/
