@@ -9,12 +9,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/c0ze/tincan/internal/envelope"
+	"github.com/c0ze/tincan/internal/host"
 	"github.com/c0ze/tincan/internal/spool"
 )
 
@@ -370,8 +372,8 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		room   = fs.String("room", ".", "room directory")
-		format = fs.String("format", "table", "output format: table|json")
+		roomFlag = fs.String("room", ".", "room directory")
+		format   = fs.String("format", "table", "output format: table|json")
 	)
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
@@ -380,21 +382,26 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tincan status: --format must be table or json")
 		return ExitUsage
 	}
-	if w := roomRootWarning(*room); w != "" {
-		fmt.Fprintln(stderr, w)
-	}
-	sp, err := spool.Open(*room)
+	room, err := filepath.Abs(*roomFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan status: %v\n", err)
 		return ExitError
 	}
-	list, err := sp.ListPresence()
+	if w := roomRootWarning(room); w != "" {
+		fmt.Fprintln(stderr, w)
+	}
+	sp, err := spool.Open(room)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan status: %v\n", err)
+		return ExitError
+	}
+	rows, err := statusRows(sp, room)
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan status: %v\n", err)
 		return ExitError
 	}
 	if *format == "json" {
-		data, err := json.MarshalIndent(list, "", "  ")
+		data, err := json.MarshalIndent(rows, "", "  ")
 		if err != nil {
 			fmt.Fprintf(stderr, "tincan status: %v\n", err)
 			return ExitError
@@ -402,23 +409,88 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, string(data))
 		return ExitOK
 	}
-	printStatusTable(list, stdout)
+	printStatusTable(rows, stdout)
 	return ExitOK
 }
 
-// printStatusTable renders presences as a tab-aligned table: name, queued
-// count, listener state (parked/—), pid (or -), and parked-since age.
-func printStatusTable(list []spool.Presence, stdout io.Writer) {
-	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tQUEUED\tSTATE\tPID\tSINCE")
+// statusRow is one `status` line: the spool presence plus the hosted-listener
+// view from <room>/.tincan/hosts/<name>.json. Mode is "hosted:<preset>" for a
+// live hosted listener, "agent" for a plain parked listener (an interactive
+// /listen session), and "" when nothing is listening.
+type statusRow struct {
+	spool.Presence
+	Mode      string `json:"mode"`
+	Preset    string `json:"preset,omitempty"`
+	Busy      bool   `json:"busy"`
+	CurrentID string `json:"current_id,omitempty"`
+}
+
+// statusRows joins presence with live hosted state. A state file whose pid is
+// dead is stale (serve was killed without cleanup) and is ignored, so the row
+// falls back to plain presence and never reports a phantom "busy". A hosted
+// listener that is busy is not parked (no presence), so its pid comes from
+// the state file.
+func statusRows(sp *spool.Spool, room string) ([]statusRow, error) {
+	list, err := sp.ListPresence()
+	if err != nil {
+		return nil, err
+	}
+	states, err := host.ListStates(room)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	rows := make([]statusRow, 0, len(list)+len(states))
 	for _, p := range list {
-		state, pid, since := "—", "-", "-"
-		if p.Alive {
-			state = "parked"
-			pid = strconv.Itoa(p.PID)
-			since = time.Since(p.Since).Round(time.Second).String() + " ago"
+		seen[p.Name] = true
+		rows = append(rows, statusRow{Presence: p})
+	}
+	for name := range states {
+		if seen[name] {
+			continue
 		}
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\n", p.Name, p.Queued, state, pid, since)
+		p, _, err := sp.Present(name)
+		if err != nil {
+			continue // not a legal participant name; nothing else could be listening as it
+		}
+		rows = append(rows, statusRow{Presence: p})
+	}
+	for i := range rows {
+		r := &rows[i]
+		switch st, ok := states[r.Name]; {
+		case ok && st.Alive():
+			r.Mode = "hosted:" + st.Preset
+			r.Preset = st.Preset
+			r.PID = st.PID
+			r.Busy = st.State == "busy"
+			r.CurrentID = st.CurrentID
+		case r.Alive:
+			r.Mode = "agent"
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	return rows, nil
+}
+
+// printStatusTable renders rows as a tab-aligned table: name, queued count,
+// mode (hosted:<preset> / agent / —), listener state (parked / busy / —),
+// pid (or -), and parked-since age.
+func printStatusTable(rows []statusRow, stdout io.Writer) {
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tQUEUED\tMODE\tSTATE\tPID\tSINCE")
+	for _, r := range rows {
+		mode, state, pid, since := "—", "—", "-", "-"
+		if r.Mode != "" {
+			mode = r.Mode
+		}
+		switch {
+		case r.Busy:
+			state, pid = "busy", strconv.Itoa(r.PID)
+		case r.Alive:
+			state, pid = "parked", strconv.Itoa(r.PID)
+			since = time.Since(r.Since).Round(time.Second).String() + " ago"
+		}
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n", r.Name, r.Queued, mode, state, pid, since)
 	}
 	tw.Flush()
 }
