@@ -37,6 +37,13 @@ Usage:
   tincan ping   --to <name> [flags]
   tincan stop   --to <name> --from <name> [flags]
 
+Hosted listeners (tincan runs a headless agent CLI for you):
+  tincan up      <name> [--preset <p>] [--exec '<tpl>'] [--stdin body|none] [--reply stdout|file]
+                        [--exec-timeout <sec>] [--wait <sec>] [flags]
+  tincan serve   <name> [same flags as up] [--daemon]
+  tincan down    <name> [--wait <sec>] [flags]
+  tincan presets [--format table|json]
+
 Common flags:
   --room <path>       room directory (default: current directory)
   --artifact <path>   artifact pointer, repeatable (send/ask/reply)
@@ -65,6 +72,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdPing(args[1:], stdout, stderr)
 	case "stop":
 		return cmdStop(args[1:], stdout, stderr)
+	case "serve":
+		return cmdServe(args[1:], stdout, stderr)
+	case "presets":
+		return cmdPresets(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usageText)
 		return ExitOK
