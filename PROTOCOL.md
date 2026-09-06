@@ -56,9 +56,17 @@ tincan send   --to <name> --from <name> (--body <s> | --body-file <f>)
 tincan status [--format table|json]
 tincan ping   --to <name>
 tincan stop   --to <name> --from <name>
+
+tincan up     <name> [--preset <p>] [--exec '<template>'] [--stdin body|none]
+              [--reply stdout|file] [--exec-timeout <sec=3600>] [--wait <sec=10>]
+tincan serve  <name> [same flags as up] [--daemon]
+tincan down   <name> [--wait <sec=15>]
+tincan presets [--format table|json]
 ```
 
-All commands take `--room <path>` (see above; default `.`).
+All commands take `--room <path>` (see above; default `.`). `up`/`serve`/`down`/
+`presets` are the **hosted listener** commands — tincan runs a headless agent CLI
+for you so no human terminal is needed per agent; see below.
 
 - `recv --log` keeps a copy of each consumed message in `<room>/.tincan/log/`
   (default: consumed messages are deleted; chat transcripts are the record).
@@ -102,9 +110,12 @@ tincan ping   --to <name> [--room <path>]
 ```
 
 - `status` lists every name that has a queue and/or a live listener: name,
-  queued count, listener state (`parked` or `—`), pid, and how long it's been
-  parked. `--format json` prints the same data as a JSON array (one object
-  per name) for scripting.
+  queued count, `MODE` (`hosted:<preset>` for a listener tincan hosts, `agent`
+  for an interactive `/listen` session, `—` for none), `STATE` (`parked`,
+  `busy` — a hosted listener running its agent right now — or `—`), pid, and
+  how long it's been parked. `--format json` prints the same data as a JSON
+  array (one object per name) for scripting; hosted rows add `mode`, `preset`,
+  `busy` and `current_id`.
 - `ping --to <name>` is the single-name yes/no form: prints `present
   pid=<n>` and exits `0` if a live listener is parked for `<name>`, or
   prints `absent` and exits `1` otherwise.
@@ -138,6 +149,130 @@ what honors it: on receiving a message with `kind == "stop"`, the listener
 acks briefly, then exits its loop instead of re-arming. **You must pass
 `--format json` on `recv` to see `kind`** — `--format body` only prints the
 message body and drops the envelope, including `kind`.
+
+## Hosted listeners — `up` / `serve` / `down`
+
+A listener used to mean an *interactive* agent session running `/listen`, so a
+human had to open one terminal per agent before an orchestrator could `/tell`
+it anything. A **hosted listener** removes the human: `tincan up <name>` starts
+a detached `tincan serve` process that
+
+1. parks on `<room>/.tincan/inbox/<name>/` with the normal receive (so
+   presence, `status` and `ping` work unchanged);
+2. for each ordinary message, renders the configured agent command with the
+   message body as the prompt, runs it with `cwd = room`, and captures its
+   output;
+3. sends that output as the reply on the message's `reply_to` channel (a
+   message without `reply_to` is run and logged only);
+4. loops. A `kind == "stop"` message (`tincan stop` / `tincan down`) or
+   SIGTERM/SIGINT ends the loop.
+
+Each message is a **fresh single-turn run** of the agent CLI — no memory
+between messages, so briefs must be self-contained. One hosted process is one
+serial worker; run `up` with different names for fan-out.
+
+```
+tincan up codex --room "$ROOM"          # up name=codex pid=12345 preset=codex
+tincan ask --to codex --from orch --room "$ROOM" --body-file brief.md
+tincan status --room "$ROOM"            # MODE hosted:codex, STATE parked|busy
+tincan down codex --room "$ROOM"        # down name=codex
+```
+
+- `up` is idempotent: if any listener named `<name>` is already live in the
+  room (hosted or interactive), it prints `already up name=<name> pid=<n>` and
+  exits 0. It resolves the preset (`--preset`, else `<name>` if that is a
+  known preset, else `--exec` is required → exit 2), checks the agent binary
+  is on `PATH` (exit 1 if not), starts `serve … --daemon` detached (own
+  session, stdio on the host log) and waits up to `--wait` seconds for the
+  listener to park (exit 1 with the log path if it doesn't).
+- `serve` is the loop itself, in the foreground — handy for debugging a
+  preset (`Ctrl-C` stops it). `--daemon` is what `up` passes.
+- `down` sends `stop` (from `orch`), waits up to `--wait` seconds for the
+  process to exit, then SIGTERMs the recorded pid and, 5 s later, SIGKILLs it.
+  Exit 0 if the process is gone, 1 otherwise. A `stop` arrives only when the
+  current run finishes; `--wait` is how long you are prepared to let it.
+- `presets` lists the effective presets (`--format json` for scripts).
+
+### Presets and `~/.config/tincan/agents.json`
+
+Built-in presets (the headless invocations verified on 2026-09-07):
+
+| preset | exec template | stdin | reply |
+|---|---|---|---|
+| `codex`  | `codex exec -s workspace-write --skip-git-repo-check -o {out} -` | body | file |
+| `grok`   | `grok -p {body} --always-approve` | none | stdout |
+| `kimi`   | `kimi -p {body}` | none | stdout |
+| `agy`    | `agy -p {body} --dangerously-skip-permissions --model gemini-3.8-flash-high --print-timeout 150m` | none | stdout |
+| `gemini` | `gemini -p {body}` | none | stdout |
+| `claude` | `claude -p {body} --dangerously-skip-permissions` | none | stdout |
+
+Placeholders: `{body}` (the message body, passed as **one argv element** —
+never through a shell), `{out}` (a per-message temp file whose contents become
+the reply when `reply = file`), `{room}`, `{name}`, `{id}`. `stdin = body` pipes
+the body to the process' stdin instead. Templates given with `--exec` are
+split on unquoted whitespace (single/double quotes group a token) *before*
+substitution, so a body can never be re-tokenized.
+
+`~/.config/tincan/agents.json` overrides or adds presets (an entry replaces
+the built-in of the same name wholesale); merge order is built-in ← config
+file ← command-line flags:
+
+```json
+{
+  "agy":   { "exec": ["agy", "-p", "{body}", "--dangerously-skip-permissions", "--model", "gemini-3.8-flash-high", "--print-timeout", "150m"], "stdin": "none", "reply": "stdout" },
+  "myllm": { "exec": ["my-llm", "--prompt-file", "-"], "stdin": "body", "reply": "stdout", "exec_timeout_sec": 1800 }
+}
+```
+
+Reply post-processing is minimal and preset-level: trailing whitespace is
+trimmed; for `kimi` the trailing `To resume this session: …` line is dropped.
+Nothing else is rewritten.
+
+### Files under the room
+
+```
+.tincan/hosts/<name>.json   # {"pid", "preset", "exec", "started", "state": "parked|busy", "current_id"}
+.tincan/hosts/<name>.log    # per message: "=== <id> from=<from> started=<ts>" … agent stdout+stderr … "=== exit=<code> duration=<s>s"
+```
+
+The state file is written atomically (tmp + rename) and removed on clean
+exit; a state file whose pid is dead is stale and `status` ignores it (shows
+`—`, never a phantom `busy`). Add `.tincan/` to your project's `.gitignore`
+(or global excludes) — it now holds logs, not just transient messages.
+
+### Error handling — the asker always gets a reply
+
+- Agent exits non-zero → reply `ERROR exit=<code>` + newline + the last 4 KiB
+  of its stderr, then any stdout.
+- `--exec-timeout` elapsed (default 3600 s; `0` = none) → the agent's whole
+  process group is killed; reply `ERROR timeout after <sec>s`.
+- Agent binary missing at run time (removed after `up`) → reply
+  `ERROR exec: <message>`; the listener keeps running.
+- The listener is stopped (`down`/SIGTERM) mid-run → the agent is killed and
+  the asker gets `ERROR interrupted: hosted listener was stopped while running`.
+- Malformed/unknown `kind` → ignored and logged, no reply. A failed reply
+  send (spool error) is logged; the loop continues.
+- Room rules are unchanged: pass `--room` explicitly; non-root rooms warn.
+
+A reply body starting with `ERROR ` is therefore the *agent* failing, not
+tincan — treat it as such in the orchestrator.
+
+### Security caveat
+
+Same trust boundary as before, stated more loudly: **anything that can write
+into `<room>/.tincan/inbox/<name>/` drives the hosted agent**, and the presets
+bake in auto-approval flags — that is the point. Mitigations: presets use the
+narrowest mode that works unattended (`codex -s workspace-write`, never
+`danger-full-access`); `cwd` is the room; the body is an argv element or
+stdin, never interpolated into a shell string. Fine on a single-user machine
+with a trusted orchestrator; think before widening that boundary.
+
+### Platform note
+
+Detaching (`up`) is implemented for Linux/macOS (new session, stdio to the
+log). On Windows `up` fails with a clear message in this iteration; `tincan
+serve <name>` in a terminal works there, and the per-run process-group kill
+uses `taskkill /T`.
 
 ## Starting a listener, per agent
 
@@ -223,3 +358,9 @@ machine with a trusted orchestrator; think before widening that boundary.
   `tincan ping --to <name> --room <path>` or `tincan status --room <path>`
   instead of guessing from `ps`.
 - `invalid name`: names are single path components; no slashes or dots.
+- `up` said `did not park` / `exited before parking`: read
+  `<room>/.tincan/hosts/<name>.log` — the agent CLI's own usage/auth errors
+  land there. `tincan serve <name> --room <path>` runs the same loop in the
+  foreground for a closer look.
+- A reply body starting `ERROR exit=` / `ERROR timeout` / `ERROR exec:` came
+  from a hosted listener whose agent failed; the details are in the same log.
