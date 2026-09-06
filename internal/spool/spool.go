@@ -3,6 +3,7 @@
 package spool
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,6 +54,17 @@ func validName(name string) error {
 	return nil
 }
 
+// ValidName reports whether name is a legal participant name (a single path
+// component, no traversal). Exported for the hosted-listener commands, which
+// build <room>/.tincan/hosts/<name>.* paths from the name.
+func ValidName(name string) error { return validName(name) }
+
+// ProcessAlive reports whether pid names a live process, using the same
+// per-OS check status/ping apply to presence tokens (see alive_unix.go and
+// alive_other.go for the Windows caveat). Exported so hosted-listener state
+// files get the identical answer.
+func ProcessAlive(pid int) bool { return processAlive(pid) }
+
 // Send delivers e into the To inbox atomically: write to tmp/, then rename.
 // Messages queue until a receiver claims them. Fills ID and TS if unset.
 func (s *Spool) Send(e *envelope.Envelope) error {
@@ -91,6 +103,14 @@ var ErrTimeout = errors.New("tincan: recv timeout")
 // returns it. Returns ErrTimeout if nothing arrives within timeout. A
 // timeout <= 0 means no deadline: Recv blocks until a message is claimable.
 func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*envelope.Envelope, error) {
+	return s.RecvContext(context.Background(), name, timeout, logConsumed)
+}
+
+// RecvContext is Recv with cancellation: it returns ctx.Err() as soon as ctx
+// is done while parked, clearing its presence token on the way out like any
+// other exit path. Hosted listeners use it to unpark on SIGTERM/SIGINT
+// without leaving a stale presence file behind.
+func (s *Spool) RecvContext(ctx context.Context, name string, timeout time.Duration, logConsumed bool) (*envelope.Envelope, error) {
 	if err := validName(name); err != nil {
 		return nil, err
 	}
@@ -142,6 +162,8 @@ func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*env
 			case <-time.After(10 * time.Millisecond):
 			case <-deadlineC:
 				return nil, ErrTimeout
+			case <-ctx.Done():
+				return nil, ctx.Err()
 			}
 			continue
 		}
@@ -153,6 +175,8 @@ func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*env
 			armed = false
 		case <-deadlineC:
 			return nil, ErrTimeout
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 	}
 }

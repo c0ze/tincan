@@ -1,6 +1,7 @@
 package spool
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -995,5 +996,68 @@ func TestRenameFailureSurfacesAsError(t *testing.T) {
 	_, err := sp.Recv("b", time.Second, false)
 	if err == nil || errors.Is(err, ErrTimeout) {
 		t.Fatalf("want permission error, got %v", err)
+	}
+}
+
+func TestRecvContextCancelUnparksAndClearsPresence(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := sp.RecvContext(ctx, "codex", 0, false)
+		done <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, ok, _ := sp.Present("codex"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("RecvContext never parked (no presence)")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want context.Canceled, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RecvContext did not return after cancel")
+	}
+	if _, ok, _ := sp.Present("codex"); ok {
+		t.Fatal("presence still reported after a cancelled RecvContext")
+	}
+}
+
+func TestRecvContextDeliversLikeRecv(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	if err := sp.Send(msg("a", "b", "hi", 1)); err != nil {
+		t.Fatal(err)
+	}
+	e, err := sp.RecvContext(context.Background(), "b", 5*time.Second, false)
+	if err != nil || e.Body != "hi" {
+		t.Fatalf("got %+v, %v", e, err)
+	}
+}
+
+func TestProcessAliveExported(t *testing.T) {
+	if !ProcessAlive(os.Getpid()) {
+		t.Fatal("ProcessAlive(own pid) = false")
+	}
+	if ProcessAlive(0) {
+		t.Fatal("ProcessAlive(0) = true")
+	}
+}
+
+func TestValidNameExported(t *testing.T) {
+	for _, bad := range []string{"", ".", "..", "a/b", `a\b`} {
+		if ValidName(bad) == nil {
+			t.Fatalf("ValidName(%q) = nil, want error", bad)
+		}
+	}
+	if err := ValidName("codex"); err != nil {
+		t.Fatalf("ValidName(codex) = %v", err)
 	}
 }

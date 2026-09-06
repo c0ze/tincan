@@ -8,14 +8,19 @@ filesystem spool. No daemon, no message store, near-zero tokens while idle.
 
 - **`/tell <agent> <task>`** — hand work to another running agent and act on its reply.
 - **`listen` / `/listen`** — park on the repo's inbox and answer requests, at ~no token cost while idle.
+- **`tincan up <agent>`** — or skip the terminal: tincan hosts a headless agent CLI
+  (codex, gemini, claude, …) as a listener itself, detached, and `down` stops it.
 
 Design: [`docs/superpowers/specs/2026-07-03-tincan-design.md`](docs/superpowers/specs/2026-07-03-tincan-design.md).
 Operating guide: [`PROTOCOL.md`](PROTOCOL.md).
 
 > **Status:** v0.1 — the core engine (`send`/`recv`/`ask`/`reply` over the filesystem
-> spool) is implemented, tested (race-detector CI on Linux/macOS/Windows), and in
-> daily use coordinating Claude Code, Codex, and Antigravity. Young but working.
-> Roadmap (gc, more agent shims): spec phases 2–3 in `docs/`.
+> spool), observability (`status`/`ping`/`stop`) and hosted listeners
+> (`up`/`serve`/`down`) are implemented, tested (race-detector CI on
+> Linux/macOS/Windows), and in daily use coordinating Claude Code, Codex, and
+> Antigravity. Young but working. Roadmap (gc, more agent shims): spec phases 2–3
+> in `docs/`. Hosted-listener detach is Linux/macOS only for now (Windows fails
+> loudly; `tincan serve` works there).
 
 ## Install
 
@@ -37,6 +42,14 @@ export PATH="$(go env GOPATH)/bin:$PATH"   # add to your shell profile
 Prefer not to use Go? Grab a prebuilt binary for your platform from
 [Releases](https://github.com/c0ze/tincan/releases) (linux/macOS/windows,
 amd64+arm64) and drop it on your `PATH`.
+
+**Already have tincan installed?** An older binary predates `status`/`ping`/
+`stop`/`up`/`down`/`presets` — reinstall to get them: `go install ./cmd/tincan`
+from a clone (or `go install github.com/c0ze/tincan/cmd/tincan@main`), then check
+`tincan --help`. `./install.sh` does the same build.
+
+Add `.tincan/` to your projects' `.gitignore` (or your global excludes): it holds
+the spool and, with hosted listeners, per-agent logs.
 
 ### 2. The skills
 
@@ -83,6 +96,22 @@ listen as codex
 
 B blocks with ~no token cost until A replies, then acts on the review. Fan out to
 several agents at once and B collects replies as they finish.
+
+No terminal for agent A? Let tincan host it — one command, detached, no skill
+install on the agent side:
+
+```sh
+tincan up codex --room "$(git rev-parse --show-toplevel)"    # up name=codex pid=… preset=codex
+/tell codex review the diff on the current branch              # same as before
+tincan status --room "$(git rev-parse --show-toplevel)"        # MODE hosted:codex, STATE parked|busy
+tincan down codex --room "$(git rev-parse --show-toplevel)"    # when you are done
+```
+
+Built-in presets: `codex`, `grok`, `kimi`, `agy`, `gemini`, `claude` (`tincan
+presets` lists them; `~/.config/tincan/agents.json` adds or overrides). Every
+request gets a reply, including agent failures (`ERROR exit=…`) and timeouts.
+Mind the trust boundary: a hosted listener runs whatever lands in its inbox
+with auto-approval — see PROTOCOL.md "Hosted listeners".
 
 ## Brand
 

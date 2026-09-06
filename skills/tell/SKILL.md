@@ -20,6 +20,27 @@ listener must use the same path.
 From the request, extract each **target** (`codex`, `gemini`, …) and its **task**.
 Put anything long (a prompt, instructions) in a file and pass `--body-file`.
 
+## Ensure the target is up (hosted listeners)
+
+Before the first `ask` to `<who>` in this session, check that a listener is parked:
+
+```
+tincan ping --to <who> --room "$ROOM"
+```
+
+- Exit 0 (`present pid=…`): proceed.
+- Exit 1 (`absent`): if `<who>` is a known preset (`tincan presets` lists them —
+  built-ins are codex, grok, kimi, agy, gemini, claude; `~/.config/tincan/agents.json`
+  can add more) or the user gave you an `--exec` template, bring it up yourself:
+  `tincan up <who> --room "$ROOM"` (add `--exec '<template>'` for a custom command).
+  It prints `up name=<who> pid=… preset=…` and returns once the listener is parked.
+  If it exits non-zero, stop and report its stderr (it names the host log,
+  `.tincan/hosts/<who>.log`) — do not fall back to driving the CLI by hand.
+- Not a preset and no template: ask the user to start `/listen` for `<who>`, or for
+  a command to host.
+
+`up` is idempotent, so calling it when a listener is already there is harmless.
+
 ## One target — blocking consult
 
 ```
@@ -49,4 +70,13 @@ summary + artifact pointer — keeping your context clean.
 - Exit 3 with `pending channel=r-<id>` = no reply in time; the request is still
   queued. Retry, or collect later with `tincan recv --as r-<id> --room "$ROOM"`.
 - Exit 1 = real error (read stderr); exit 2 = your flags were wrong.
-- Ensure the target is actually running `/listen` in the same room.
+- Ensure the target is actually running `/listen` in the same room — or hosted
+  via `tincan up` (see above); `tincan status --room "$ROOM"` shows both.
+- A reply body starting `ERROR exit=` / `ERROR timeout` / `ERROR exec:` /
+  `ERROR interrupted` comes from a hosted listener whose agent run failed — treat
+  it as that agent failing, not as a tincan error; details are in
+  `.tincan/hosts/<who>.log`.
+- Hosted runs are single-turn: each brief must be self-contained (no "as I said
+  before").
+- When the session's work is done, stop what you started:
+  `tincan down <who> --room "$ROOM"` for each hosted listener you brought up.
