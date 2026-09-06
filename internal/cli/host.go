@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
+	"github.com/c0ze/tincan/internal/envelope"
 	"github.com/c0ze/tincan/internal/host"
 	"github.com/c0ze/tincan/internal/spool"
 )
@@ -213,6 +216,195 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 	defer stop()
 	if err := host.Serve(ctx, host.ServeOptions{Room: room, Name: h.name, Label: label, Preset: p, Log: logw}); err != nil {
 		fmt.Fprintf(stderr, "tincan serve: %v\n", err)
+		return ExitError
+	}
+	return ExitOK
+}
+
+// hostedAlready reports a live listener for name: a parked receiver
+// (presence), or a hosted serve whose state file pid is alive — it may be
+// busy, hence not parked, right now.
+func hostedAlready(sp *spool.Spool, room, name string) (int, bool) {
+	if p, ok, _ := sp.Present(name); ok {
+		return p.PID, true
+	}
+	if st, ok, _ := host.ReadState(room, name); ok && st.Alive() {
+		return st.PID, true
+	}
+	return 0, false
+}
+
+// waitUntil polls cond every 100ms until it holds or d elapses.
+func waitUntil(cond func() bool, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if cond() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func cmdUp(args []string, stdout, stderr io.Writer) int {
+	var wait int
+	h, code := parseHostFlags("up", args, stderr, func(fs *flag.FlagSet) {
+		fs.IntVar(&wait, "wait", 10, "seconds to wait for the listener to park")
+	})
+	if code != ExitOK {
+		return code
+	}
+	room, err := filepath.Abs(h.room)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan up: %v\n", err)
+		return ExitError
+	}
+	if w := roomRootWarning(room); w != "" {
+		fmt.Fprintln(stderr, w)
+	}
+	sp, err := spool.Open(room)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan up: %v\n", err)
+		return ExitError
+	}
+	// Idempotent: any live listener of that name (hosted or interactive)
+	// means there is nothing to do — checked before preset resolution so
+	// `up codex` succeeds even where the codex binary is not installed.
+	if pid, ok := hostedAlready(sp, room, h.name); ok {
+		fmt.Fprintf(stdout, "already up name=%s pid=%d\n", h.name, pid)
+		return ExitOK
+	}
+	label, p, code := resolveHost("up", h, stderr)
+	if code != ExitOK {
+		return code
+	}
+	if _, err := exec.LookPath(p.Exec[0]); err != nil {
+		fmt.Fprintf(stderr, "tincan up: agent binary %q not found on PATH (preset %s): %v\n", p.Exec[0], label, err)
+		return ExitError
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan up: %v\n", err)
+		return ExitError
+	}
+	serveArgs := append([]string{"serve", h.name, "--room", room, "--daemon"}, h.forward()...)
+	logPath := host.LogPath(room, h.name)
+	proc, exited, err := host.StartDetached(exe, serveArgs, room, logPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan up: %v\n", err)
+		return ExitError
+	}
+	deadline := time.Now().Add(time.Duration(wait) * time.Second)
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if _, ok, _ := sp.Present(h.name); ok {
+			fmt.Fprintf(stdout, "up name=%s pid=%d preset=%s\n", h.name, proc.Pid, label)
+			return ExitOK
+		}
+		select {
+		case err := <-exited:
+			fmt.Fprintf(stderr, "tincan up: serve exited before parking (%v); see %s\n", err, logPath)
+			return ExitError
+		case <-tick.C:
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintf(stderr, "tincan up: listener %s did not park within %ds (pid %d); see %s\n", h.name, wait, proc.Pid, logPath)
+			return ExitError
+		}
+	}
+}
+
+func cmdDown(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("down", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	roomFlag := fs.String("room", ".", "room directory")
+	wait := fs.Int("wait", 15, "seconds to wait for a clean stop before terminating the process")
+	name, rest := positional(args)
+	if err := fs.Parse(rest); err != nil {
+		return ExitUsage
+	}
+	if name == "" && fs.NArg() > 0 {
+		name = fs.Arg(0)
+	}
+	if name == "" {
+		fmt.Fprintln(stderr, "tincan down: <name> is required")
+		return ExitUsage
+	}
+	if err := spool.ValidName(name); err != nil {
+		fmt.Fprintf(stderr, "tincan down: %v\n", err)
+		return ExitUsage
+	}
+	room, err := filepath.Abs(*roomFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan down: %v\n", err)
+		return ExitError
+	}
+	if w := roomRootWarning(room); w != "" {
+		fmt.Fprintln(stderr, w)
+	}
+	sp, err := spool.Open(room)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan down: %v\n", err)
+		return ExitError
+	}
+	st, hasState, err := host.ReadState(room, name)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan down: warning: %v (treating as no hosted listener)\n", err)
+	}
+	pid := 0
+	if hasState {
+		if st.Alive() {
+			pid = st.PID
+		} else {
+			// Stale: serve was killed without cleanup. Nothing to stop.
+			host.RemoveState(room, name)
+		}
+	}
+	_, present, _ := sp.Present(name)
+	if pid == 0 && !present {
+		// Nothing is listening; queuing a stop now would only be consumed
+		// by the *next* `up`, which would then exit immediately.
+		fmt.Fprintf(stdout, "down name=%s\n", name)
+		return ExitOK
+	}
+	stopEnv := &envelope.Envelope{ID: envelope.NewID(), From: "orch", To: name, TS: time.Now().UTC(), Kind: "stop"}
+	if err := sp.Send(stopEnv); err != nil {
+		fmt.Fprintf(stderr, "tincan down: %v\n", err)
+		return ExitError
+	}
+	gone := func() bool {
+		if pid > 0 {
+			return !spool.ProcessAlive(pid)
+		}
+		_, present, _ := sp.Present(name)
+		return !present
+	}
+	if !waitUntil(gone, time.Duration(*wait)*time.Second) && pid > 0 {
+		fmt.Fprintf(stderr, "tincan down: %s (pid %d) did not stop within %ds; terminating\n", name, pid, *wait)
+		if err := host.Terminate(pid); err != nil {
+			fmt.Fprintf(stderr, "tincan down: terminate: %v\n", err)
+		}
+		if !waitUntil(gone, 5*time.Second) {
+			if err := host.Kill(pid); err != nil {
+				fmt.Fprintf(stderr, "tincan down: kill: %v\n", err)
+			}
+			waitUntil(gone, 2*time.Second)
+		}
+	}
+	done := gone()
+	if pid > 0 && done {
+		host.RemoveState(room, name) // a killed serve cannot clean up after itself
+	}
+	// Our stop may still be queued if the process had to be killed (or an
+	// interactive listener never came back); remove it so the next `up`
+	// does not consume a stale stop and exit at once. Best-effort.
+	os.Remove(filepath.Join(sp.InboxDir(name), envelope.Filename(stopEnv)))
+	fmt.Fprintf(stdout, "down name=%s\n", name)
+	if !done {
+		fmt.Fprintf(stderr, "tincan down: %s still running\n", name)
 		return ExitError
 	}
 	return ExitOK

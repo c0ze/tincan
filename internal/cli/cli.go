@@ -74,8 +74,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdPing(args[1:], stdout, stderr)
 	case "stop":
 		return cmdStop(args[1:], stdout, stderr)
+	case "up":
+		return cmdUp(args[1:], stdout, stderr)
 	case "serve":
 		return cmdServe(args[1:], stdout, stderr)
+	case "down":
+		return cmdDown(args[1:], stdout, stderr)
 	case "presets":
 		return cmdPresets(args[1:], stdout, stderr)
 	case "help", "-h", "--help":

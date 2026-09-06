@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/c0ze/tincan/internal/host"
+	"github.com/c0ze/tincan/internal/spool"
 )
 
 // TestMain lets this test binary stand in for the tincan binary. `up`
@@ -181,5 +183,127 @@ func TestServeForegroundAnswersAndStopsOnStop(t *testing.T) {
 	log, err := os.ReadFile(host.LogPath(room, "fake"))
 	if err != nil || !strings.Contains(string(log), "=== ") {
 		t.Fatalf("host log missing or empty: %v %q", err, log)
+	}
+}
+
+func TestUpDownUsageErrorsExitTwo(t *testing.T) {
+	setHomeEnv(t, t.TempDir()) // no user presets
+	cases := [][]string{
+		{"up"},                             // missing name
+		{"up", "x"},                        // unknown preset, no --exec
+		{"up", "x", "--exec", "a 'unterm"}, // bad template
+		{"up", "../x", "--exec", "a"},      // invalid name
+		{"down"},                           // missing name
+		{"down", "../x"},                   // invalid name
+		{"down", "x", "--wait"},            // flag without value
+	}
+	for _, args := range cases {
+		if code, _, _ := run(args...); code != ExitUsage {
+			t.Errorf("args %v: want exit %d, got %d", args, ExitUsage, code)
+		}
+	}
+}
+
+func TestUpMissingAgentBinaryExitsOne(t *testing.T) {
+	setHomeEnv(t, t.TempDir())
+	code, _, stderr := run("up", "x", "--room", t.TempDir(), "--exec", "tincan-no-such-binary-xyz {body}")
+	if code != ExitError || !strings.Contains(stderr, "not found on PATH") {
+		t.Fatalf("want exit 1 naming the missing binary, got %d: %q", code, stderr)
+	}
+}
+
+func TestUpIsIdempotentWhenAlreadyPresent(t *testing.T) {
+	setHomeEnv(t, t.TempDir())
+	room := t.TempDir()
+	writePresenceFile(t, room, "codex", os.Getpid(), time.Now())
+	code, stdout, stderr := run("up", "codex", "--room", room)
+	if code != ExitOK {
+		t.Fatalf("up exit %d: %s", code, stderr)
+	}
+	if want := fmt.Sprintf("already up name=codex pid=%d", os.Getpid()); strings.TrimSpace(stdout) != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestUpIsIdempotentWhenHostIsBusy(t *testing.T) {
+	setHomeEnv(t, t.TempDir())
+	room := t.TempDir()
+	writeStateFile(t, room, "codex", os.Getpid(), "codex", "busy", "m1") // live pid, not parked
+	code, stdout, _ := run("up", "codex", "--room", room)
+	if code != ExitOK || !strings.HasPrefix(stdout, "already up name=codex") {
+		t.Fatalf("up on a busy host: code=%d out=%q", code, stdout)
+	}
+}
+
+func TestDownWithNothingRunningIsANoop(t *testing.T) {
+	room := t.TempDir()
+	code, stdout, stderr := run("down", "nobody", "--room", room)
+	if code != ExitOK || strings.TrimSpace(stdout) != "down name=nobody" {
+		t.Fatalf("down: code=%d out=%q err=%q", code, stdout, stderr)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(room, ".tincan", "inbox", "nobody")); len(entries) != 0 {
+		t.Fatalf("down queued a stop for a listener that does not exist: %v", entries)
+	}
+}
+
+func TestDownRemovesStaleStateFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("dead-pid detection is unix-only (see spool/alive_other.go)")
+	}
+	room := t.TempDir()
+	writeStateFile(t, room, "ghost", 1<<30, "codex", "busy", "m1")
+	if code, _, stderr := run("down", "ghost", "--room", room); code != ExitOK {
+		t.Fatalf("down exit %d: %s", code, stderr)
+	}
+	if _, ok, _ := host.ReadState(room, "ghost"); ok {
+		t.Fatal("stale state file not removed")
+	}
+}
+
+func TestUpAskStatusDownRoundTrip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("detached up is unsupported on Windows (see host.StartDetached)")
+	}
+	fakeAgentConfig(t)
+	room := t.TempDir()
+	code, stdout, stderr := run("up", "fake", "--room", room, "--wait", "10")
+	if code != ExitOK {
+		t.Fatalf("up exit %d: out=%q err=%q", code, stdout, stderr)
+	}
+	t.Cleanup(func() { run("down", "fake", "--room", room, "--wait", "5") })
+	var pid int
+	if _, err := fmt.Sscanf(stdout, "up name=fake pid=%d preset=fake", &pid); err != nil || pid <= 0 {
+		t.Fatalf("up stdout = %q (%v)", stdout, err)
+	}
+	if code, out, _ := run("up", "fake", "--room", room); code != ExitOK || !strings.HasPrefix(out, "already up name=fake pid=") {
+		t.Fatalf("second up: code=%d out=%q", code, out)
+	}
+	code, reply, stderr := run("ask", "--room", room, "--to", "fake", "--from", "orch", "--body", "hello world", "--timeout", "30", "--format", "body")
+	if code != ExitOK || strings.TrimSpace(reply) != "echo: hello world" {
+		t.Fatalf("ask: code=%d out=%q err=%q", code, reply, stderr)
+	}
+	// serve re-parks right after replying; allow a moment for presence.
+	if !waitUntilTrue(func() bool {
+		r := statusJSON(t, room)["fake"]
+		return r.Mode == "hosted:fake" && r.Alive && !r.Busy && r.PID == pid
+	}, 10*time.Second) {
+		t.Fatalf("status never showed hosted/parked: %+v", statusJSON(t, room)["fake"])
+	}
+	code, stdout, stderr = run("down", "fake", "--room", room, "--wait", "10")
+	if code != ExitOK || strings.TrimSpace(stdout) != "down name=fake" {
+		t.Fatalf("down: code=%d out=%q err=%q", code, stdout, stderr)
+	}
+	if code, out, _ := run("ping", "--room", room, "--to", "fake"); code != ExitError || strings.TrimSpace(out) != "absent" {
+		t.Fatalf("ping after down: code=%d out=%q", code, out)
+	}
+	if !waitUntilTrue(func() bool { return !spool.ProcessAlive(pid) }, 5*time.Second) {
+		t.Fatalf("serve pid %d still alive after down", pid)
+	}
+	if _, ok, _ := host.ReadState(room, "fake"); ok {
+		t.Fatal("state file left behind after down")
+	}
+	log, err := os.ReadFile(host.LogPath(room, "fake"))
+	if err != nil || !strings.Contains(string(log), "=== ") || !strings.Contains(string(log), "echo: hello world") {
+		t.Fatalf("host log missing the run: %v\n%s", err, log)
 	}
 }
