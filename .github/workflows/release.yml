@@ -5,15 +5,26 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
   goreleaser:
+    needs: test
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Verify release tag matches the tested commit
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
       - uses: actions/setup-go@v5
         with:
           go-version: stable

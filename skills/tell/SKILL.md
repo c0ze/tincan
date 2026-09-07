@@ -33,13 +33,15 @@ tincan ping --to <who> --room "$ROOM"
   built-ins are codex, grok, kimi, agy, gemini, claude; `~/.config/tincan/agents.json`
   can add more) or the user gave you an `--exec` template, bring it up yourself:
   `tincan up <who> --room "$ROOM"` (add `--exec '<template>'` for a custom command).
-  It prints `up name=<who> pid=… preset=…` and returns once the listener is parked.
+  It prints `up name=<who> pid=… preset=…` and returns once the hosted listener is
+  authenticated and ready, even if it has already begun queued work.
   If it exits non-zero, stop and report its stderr (it names the host log,
   `.tincan/hosts/<who>.log`) — do not fall back to driving the CLI by hand.
 - Not a preset and no template: ask the user to start `/listen` for `<who>`, or for
   a command to host.
 
-`up` is idempotent, so calling it when a listener is already there is harmless.
+`up` reconnects to an existing listener. Explicit settings must match its running
+configuration; stop it before changing preset or session mode.
 
 ## One target — blocking consult
 
@@ -49,7 +51,8 @@ tincan ask --to <who> --from orch --room "$ROOM" --body-file task.md [--timeout 
 Blocks (no token cost) until the reply arrives; then act on it. `--format body`
 prints just the answer text; default `json` gives the full envelope. If the reply
 lists artifacts, read them from the repo. Size `--timeout` to the task (default
-570s; reviews and generation can need more).
+570s; reviews and generation can need more). Use `--timeout 0` for an indefinite
+wait when your harness supports long-running or background commands.
 
 ## Several targets / fire-and-continue — fan-out
 
@@ -67,16 +70,25 @@ summary + artifact pointer — keeping your context clean.
 
 ## Notes
 
-- Exit 3 with `pending channel=r-<id>` = no reply in time; the request is still
-  queued. Retry, or collect later with `tincan recv --as r-<id> --room "$ROOM"`.
+- Exit 3 with `pending channel=r-<id>` = no reply in time; the original request
+  may be queued or already running. Collect its reply with
+  `tincan recv --as r-<id> --room "$ROOM" --timeout 0`. Do not issue another
+  `ask` for the same task: that submits duplicate work and may repeat edits or
+  other side effects. A timeout only stops waiting; it does not cancel work.
 - Exit 1 = real error (read stderr); exit 2 = your flags were wrong.
 - Ensure the target is actually running `/listen` in the same room — or hosted
   via `tincan up` (see above); `tincan status --room "$ROOM"` shows both.
-- A reply body starting `ERROR exit=` / `ERROR timeout` / `ERROR exec:` /
-  `ERROR interrupted` comes from a hosted listener whose agent run failed — treat
-  it as that agent failing, not as a tincan error; details are in
-  `.tincan/hosts/<who>.log`.
-- Hosted runs are single-turn: each brief must be self-contained (no "as I said
-  before").
+- A hosted `ERROR ` reply marks failed or interrupted work. `ERROR session:`
+  includes structured provider errors and session/parsing failures. Inspect the
+  reply and `.tincan/hosts/<who>.log` to distinguish provider, process and storage
+  problems before deciding whether to send new work.
+- If a run was interrupted by a crash, inspect its status, log and workspace
+  before deciding whether to submit new work. An interrupted run may have made
+  changes; tincan does not automatically replay it.
+- Claude/Grok/Agy/Kimi native executable presets keep a conversation per room and
+  listener by default. Codex/Gemini/custom commands default to stateless runs and
+  need self-contained briefs. Select `--session persistent|stateless` on launch;
+  MCP `tincan_reset` stops a listener and explicitly starts its next conversation
+  fresh. Stopping alone preserves the saved conversation.
 - When the session's work is done, stop what you started:
   `tincan down <who> --room "$ROOM"` for each hosted listener you brought up.

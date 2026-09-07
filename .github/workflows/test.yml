@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -11,20 +15,27 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        go: ["1.25.x", stable]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Reusable release checks test the caller's exact tagged commit.
+          ref: ${{ github.sha }}
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version: ${{ matrix.go }}
       - name: Vet and build
         run: |
           go vet ./...
           go build ./...
       - name: Test
         run: go test ./... -race -count=1
+      - name: Installer regression tests
+        if: runner.os != 'Windows' && matrix.go == 'stable'
+        run: bash tests/install_test.sh
       - name: Spool stress (macOS/Windows)
         # Concurrency races differ per fs backend (kqueue EBADF/ENOENT churn,
         # Windows handle-based renames); Linux/inotify alone would miss them.
-        if: runner.os != 'Linux'
+        if: runner.os != 'Linux' && matrix.go == 'stable'
         run: go test ./internal/spool/ -race -count=10

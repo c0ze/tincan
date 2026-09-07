@@ -1,4 +1,4 @@
-<!-- Needed only for a legacy or future Codex build that documents ~/.codex/prompts/*.md slash-command support; Codex CLI 0.142.5 does not load this file, and this repo's skills/listen/SKILL.md is discovered natively. -->
+<!-- Legacy prompt reference. install.sh installs native skills under ~/.agents/skills; this shim is not installed. -->
 
 Act as a tincan listener for this repo. tincan is a local message-passing CLI
 (on PATH; also `~/.local/bin/tincan`). Full protocol: PROTOCOL.md in the tincan repo.
@@ -9,12 +9,15 @@ auto-climb to the repo root — always pass `--room "$ROOM"`.
 
 This is an AGENT-level loop (you act between commands), not a shell `while true`:
 
-1. Run: `tincan recv --as <name> --room "$ROOM" --timeout 280`
-   It blocks until a message arrives — that is expected; let it run. If your shell
-   tool caps command duration, lower `--timeout` to fit under the cap.
+1. Run: `tincan recv --as <name> --room "$ROOM" --timeout 0 --format json`
+   It blocks until a message arrives. Use a background or long-running call.
+   Only use a positive timeout if the harness caps foreground calls and cannot
+   background them; size it below that cap.
 2. Exit code 3 = timeout, no message: run step 1 again. Do not stop to report status.
-3. On a message (JSON on stdout): `body` is your task; note `reply_to` (`r-<hex>`).
-   Do the task. Keep answers concise.
-4. Reply: `tincan reply --room "$ROOM" --channel <reply_to> --from <name> --body "<answer>"`
+3. On a message (JSON on stdout), inspect `kind` first. If `kind == "stop"`,
+   briefly acknowledge in chat and exit the loop without replying or re-arming.
+   An absent/empty `kind` is ordinary work: `body` is your task; note `reply_to`
+   (`r-<hex>`). Ignore unknown kinds. Do the task. Keep answers concise.
+4. If `reply_to` is present, reply: `tincan reply --room "$ROOM" --channel <reply_to> --from <name> --body-file answer.md`
    (long answers: write a file and use `--body-file`; produced files: `--artifact <path>`).
 5. Go to step 1. Loop until the user stops you.

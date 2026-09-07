@@ -1,21 +1,28 @@
 # tincan — operating protocol
 
 tincan passes messages between AI coding agents on one machine, scoped to a repo,
-over a filesystem spool. No daemon, no message store, near-zero tokens while idle.
+over a filesystem spool. No network service or background coordinator; messages,
+hosted logs and request state are stored locally. Near-zero tokens while idle.
 Design rationale lives in `docs/superpowers/specs/`; this file is the operating guide
 that the `/tell` and `/listen` skills point to.
 
 ## Model
 
 - Each participant has a **name** (`orch`, `codex`, `gemini`, …) and an inbox under
-  `<room>/.tincan/inbox/<name>/`. Names must be a single path component — no `/`,
-  `\`, `.`, or `..` (the CLI rejects anything else).
-- **Send** = drop a message file into the recipient's inbox (atomic).
-- **Receive** = block until a file appears, print it, delete it. Blocking is free:
+  `<room>/.tincan/inbox/<name>/`. Names and message IDs are portable path
+  components, at most 128 bytes. Empty names, `.`/`..`, path separators, control
+  characters, Windows-reserved characters/device names, and trailing dots/spaces
+  are rejected. Interior dots are allowed.
+- **Send** = publish a synced message file into the recipient's inbox with an
+  atomic hard link, without overwriting existing work. The local spool filesystem
+  must support hard links (for example POSIX filesystems or NTFS).
+- **Receive** = block until a file appears, claim it, print it, acknowledge it.
+  Hosted listeners retain claims until delivery. Blocking is free:
   the shell call is suspended, so the model spends no tokens while waiting.
 - Unread messages **queue**; a receive that times out and re-arms loses nothing.
-- **Replies** use an ephemeral per-request channel (`r-<id>`) so parallel requests
-  never cross.
+- CLI and interactive **replies** use a per-request channel (`r-<id>`) so parallel
+  requests never cross. Hosted MCP requests store results directly in the durable
+  request journal.
 - While a receive is parked, its process writes a small per-receiver presence
   file under `<room>/.tincan/present/<name>/` (separate from the inbox) so
   `status`/`ping` can answer "is a listener parked?" without sending a
@@ -34,7 +41,7 @@ bare will silently create a *second* room there. Always pass the room explicitly
 ```
 
 If `--room` resolves to a directory that's inside a git repo but isn't that
-repo's root, every command prints a one-line advisory to stderr naming the
+repo's root, messaging and hosted lifecycle commands print an advisory to stderr naming the
 repo root it found — the warning never fails the command or changes its exit
 code, it just flags the footgun before it silently splits your room in two.
 
@@ -58,15 +65,20 @@ tincan ping   --to <name>
 tincan stop   --to <name> --from <name>
 
 tincan up     <name> [--preset <p>] [--exec '<template>'] [--stdin body|none]
-              [--reply stdout|file] [--exec-timeout <sec=3600>] [--wait <sec=10>]
+              [--reply stdout|file] [--session persistent|stateless]
+              [--exec-timeout <sec=3600>] [--wait <sec=10>]
 tincan serve  <name> [same flags as up] [--daemon]
 tincan down   <name> [--wait <sec=15>]
 tincan presets [--format table|json]
+tincan version [--format json]
+tincan mcp --room <absolute-path>
+tincan gc [--older-than 168h] [--room <path>]
 ```
 
-All commands take `--room <path>` (see above; default `.`). `up`/`serve`/`down`/
-`presets` are the **hosted listener** commands — tincan runs a headless agent CLI
-for you so no human terminal is needed per agent; see below.
+Messaging, hosted lifecycle and cleanup commands take `--room <path>` (default
+`.`); MCP binds its room at startup. `presets` and `version` are room-independent.
+`up`/`serve`/`down` are the **hosted listener** commands — tincan runs a headless
+agent CLI for you so no human terminal is needed per agent; see below.
 
 - `recv --log` keeps a copy of each consumed message in `<room>/.tincan/log/`
   (default: consumed messages are deleted; chat transcripts are the record).
@@ -143,10 +155,9 @@ tincan stop --to <name> --from <name> [--room <path>]
 
 `stop` builds an envelope with `Kind: "stop"` and an empty body, and sends it
 like any other message: it queues in `<name>`'s inbox and is delivered on
-their next `recv`. `--to` and `--from` are required. tincan itself does not
-enforce shutdown — it only carries the typed message. The `listen` skill is
-what honors it: on receiving a message with `kind == "stop"`, the listener
-acks briefly, then exits its loop instead of re-arming. **You must pass
+their next `recv`. `--to` and `--from` are required. Hosted listeners honor it
+inside tincan. Interactive listeners honor it through the `listen` skill: the
+agent acknowledges briefly, then exits its loop instead of re-arming. **You must pass
 `--format json` on `recv` to see `kind`** — `--format body` only prints the
 message body and drops the envelope, including `kind`.
 
@@ -162,14 +173,16 @@ a detached `tincan serve` process that
 2. for each ordinary message, renders the configured agent command with the
    message body as the prompt, runs it with `cwd = room`, and captures its
    output;
-3. sends that output as the reply on the message's `reply_to` channel (a
-   message without `reply_to` is run and logged only);
-4. loops. A `kind == "stop"` message (`tincan stop` / `tincan down`) or
-   SIGTERM/SIGINT ends the loop.
+3. persists the terminal result, sends a reply if `reply_to` is present, then
+   acknowledges the claimed message;
+4. loops. A `kind == "stop"` message (`tincan stop`), authenticated shutdown
+   (`tincan down`), or SIGTERM/SIGINT ends the loop.
 
-Each message is a **fresh single-turn run** of the agent CLI — no memory
-between messages, so briefs must be self-contained. One hosted process is one
-serial worker; run `up` with different names for fan-out.
+Each request runs one provider CLI process. Claude, Grok, Agy and Kimi native
+executable presets resume a conversation scoped to the room and listener name by
+default. Codex, Gemini and custom executables default to stateless runs and need
+self-contained briefs. One hosted process is one serial worker; run `up` with
+different names for fan-out. Select a policy with `--session persistent|stateless`.
 
 ```
 tincan up codex --room "$ROOM"          # up name=codex pid=12345 preset=codex
@@ -178,24 +191,29 @@ tincan status --room "$ROOM"            # MODE hosted:codex, STATE parked|busy
 tincan down codex --room "$ROOM"        # down name=codex
 ```
 
-- `up` is idempotent: if any listener named `<name>` is already live in the
-  room (hosted or interactive), it prints `already up name=<name> pid=<n>` and
-  exits 0. It resolves the preset (`--preset`, else `<name>` if that is a
+- `up` reconnects to a live listener named `<name>` and prints
+  `already up name=<name> pid=<n>`. Explicit settings must match the running
+  hosted configuration; stop it before selecting another preset or session mode.
+  For a new listener it resolves the preset (`--preset`, else `<name>` if that is a
   known preset, else `--exec` is required → exit 2), checks the agent binary
   is on `PATH` (exit 1 if not), starts `serve … --daemon` detached (own
-  session, stdio on the host log) and waits up to `--wait` seconds for the
-  listener to park (exit 1 with the log path if it doesn't).
+  session, stdio on the host log) and waits up to `--wait` seconds for authenticated
+  readiness. A listener can become ready while already processing queued work.
+  Failure reports the host log path.
 - `serve` is the loop itself, in the foreground — handy for debugging a
   preset (`Ctrl-C` stops it). `--daemon` is what `up` passes.
-- `down` sends `stop` (from `orch`), waits up to `--wait` seconds for the
-  process to exit, then SIGTERMs the recorded pid and, 5 s later, SIGKILLs it.
-  Exit 0 if the process is gone, 1 otherwise. A `stop` arrives only when the
-  current run finishes; `--wait` is how long you are prepared to let it.
+- `down` sends an authenticated shutdown request to a hosted listener,
+  immediately cancels its active run and waits for its ownership lock to be
+  released. It does not signal a process based on a stored PID. For an
+  interactive listener it sends the ordinary typed stop envelope. A queued
+  `tincan stop` waits until the listener next receives; use `down` to interrupt
+  an active hosted run.
 - `presets` lists the effective presets (`--format json` for scripts).
 
 ### Presets and `~/.config/tincan/agents.json`
 
-Built-in presets (the headless invocations verified on 2026-09-07):
+Base preset commands (session adapters add the explicit session and output flags
+described below):
 
 | preset | exec template | stdin | reply |
 |---|---|---|---|
@@ -224,38 +242,191 @@ file ← command-line flags:
 }
 ```
 
-Reply post-processing is minimal and preset-level: trailing whitespace is
-trimmed; for `kimi` the trailing `To resume this session: …` line is dropped.
-Nothing else is rewritten.
+Persistent adapters use structured output and return only the final assistant
+answer. Assistant text becomes progress; startup inventories, thoughts and
+provider stderr remain in the private host log. Empty, invalid, incomplete or
+oversized structured output produces an explicit error. Stateless commands keep
+their legacy text/file replies; trailing whitespace and Kimi's resume-hint footer
+are trimmed.
+
+### Conversations and reset
+
+The `session` field in a preset can be `persistent` or `stateless`. An omitted
+field selects persistent mode only for the native `claude`, `grok`, `agy` and
+`kimi` executables under their respective preset labels. A custom wrapper must
+explicitly opt into a supported adapter; its executable and other arguments are
+preserved. Persistent adapters manage output/resume flags, so remove conflicting
+`--continue`, `--resume` or session-ID flags from the configured command.
+
+| Provider | Structured format | Explicit resume argument |
+|---|---|---|
+| Claude | `stream-json` with `--verbose` | `--resume <UUID>` |
+| Grok | `streaming-json` | `--resume <UUID>` |
+| Agy | `stream-json` | `--conversation <UUID>` |
+| Kimi | `stream-json` | `--session <session_UUID>` |
+
+Saved pointers in `.tincan/sessions/<name>.json` survive host and MCP restarts.
+Each pointer records its provider and preset identity; changing those requires
+an explicit reset. The adapters never resume a provider's most recent global
+conversation. If initialization is interrupted before a usable ID is observed,
+the next request fails with a reset instruction. A failed resume preserves the
+saved pointer and error; it never silently starts a replacement conversation.
+
+MCP `tincan_reset` stops the listener, interrupts its active request and atomically
+removes the saved pointer under the launch/lifetime locks. Its next launch starts
+fresh. Provider-side transcripts are preserved. Stop and reset both leave queued
+requests available for the next launch, so cancel unwanted queued work explicitly
+before resetting. Stopping alone preserves the conversation.
 
 ### Files under the room
 
 ```
-.tincan/hosts/<name>.json   # {"pid", "preset", "exec", "started", "state": "parked|busy", "current_id"}
+.tincan/hosts/<name>.json   # private owner/control credentials, preset, session_mode, state, current_id
 .tincan/hosts/<name>.log    # per message: "=== <id> from=<from> started=<ts>" … agent stdout+stderr … "=== exit=<code> duration=<s>s"
+.tincan/sessions/<name>.json # saved provider conversation pointer and preset identity
+.tincan/requests/<id>.json # durable request status and result
+.tincan/requests/<id>.jsonl # bounded progress events
 ```
 
+New runtime directories use `0700` and regular files use `0600` on POSIX.
+Send and claim also tighten an existing `.tincan` root to `0700`; room/ancestor
+permissions and existing child file modes are left alone. On Windows, protect
+the room with the appropriate user ACLs.
+Spool paths reject symlinks. Inbox input must be a regular file containing a
+valid envelope no larger than 8 MiB; malformed, mismatched or unsafe input is
+quarantined so later valid work can continue.
+
+Unacknowledged claims live under `.tincan/inflight/<name>/`. A host restart treats
+leftover work as interrupted/uncertain. A process may have changed the workspace
+before it died, so tincan does not automatically execute that work again.
+Inspect the log and files before deliberately submitting a new task. This is
+durable delivery bookkeeping, not a guarantee of exactly-once external effects.
+
 The state file is written atomically (tmp + rename) and removed on clean
-exit; a state file whose pid is dead is stale and `status` ignores it (shows
-`—`, never a phantom `busy`). Add `.tincan/` to your project's `.gitignore`
+exit; status validates the authenticated host lifetime before reporting it as
+alive or busy. Add `.tincan/` to your project's `.gitignore`
 (or global excludes) — it now holds logs, not just transient messages.
 
-### Error handling — the asker always gets a reply
+An OS lock gives each hosted name one owner for its lifetime. Readiness and
+shutdown authenticate to that owner through a private loopback control endpoint;
+the stored PID alone never authorizes shutdown. Output streams to the log and
+bounded request progress, with at most a 1 MiB in-memory tail per stream.
 
-- Agent exits non-zero → reply `ERROR exit=<code>` + newline + the last 4 KiB
-  of its stderr, then any stdout.
+### Error handling and interrupted work
+
+- A structured provider failure → `ERROR session: provider failed …` with the
+  parsed reason, including when the provider exits nonzero. Other nonzero exits
+  return `ERROR exit=<code>` and the last 4 KiB of stderr; stateless commands also
+  include captured stdout. Raw structured startup metadata is excluded.
 - `--exec-timeout` elapsed (default 3600 s; `0` = none) → the agent's whole
   process group is killed; reply `ERROR timeout after <sec>s`.
 - Agent binary missing at run time (removed after `up`) → reply
   `ERROR exec: <message>`; the listener keeps running.
 - The listener is stopped (`down`/SIGTERM) mid-run → the agent is killed and
   the asker gets `ERROR interrupted: hosted listener was stopped while running`.
-- Malformed/unknown `kind` → ignored and logged, no reply. A failed reply
-  send (spool error) is logged; the loop continues.
+- Malformed envelopes are quarantined; an unknown `kind` is not executed.
+- A hard crash may prevent an immediate reply. Retained claims and request state
+  allow recovery to report interrupted work; a missing reply is not permission
+  to repeat an agent run automatically.
 - Room rules are unchanged: pass `--room` explicitly; non-root rooms warn.
 
-A reply body starting with `ERROR ` is therefore the *agent* failing, not
-tincan — treat it as such in the orchestrator.
+A hosted `ERROR ` reply marks failed or interrupted work. Inspect its details to
+distinguish provider, session, process and storage failures before deciding what
+to do next.
+
+### Retention
+
+`tincan gc --room "$ROOM" --older-than 168h` removes old terminal request records
+and progress once they are no longer needed by a queued/in-flight delivery, plus
+old consumed-message audit logs and quarantine entries. The default age is seven
+days; the minimum is one hour. It retains active work, queued messages, claims,
+session pointers and host logs. After a request record is collected, its result
+and idempotency protection are gone; do not reuse old request IDs for new work.
+
+## MCP stdio
+
+Start a server with `tincan mcp --room /absolute/path/to/repo`. The room is fixed
+for that server's lifetime; tools cannot override it. MCP uses stdin/stdout and
+diagnostics use stderr. The binary's `tincan version --format json` reports
+version, commit, date, modification status, Go version and module identity.
+Build this checkout for the interface below: the `v0.1.0` release does not
+contain it, and `@main` includes only changes published to the main branch.
+
+Clients with an `mcpServers` JSON configuration can use:
+
+```json
+{
+  "mcpServers": {
+    "tincan": {
+      "command": "/absolute/path/to/tincan",
+      "args": ["mcp", "--room", "/absolute/path/to/repo"]
+    }
+  }
+}
+```
+
+Tools expose structured inputs/results:
+
+| Tool | Arguments | Result / behavior |
+|---|---|---|
+| `tincan_presets` | `{}` | Preset names, executable availability and adapter support. |
+| `tincan_launch` | `name`, optional `preset`, `session_mode` | Agent status and `already`; matching live names reconnect. |
+| `tincan_send` | `agent`, `body`, optional `request_id`, `from` | Durable request view; starts an absent configured listener. |
+| `tincan_wait` | `request_id`, optional `timeout_seconds`, `cursor` | Request status/result, progress `events` and `next_cursor`. |
+| `tincan_status` | Optional `name` or `request_id` | Room/listener views, or one request. |
+| `tincan_cancel` | `request_id` | Requests cancellation of hosted work; earlier changes remain. |
+| `tincan_reset` | `name` | Stops the listener, interrupts active work and clears its pointer. |
+| `tincan_stop` | `name` | Stops the listener and interrupts active work; keeps its pointer. |
+
+The MCP interface accepts configured presets, without an arbitrary execution
+template. Preset configuration is a local trust decision: a configured worker
+can edit files or perform other actions permitted by its provider CLI.
+
+For example, invoke the tools with these JSON argument objects in order:
+
+```json
+{"name":"reviewer","preset":"claude","session_mode":"persistent"}
+```
+
+Pass that object to `tincan_launch`, then submit through `tincan_send`:
+
+```json
+{"agent":"reviewer","from":"mcp","body":"Review the current diff","request_id":"review-1"}
+```
+
+Collect through `tincan_wait`:
+
+```json
+{"request_id":"review-1","timeout_seconds":30,"cursor":0}
+```
+
+The wait timeout is `0`–`30` seconds; omitted/zero polls immediately. Pass the
+returned `next_cursor` as the next `cursor` to receive subsequent progress, and
+keep waiting on the same ID while `terminal` is false. States are `queued`,
+`running`, `completed`, `failed`, `interrupted` and `canceled`; the final four are
+terminal. Progress is bounded and advisory; `result` is the authoritative answer.
+Clients that supply an MCP progress token also receive progress notifications.
+
+An explicit `request_id` is an idempotency key for identical agent/from/body
+values while the record is retained. Different work with the same ID is rejected.
+New or omitted IDs submit new work. The prompt limit is 1 MiB; `from` defaults to
+`mcp`. If startup fails after saving work, retain the ID from the error, launch
+the intended listener and collect or retry that same ID. A custom listener name
+such as `reviewer` needs an explicit launch with its preset after being stopped.
+
+Hosts and retained requests continue after the MCP connection closes. Reconnect
+to the same room and use the same ID with wait/status. A wait deadline does not
+cancel work. Cancellation or a crash may leave changes already made by the
+worker; inspect state and workspace before submitting new work. Interrupted work
+is never replayed automatically. Stop/reset preserve queued work for a later
+launch; cancel each unwanted queued request first.
+
+MCP can also send to an existing interactive `/listen` receiver. Its ordinary
+reply is collected into the durable journal by wait or status. Outstanding
+interactive requests keep routing to that receiver while it is busy and has no
+parked presence. The interactive
+receiver does not report hosted running/progress state, and request cancellation
+is unsupported for that legacy loop; use the interactive session's own controls.
 
 ### Security caveat
 
@@ -271,8 +442,8 @@ with a trusted orchestrator; think before widening that boundary.
 
 Detaching (`up`) is implemented for Linux/macOS (new session, stdio to the
 log). On Windows `up` fails with a clear message in this iteration; `tincan
-serve <name>` in a terminal works there, and the per-run process-group kill
-uses `taskkill /T`.
+serve <name>` in a terminal works there. Agent processes run in a Windows Job
+Object so interruption terminates their descendants too.
 
 ## Starting a listener, per agent
 
@@ -282,12 +453,15 @@ tincan listeners are implemented using the `listen` skill. Although all three su
 | :--- | :--- | :--- | :--- |
 | **Claude Code** | User-level skill path: `~/.claude/skills/listen` | Slash command `/listen` (optionally `as <name>`) | Allowlist `Bash(tincan *)` in the project's `.claude/settings.json` |
 | **Antigravity** | Workspace skill path: `.agents/skills/` (repo ships `.agents/skills` -> `skills` symlink) | Slash command `/listen` | Start with `agy --dangerously-skip-permissions` or use prompt-level "always allow this command" |
-| **Codex** | Workspace skill path: `skills/listen/SKILL.md` (via native registry) | Plain query `"listen"` or matching request (no `/listen` command exists) | Run with `--full-auto` or `--ask-for-approval never --sandbox workspace-write` |
+| **Codex** | User skills: `~/.agents/skills/listen/SKILL.md`; workspace `.agents/skills/` also works | Plain query `"listen as codex"` or matching request | Run with `--full-auto` or `--ask-for-approval never --sandbox workspace-write` |
 
 ### Onboarding & Best Practices
 
 - **Backgrounding `recv`:** If your agent harness caps the duration of foreground commands, run the `recv` command in the background/async (e.g., in Antigravity, by executing the command with `WaitMsBeforeAsync` and yielding) and process the output when the background task wakes you up.
-- **Audit Logging (optional):** add `--log` to `tincan recv` to keep an audit copy of consumed messages in `<room>/.tincan/log/`. Default is off — tincan deliberately stores nothing, and the agents' chat transcripts are the canonical record.
+- **Audit Logging (optional):** add `--log` to `tincan recv` to keep an audit copy
+  of consumed messages in `<room>/.tincan/log/`. Default is off for interactive
+  receives; hosted logs, active claims and MCP request records have separate
+  persistence requirements.
 
 ## LISTEN loop — an agent-level loop, not a shell loop
 
@@ -306,9 +480,11 @@ duration and you cannot background the call.
 1. `tincan recv --as <me> --room "$(git rev-parse --show-toplevel)" --timeout 0`
 2. **Exit 3 (timeout, positive-timeout mode only):** run step 1 again. Do not
    report status in between.
-3. **On a message** (JSON): `body` is the task; note `reply_to` (`r-<hex>`). Do the
-   work — review the diff, answer the question, generate the file.
-4. `tincan reply --channel <reply_to> --from <me> --body-file answer.md`
+3. **On a message** (JSON): inspect `kind` first. `"stop"` means acknowledge in
+   chat and exit without replying or re-arming; ignore unknown kinds. For an
+   absent/empty `kind`, `body` is the task; note `reply_to` (`r-<hex>`). Do the work.
+4. If `reply_to` is present:
+   `tincan reply --room "$ROOM" --channel <reply_to> --from <me> --body-file answer.md`
    (add `--artifact out/x.png` for produced files; keep the body a short pointer,
    not the payload).
 5. Go to step 1. Continue until the user stops the session.
@@ -350,14 +526,15 @@ machine with a trusted orchestrator; think before widening that boundary.
 
 ## Troubleshooting
 
-- `ask` printed `pending channel=r-<id>`: the target didn't reply in time. The
-  request is still queued and the channel persists — collect later with
-  `tincan recv --as r-<id>`, or re-ask.
+- `ask` printed `pending channel=r-<id>`: no reply arrived before the deadline.
+  The original request may be queued or running. Collect it with
+  `tincan recv --as r-<id> --room "$ROOM" --timeout 0`. Do not re-ask the same
+  task: that submits duplicate work. A waiting timeout does not cancel work.
 - Nothing happens: confirm both sides use the **same room path** (see Rooms above)
   and the listener is actually parked on `recv` — check with
   `tincan ping --to <name> --room <path>` or `tincan status --room <path>`
   instead of guessing from `ps`.
-- `invalid name`: names are single path components; no slashes or dots.
+- `invalid name`: use a portable path component; see the naming rules above.
 - `up` said `did not park` / `exited before parking`: read
   `<room>/.tincan/hosts/<name>.log` — the agent CLI's own usage/auth errors
   land there. `tincan serve <name> --room <path>` runs the same loop in the

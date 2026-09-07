@@ -13,7 +13,8 @@ requests from an orchestrator, reply, and immediately go back to listening. See
 
 1. Pick your **name**: from the invocation (`/listen as codex` → `codex`);
    otherwise ask the user, or default to a short lowercase agent name. Names are
-   single path components (no slashes/dots).
+   portable path components (no slashes, `.`/`..`, or trailing dots/spaces;
+   interior dots are allowed).
 2. Resolve the **room** once: `ROOM="$(git rev-parse --show-toplevel)"` (fall back
    to the absolute CWD outside a repo). tincan does NOT auto-climb to the repo
    root — always pass `--room "$ROOM"` explicitly. All parties must share it.
@@ -47,7 +48,8 @@ reasoning context. Each iteration is one blocking command, then you act.
      "received stop, winding down"), then **exit the loop — do not go to step
      1, do not re-arm, skip step 4.** tincan only carries the typed message;
      honoring it is on you.
-4. Reply: `tincan reply --room "$ROOM" --channel <reply_to> --from <name> --body-file <answer> [--artifact <path> ...]`
+   - **3c. Unknown `kind`:** ignore it and re-arm; do not interpret it as work.
+4. If `reply_to` is present, reply: `tincan reply --room "$ROOM" --channel <reply_to> --from <name> --body-file <answer> [--artifact <path> ...]`
    Keep the body concise; return produced files as `--artifact` pointers, not inline.
    (Optionally add `--log` to your recv in step 1 to keep an audit copy of consumed
    messages in `.tincan/log/`.) This step applies to normal messages (3a) only.
