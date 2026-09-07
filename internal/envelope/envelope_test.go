@@ -94,3 +94,40 @@ func TestNewIDUniqueAndWellFormed(t *testing.T) {
 		seen[id] = true
 	}
 }
+
+func TestRejectsUnsafePortableComponents(t *testing.T) {
+	for _, bad := range []string{"", ".", "..", "../x", `a\b`, "x:y", "x\x00y", "x\ny", "x?", "x*", "x|", "x<", "x>", "x\"", "x.", "x ", "CON", "nul.txt", "com1", "LPT9.txt", strings.Repeat("a", 129), string([]byte{0xff})} {
+		if err := ValidComponent(bad); err == nil {
+			t.Errorf("accepted unsafe component %q", bad)
+		}
+	}
+	for _, good := range []string{"worker", "r-abc", "legacy_123", "agent.2", "日本語", strings.Repeat("a", 128)} {
+		if err := ValidComponent(good); err != nil {
+			t.Errorf("rejected safe component %q: %v", good, err)
+		}
+	}
+}
+
+func TestUnmarshalRejectsMissingEnvelopeFields(t *testing.T) {
+	for _, data := range []string{"null", "{}", `{"id":"safe","from":"a","ts":"2026-07-03T12:00:00Z"}`, `{"id":"../escape","from":"a","to":"b","ts":"2026-07-03T12:00:00Z"}`} {
+		if _, err := Unmarshal([]byte(data)); err == nil {
+			t.Errorf("accepted invalid envelope %s", data)
+		}
+	}
+}
+
+func TestValidateTimestampRange(t *testing.T) {
+	e := &Envelope{ID: "legacy-id", From: "a", To: "b"}
+	for _, ts := range []time.Time{{}, time.Unix(-1, 0), time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC)} {
+		e.TS = ts
+		if err := Validate(e); err == nil {
+			t.Errorf("accepted timestamp %v", ts)
+		}
+	}
+	for _, ts := range []time.Time{time.Unix(0, 0), time.Unix(0, 1<<63-1)} {
+		e.TS = ts
+		if err := Validate(e); err != nil {
+			t.Errorf("rejected timestamp %v: %v", ts, err)
+		}
+	}
+}

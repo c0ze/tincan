@@ -6,7 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Envelope is one tincan message. One envelope = one JSON file in a spool inbox.
@@ -43,6 +46,9 @@ func Filename(e *Envelope) string {
 
 // Marshal renders e as indented JSON (readable when inspecting a spool by hand).
 func Marshal(e *Envelope) ([]byte, error) {
+	if err := Validate(e); err != nil {
+		return nil, err
+	}
 	return json.MarshalIndent(e, "", "  ")
 }
 
@@ -52,5 +58,54 @@ func Unmarshal(data []byte) (*Envelope, error) {
 	if err := json.Unmarshal(data, &e); err != nil {
 		return nil, err
 	}
+	if err := Validate(&e); err != nil {
+		return nil, err
+	}
 	return &e, nil
+}
+
+// ValidComponent accepts one portable filename component, including legacy
+// human-readable IDs, while rejecting traversal, alternate streams, Windows
+// device names and control characters.
+func ValidComponent(value string) error {
+	if value == "" || value == "." || value == ".." || len(value) > 128 || !utf8.ValidString(value) ||
+		strings.ContainsAny(value, `/\\<>:"|?*`) || strings.HasSuffix(value, ".") || strings.HasSuffix(value, " ") {
+		return fmt.Errorf("tincan: invalid name or ID %q", value)
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("tincan: invalid name or ID %q", value)
+		}
+	}
+	base := strings.ToUpper(strings.SplitN(value, ".", 2)[0])
+	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" ||
+		(len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9') {
+		return fmt.Errorf("tincan: reserved name or ID %q", value)
+	}
+	return nil
+}
+
+// Validate checks the parts of an envelope used for routing or filesystem paths.
+// Artifact paths are descriptive metadata and are never opened by the spool.
+func Validate(e *Envelope) error {
+	if e == nil {
+		return fmt.Errorf("tincan: nil envelope")
+	}
+	for _, value := range []string{e.ID, e.To} {
+		if err := ValidComponent(value); err != nil {
+			return err
+		}
+	}
+	for _, value := range []string{e.From, e.ReplyTo, e.CorrID} {
+		if value != "" {
+			if err := ValidComponent(value); err != nil {
+				return err
+			}
+		}
+	}
+	// UnixNano is undefined outside this range and would break queue ordering.
+	if e.TS.IsZero() || e.TS.Before(time.Unix(0, 0)) || e.TS.After(time.Unix(0, int64(1<<63-1))) {
+		return fmt.Errorf("tincan: timestamp outside supported range")
+	}
+	return nil
 }

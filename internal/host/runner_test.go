@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +12,58 @@ import (
 
 	"github.com/c0ze/tincan/internal/spool"
 )
+
+func TestRunKillsDescendantsAfterDirectChildExits(t *testing.T) {
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	for _, mode := range []string{"fork", "fork-pipes"} {
+		t.Run(mode, func(t *testing.T) {
+			pidfile := filepath.Join(t.TempDir(), "child.pid")
+			start := time.Now()
+			res := Run(context.Background(), RunSpec{Argv: fakeExec(mode, pidfile), Dir: t.TempDir()})
+			if res.Err != nil || res.ExitCode != 0 {
+				t.Fatalf("result: %+v", res)
+			}
+			pid := readPID(t, pidfile)
+			if !waitFor(func() bool { return !spool.ProcessAlive(pid) }, 3*time.Second) {
+				t.Fatalf("descendant %d survived its parent's exit", pid)
+			}
+			if time.Since(start) > 5*time.Second {
+				t.Fatalf("descendant delayed completion: %s", time.Since(start))
+			}
+		})
+	}
+}
+
+func TestRunStreamsAllOutputAndBoundsCapture(t *testing.T) {
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	counts := map[string]int{}
+	res := Run(context.Background(), RunSpec{Argv: fakeExec("volume"), Dir: t.TempDir(), Output: func(stream string, p []byte) error { counts[stream] += len(p); return nil }})
+	if res.Err != nil || res.ExitCode != 0 {
+		t.Fatalf("result: %+v", res)
+	}
+	if len(res.Stdout) != MaxCapturedOutput || len(res.Stderr) != MaxCapturedOutput {
+		t.Fatalf("capture sizes: %d %d", len(res.Stdout), len(res.Stderr))
+	}
+	if !res.StdoutTruncated || !res.StderrTruncated || !strings.HasPrefix(ReplyBody(RunSpec{}, res), "[output truncated;") {
+		t.Fatal("output truncation was not reported")
+	}
+	if counts["stdout"] != 2*MaxCapturedOutput || counts["stderr"] != 2*MaxCapturedOutput {
+		t.Fatalf("incomplete streamed output: %v", counts)
+	}
+}
+
+func TestRunOutputSinkFailureCancelsJob(t *testing.T) {
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	sinkErr := errors.New("durable log unavailable")
+	start := time.Now()
+	res := Run(context.Background(), RunSpec{Argv: fakeExec("progress"), Dir: t.TempDir(), Output: func(string, []byte) error { return sinkErr }})
+	if !errors.Is(res.Err, sinkErr) {
+		t.Fatalf("result: %+v", res)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("sink failure did not cancel the child")
+	}
+}
 
 func TestRunCapturesStdoutAndExitZero(t *testing.T) {
 	t.Setenv("TINCAN_FAKE_AGENT", "1")

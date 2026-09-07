@@ -5,7 +5,6 @@ package host
 import (
 	"os"
 	"os/exec"
-	"path/filepath"
 	"syscall"
 )
 
@@ -17,10 +16,7 @@ import (
 // not released: keeping a Wait running lets the caller reap the child while
 // it is still alive; the daemon outlives the caller either way.
 func StartDetached(exe string, args []string, dir, logPath string) (*os.Process, <-chan error, error) {
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		return nil, nil, err
-	}
-	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logf, err := OpenLog(logPath)
 	if err != nil {
 		return nil, nil, err
 	}

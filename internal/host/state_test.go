@@ -1,6 +1,7 @@
 package host
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,6 +9,78 @@ import (
 	"testing"
 	"time"
 )
+
+func TestHostFilesArePrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permissions")
+	}
+	room := t.TempDir()
+	if err := WriteState(room, "agent", State{PID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := OpenLog(LogPath(room, "agent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	for _, path := range []string{StatePath(room, "agent"), LogPath(room, "agent")} {
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := WriteState(room, "agent", State{PID: 2}); err != nil {
+		t.Fatal(err)
+	}
+	f, err = OpenLog(LogPath(room, "agent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	for _, path := range []string{StatePath(room, "agent"), LogPath(room, "agent")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode %o", path, info.Mode().Perm())
+		}
+	}
+	info, err := os.Stat(Dir(room))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("hosts directory mode %o", info.Mode().Perm())
+	}
+}
+
+func TestOpenLogRejectsSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may need privileges")
+	}
+	room := t.TempDir()
+	target := filepath.Join(room, "target")
+	if err := os.WriteFile(target, []byte("private"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(Dir(room), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, LogPath(room, "agent")); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := OpenLog(LogPath(room, "agent")); err == nil {
+		f.Close()
+		t.Fatal("followed a log symlink")
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Fatal("changed symlink target permissions")
+	}
+}
 
 func TestStateWriteReadRoundTrip(t *testing.T) {
 	room := t.TempDir()
@@ -80,9 +153,25 @@ func TestRemoveStateIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestStateAliveFollowsPID(t *testing.T) {
-	if !(State{PID: os.Getpid()}).Alive() {
-		t.Fatal("own pid reported dead")
+func TestStateAliveRequiresExactOwner(t *testing.T) {
+	if (State{PID: os.Getpid()}).Alive() {
+		t.Fatal("a live PID without an owner identity was trusted")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_ = ctx
+	ctl, err := newControl("test-owner", cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ctl.server.Close()
+	st := State{PID: os.Getpid(), Owner: "test-owner", ControlAddress: ctl.listener.Addr().String(), ControlToken: ctl.token}
+	if !st.Alive() {
+		t.Fatal("authenticated live owner not recognized")
+	}
+	st.Owner = "another-owner"
+	if st.Alive() {
+		t.Fatal("wrong owner was trusted")
 	}
 	if runtime.GOOS == "windows" {
 		t.Skip("dead-pid detection is unix-only (see spool/alive_other.go)")

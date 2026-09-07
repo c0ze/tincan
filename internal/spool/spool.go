@@ -1,5 +1,5 @@
 // Package spool implements the tincan filesystem spool: atomic sends into
-// per-name inbox directories and blocking receives that claim exactly once.
+// per-name inbox directories and durable claims acknowledged after delivery.
 package spool
 
 import (
@@ -10,12 +10,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/c0ze/tincan/internal/envelope"
+	"github.com/c0ze/tincan/internal/fsutil"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -30,6 +30,13 @@ func Open(room string) (*Spool, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Resolve the user-selected room once; symlinks inside its private spool
+	// are still rejected. This also handles /var -> /private/var on macOS.
+	if canonical, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = canonical
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
 	return &Spool{root: filepath.Join(abs, ".tincan")}, nil
 }
 
@@ -42,17 +49,18 @@ func (s *Spool) tmpDir() string     { return filepath.Join(s.root, "tmp") }
 func (s *Spool) logDir() string     { return filepath.Join(s.root, "log") }
 func (s *Spool) presentDir() string { return filepath.Join(s.root, "present") }
 
+// Mutating operations close access through a legacy public spool root without
+// changing permissions on the caller's room or any of its ancestors.
+func (s *Spool) ensurePrivateRoot() error {
+	if err := fsutil.MkdirPrivate(s.root); err != nil {
+		return err
+	}
+	return os.Chmod(s.root, 0o700)
+}
+
 // validName rejects names that could escape the spool root: a name must be a
 // single, portable path component (no separators on any OS, no traversal).
-func validName(name string) error {
-	if name == "" || name == "." || name == ".." {
-		return fmt.Errorf("tincan: invalid name %q", name)
-	}
-	if strings.ContainsAny(name, `/\`) {
-		return fmt.Errorf("tincan: invalid name %q: path separators not allowed", name)
-	}
-	return nil
-}
+func validName(name string) error { return envelope.ValidComponent(name) }
 
 // ValidName reports whether name is a legal participant name (a single path
 // component, no traversal). Exported for the hosted-listener commands, which
@@ -65,11 +73,16 @@ func ValidName(name string) error { return validName(name) }
 // files get the identical answer.
 func ProcessAlive(pid int) bool { return processAlive(pid) }
 
-// Send delivers e into the To inbox atomically: write to tmp/, then rename.
+// MaxMessageBytes bounds both sends and reads, including JSON metadata.
+const MaxMessageBytes int64 = 8 << 20
+
+// Send delivers e into the To inbox atomically: sync tmp/, publish a hard link,
+// then remove the temporary link. An identical queued/in-flight retry succeeds;
+// conflicting content at the same filename is rejected without replacement.
 // Messages queue until a receiver claims them. Fills ID and TS if unset.
 func (s *Spool) Send(e *envelope.Envelope) error {
-	if err := validName(e.To); err != nil {
-		return err
+	if e == nil {
+		return fmt.Errorf("tincan: nil envelope")
 	}
 	if e.ID == "" {
 		e.ID = envelope.NewID()
@@ -77,22 +90,61 @@ func (s *Spool) Send(e *envelope.Envelope) error {
 	if e.TS.IsZero() {
 		e.TS = time.Now().UTC()
 	}
-	inbox := s.InboxDir(e.To)
-	for _, dir := range []string{inbox, s.tmpDir()} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
-	}
 	data, err := envelope.Marshal(e)
 	if err != nil {
 		return err
 	}
-	name := envelope.Filename(e)
-	tmp := filepath.Join(s.tmpDir(), name)
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if int64(len(data)) > MaxMessageBytes {
+		return fsutil.ErrTooLarge
+	}
+	if err := s.ensurePrivateRoot(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(inbox, name))
+	lock, err := s.lockTransport(context.Background())
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	inbox := s.InboxDir(e.To)
+	for _, dir := range []string{inbox, s.tmpDir()} {
+		if err := fsutil.MkdirPrivate(dir); err != nil {
+			return err
+		}
+	}
+	if published, err := s.published(e); err != nil || published {
+		return err
+	}
+	f, err := os.CreateTemp(s.tmpDir(), "send-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	// Link publishes the complete file atomically without overwriting an
+	// existing envelope with the same timestamp/ID. Both paths are on the
+	// same filesystem; deleting the temporary link leaves the inbox intact.
+	if err := os.Link(tmp, filepath.Join(inbox, envelope.Filename(e))); err != nil {
+		// A non-cooperating older sender may have published without taking
+		// the transport lock. Compare any surviving envelope before failing.
+		if os.IsExist(err) {
+			if published, checkErr := s.published(e); checkErr != nil || published {
+				return checkErr
+			}
+		}
+		return err
+	}
+	return fsutil.SyncDir(inbox)
 }
 
 // ErrTimeout is returned by Recv when no message arrives within the timeout.
@@ -111,150 +163,98 @@ func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*env
 // other exit path. Hosted listeners use it to unpark on SIGTERM/SIGINT
 // without leaving a stale presence file behind.
 func (s *Spool) RecvContext(ctx context.Context, name string, timeout time.Duration, logConsumed bool) (*envelope.Envelope, error) {
-	if err := validName(name); err != nil {
-		return nil, err
-	}
-	// A unique per-Recv token means concurrent receivers parked as the same
-	// name (see claimOldest) each own a separate presence file: one
-	// returning removes only its own token, never a sibling's, so
-	// status/ping still see the other as parked.
-	token := envelope.NewID()
-	s.writePresence(name, token)
-	defer s.removePresence(name, token)
-	inbox := s.InboxDir(name)
-	watcher, err := fsnotify.NewWatcher()
+	delivery, err := s.ClaimContext(ctx, name, timeout)
 	if err != nil {
 		return nil, err
 	}
-	defer watcher.Close()
-	// A nil channel blocks forever in a select, so leaving deadlineC nil for
-	// timeout <= 0 makes the timeout case below never fire.
+	if err := delivery.Ack(logConsumed); err != nil {
+		return nil, err
+	}
+	return delivery.Envelope, nil
+}
+
+// ClaimContext waits for a queued envelope and moves it to durable in-flight
+// storage. The caller must Ack only after delivery succeeds, or explicitly Nack
+// to retry. Cancellation never deletes an already claimed envelope.
+func (s *Spool) ClaimContext(ctx context.Context, name string, timeout time.Duration) (*Delivery, error) {
+	if err := validName(name); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.ensurePrivateRoot(); err != nil {
+		return nil, err
+	}
+	inbox := s.InboxDir(name)
+	if err := fsutil.MkdirPrivate(inbox); err != nil {
+		return nil, err
+	}
+	token := envelope.NewID()
+	s.writePresence(name, token)
+	defer s.removePresence(name, token)
+	watcher, watchErr := fsnotify.NewWatcher()
+	var events <-chan fsnotify.Event
+	var watchErrors <-chan error
+	if watchErr == nil {
+		defer watcher.Close()
+		events, watchErrors = watcher.Events, watcher.Errors
+	}
 	var deadlineC <-chan time.Time
+	claimCtx := ctx
 	if timeout > 0 {
+		var cancel context.CancelFunc
+		claimCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 		t := time.NewTimer(timeout)
 		defer t.Stop()
 		deadlineC = t.C
 	}
-	// The watcher is a latency optimization; the claim scan is what is
-	// correct. Under concurrent-receiver churn the OS backends surface
-	// transient errors (kqueue: ENOENT or EBADF while arming/watching a
-	// child that a peer just claimed), so watcher trouble never fails the
-	// receive — degrade to a short poll and keep trying to re-arm.
+	// Poll even when the watch succeeds: a dropped/coalesced event or closed
+	// watcher must not leave an existing queue parked forever.
+	poll := time.NewTicker(50 * time.Millisecond)
+	defer poll.Stop()
 	armed := false
 	for {
-		if !armed {
-			if err := os.MkdirAll(inbox, 0o755); err != nil {
-				return nil, err
-			}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		select {
+		case <-deadlineC:
+			return nil, ErrTimeout
+		default:
+		}
+		if !armed && watcher != nil {
 			armed = watcher.Add(inbox) == nil
 		}
-		e, ok, err := s.claimOldest(name, logConsumed)
+		delivery, ok, err := s.claimOldest(claimCtx, name)
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+				return nil, ErrTimeout
+			}
 			return nil, err
 		}
 		if ok {
-			return e, nil
-		}
-		if !armed {
-			// No watch: poll briefly, bounded by the deadline, then retry
-			// arming.
-			select {
-			case <-time.After(10 * time.Millisecond):
-			case <-deadlineC:
-				return nil, ErrTimeout
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-			continue
+			return delivery, nil
 		}
 		select {
-		case <-watcher.Events:
-			// Inbox changed; rescan.
-		case <-watcher.Errors:
-			// Transient backend churn; degrade to polling and re-arm.
+		case _, ok := <-events:
+			if !ok {
+				events = nil
+				armed = false
+			}
+		case _, ok := <-watchErrors:
 			armed = false
+			if !ok {
+				watchErrors = nil
+			}
+		case <-poll.C:
 		case <-deadlineC:
 			return nil, ErrTimeout
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
 	}
-}
-
-// claimOldest tries to claim the oldest message in name's inbox. The claim is
-// an atomic rename into tmp/, so concurrent receivers process each message
-// exactly once; losing a rename race just means trying the next file.
-func (s *Spool) claimOldest(name string, logConsumed bool) (*envelope.Envelope, bool, error) {
-	entries, err := os.ReadDir(s.InboxDir(name))
-	if err != nil {
-		return nil, false, err
-	}
-	var files []string
-	for _, ent := range entries {
-		if !ent.IsDir() && strings.HasSuffix(ent.Name(), ".json") {
-			files = append(files, ent.Name())
-		}
-	}
-	sort.Strings(files) // filenames sort chronologically
-	for _, f := range files {
-		if err := os.MkdirAll(s.tmpDir(), 0o755); err != nil {
-			return nil, false, err
-		}
-		claimed := filepath.Join(s.tmpDir(), fmt.Sprintf("claim-%s-%s", envelope.NewID(), f))
-		if err := os.Rename(filepath.Join(s.InboxDir(name), f), claimed); err != nil {
-			if lostClaimRace(err) {
-				continue // another receiver claimed it first
-			}
-			// Anything else (read-only fs, ...) is a real error; swallowing
-			// it would decay into a bogus timeout.
-			return nil, false, err
-		}
-		var data []byte
-		err := retryClaimOp(func() error {
-			var rerr error
-			data, rerr = os.ReadFile(claimed)
-			return rerr
-		})
-		if err != nil {
-			if lostClaimRace(err) {
-				// Windows: renames are handle-based, so a racing receiver
-				// can move the file even after our rename "succeeded". The
-				// message is theirs now.
-				continue
-			}
-			return nil, false, err
-		}
-		e, err := envelope.Unmarshal(data)
-		if err != nil {
-			// Deliberate quarantine: the claimed file stays in tmp/ (never
-			// retried, swept by the Phase-2 gc) so a corrupt message can't
-			// cause an infinite reparse loop.
-			return nil, false, fmt.Errorf("tincan: bad message %s: %w", f, err)
-		}
-		// Consuming the claim file decides ownership: whoever removes (or
-		// logs) it delivers the message; a loser discards its copy so the
-		// message is processed exactly once even where renames race.
-		if logConsumed {
-			if err := os.MkdirAll(s.logDir(), 0o755); err != nil {
-				return nil, false, err
-			}
-			if err := retryClaimOp(func() error {
-				return os.Rename(claimed, filepath.Join(s.logDir(), f))
-			}); err != nil {
-				if lostClaimRace(err) {
-					continue
-				}
-				return nil, false, err
-			}
-		} else if err := retryClaimOp(func() error { return os.Remove(claimed) }); err != nil {
-			if lostClaimRace(err) {
-				continue
-			}
-			return nil, false, err
-		}
-		return e, true, nil
-	}
-	return nil, false, nil
 }
 
 // retryClaimOp runs op, retrying briefly while it fails with a Windows
@@ -273,18 +273,9 @@ func retryClaimOp(op func() error) error {
 	return err
 }
 
-// lostClaimRace reports whether err is the signature of losing a claim race
-// to a concurrent receiver rather than a real filesystem failure. On POSIX a
-// lost race is ENOENT. On Windows, renames are handle-based, so racing
-// receivers can also produce sharing/permission errors mid-claim; those count
-// as race losses there (a genuine ACL problem on Windows then shows up as a
-// timeout rather than an error — the price of exactly-once on that platform).
-func lostClaimRace(err error) bool {
-	if errors.Is(err, fs.ErrNotExist) {
-		return true
-	}
-	return runtime.GOOS == "windows" && errors.Is(err, fs.ErrPermission)
-}
+// lostClaimRace only treats a missing source as a lost race. Permission and
+// sharing failures must surface rather than turning into a misleading timeout.
+func lostClaimRace(err error) bool { return errors.Is(err, fs.ErrNotExist) }
 
 // RemoveInbox deletes a participant's inbox directory, and also its
 // present/<name>/ dir (which removePresence deliberately leaves behind — see
@@ -295,6 +286,23 @@ func lostClaimRace(err error) bool {
 // already run its own removePresence — before ask calls RemoveInbox.
 func (s *Spool) RemoveInbox(name string) error {
 	if err := validName(name); err != nil {
+		return err
+	}
+	if err := fsutil.CheckDir(s.root); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	lock, err := s.lockTransport(context.Background())
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := fsutil.CheckDir(filepath.Dir(s.InboxDir(name))); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := fsutil.CheckDir(s.presentDir()); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	if err := os.RemoveAll(s.InboxDir(name)); err != nil {
@@ -334,7 +342,7 @@ func (s *Spool) presentNameDir(name string) string {
 func (s *Spool) writePresence(name, token string) {
 	dir := s.presentNameDir(name)
 	for _, d := range []string{dir, s.tmpDir()} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := fsutil.MkdirPrivate(d); err != nil {
 			return
 		}
 	}
@@ -343,7 +351,7 @@ func (s *Spool) writePresence(name, token string) {
 		return
 	}
 	tmp := filepath.Join(s.tmpDir(), "present-"+envelope.NewID())
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return
 	}
 	// Wrap the tmp→final rename in retryClaimOp so a transient Windows sharing
@@ -394,12 +402,18 @@ func (s *Spool) removePresence(name, token string) {
 func (s *Spool) ListPresence() ([]Presence, error) {
 	names := map[string]bool{}
 	inboxRoot := filepath.Join(s.root, "inbox")
+	if err := fsutil.CheckDir(inboxRoot); err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err := fsutil.CheckDir(s.presentDir()); err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
 	inboxEntries, err := os.ReadDir(inboxRoot)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 	for _, ent := range inboxEntries {
-		if ent.IsDir() {
+		if ent.IsDir() && validName(ent.Name()) == nil {
 			names[ent.Name()] = true
 		}
 	}
@@ -408,7 +422,7 @@ func (s *Spool) ListPresence() ([]Presence, error) {
 		return nil, err
 	}
 	for _, ent := range presentEntries {
-		if ent.IsDir() {
+		if ent.IsDir() && validName(ent.Name()) == nil {
 			names[ent.Name()] = true
 		}
 	}
@@ -447,6 +461,11 @@ func (s *Spool) Present(name string) (Presence, bool, error) {
 // listing — best-effort, same as writePresence/removePresence.
 func (s *Spool) presenceFor(name string) (Presence, error) {
 	p := Presence{Name: name}
+	for _, dir := range []string{s.InboxDir(name), s.presentNameDir(name)} {
+		if err := fsutil.CheckDir(dir); err != nil && !os.IsNotExist(err) {
+			return Presence{}, err
+		}
+	}
 	entries, err := os.ReadDir(s.InboxDir(name))
 	if err != nil && !os.IsNotExist(err) {
 		return Presence{}, err
@@ -468,7 +487,7 @@ func (s *Spool) presenceFor(name string) (Presence, error) {
 		if ent.IsDir() {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(s.presentNameDir(name), ent.Name()))
+		data, err := fsutil.ReadFile(filepath.Join(s.presentNameDir(name), ent.Name()), 4096)
 		if err != nil {
 			// Removed mid-scan by a racing Recv exit, or unreadable; skip
 			// rather than fail the whole listing.

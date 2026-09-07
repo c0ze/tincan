@@ -481,6 +481,19 @@ func gitFreeTempDir(t *testing.T) string {
 	if dir := t.TempDir(); isClean(dir) {
 		return dir
 	}
+	// Linux machines may have both a /tmp scratch repo and a home dotfiles
+	// repo. A separate system temporary root keeps these tests independent.
+	for _, base := range []string{"/var/tmp", "/dev/shm"} {
+		if !isClean(base) {
+			continue
+		}
+		dir, err := os.MkdirTemp(base, "tincan-git-free-*")
+		if err != nil {
+			continue
+		}
+		t.Cleanup(func() { os.RemoveAll(dir) })
+		return dir
+	}
 	// Ambient os.TempDir() is contaminated (e.g. a stray /tmp/.git on this
 	// host) — fall back to a private root under the user's home directory,
 	// well clear of both the shared temp tree and this repo checkout.

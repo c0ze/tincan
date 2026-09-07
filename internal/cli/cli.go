@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -45,6 +46,9 @@ Hosted listeners (tincan runs a headless agent CLI for you):
   tincan serve   <name> [same flags as up] [--daemon]
   tincan down    <name> [--wait <sec>] [flags]
   tincan presets [--format table|json]
+  tincan mcp [--room <path>]     native MCP tools over stdin/stdout
+  tincan version [--format json]
+  tincan gc [--older-than 168h] [--room <path>]
 
 Common flags:
   --room <path>       room directory (default: current directory)
@@ -82,6 +86,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdDown(args[1:], stdout, stderr)
 	case "presets":
 		return cmdPresets(args[1:], stdout, stderr)
+	case "mcp":
+		return cmdMCP(args[1:], stdout, stderr)
+	case "version", "--version":
+		return cmdVersion(args[1:], stdout, stderr)
+	case "gc":
+		return cmdGC(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usageText)
 		return ExitOK
@@ -163,7 +173,10 @@ func roomRootWarning(room string) string {
 
 func printEnvelope(e *envelope.Envelope, format string, stdout, stderr io.Writer) int {
 	if format == "body" {
-		fmt.Fprintln(stdout, e.Body)
+		if _, err := fmt.Fprintln(stdout, e.Body); err != nil {
+			fmt.Fprintf(stderr, "tincan: output: %v\n", err)
+			return ExitError
+		}
 		return ExitOK
 	}
 	data, err := envelope.Marshal(e)
@@ -171,7 +184,10 @@ func printEnvelope(e *envelope.Envelope, format string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "tincan: %v\n", err)
 		return ExitError
 	}
-	fmt.Fprintln(stdout, string(data))
+	if _, err := fmt.Fprintln(stdout, string(data)); err != nil {
+		fmt.Fprintf(stderr, "tincan: output: %v\n", err)
+		return ExitError
+	}
 	return ExitOK
 }
 
@@ -250,7 +266,7 @@ func cmdRecv(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tincan recv: %v\n", err)
 		return ExitError
 	}
-	e, err := sp.Recv(*as, time.Duration(*timeout)*time.Second, *logMsgs)
+	d, err := sp.ClaimContext(context.Background(), *as, time.Duration(*timeout)*time.Second)
 	if errors.Is(err, spool.ErrTimeout) {
 		return ExitTimeout
 	}
@@ -258,7 +274,24 @@ func cmdRecv(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tincan recv: %v\n", err)
 		return ExitError
 	}
-	return printEnvelope(e, *format, stdout, stderr)
+	return deliver(d, *format, *logMsgs, stdout, stderr)
+}
+
+// A failed sink must not consume the message. Explicit Nack makes it available
+// for a later receive; successful output is acknowledged only after writing.
+func deliver(d *spool.Delivery, format string, logMsgs bool, stdout, stderr io.Writer) int {
+	code := printEnvelope(d.Envelope, format, stdout, stderr)
+	if code != ExitOK {
+		if err := d.Nack(); err != nil {
+			fmt.Fprintf(stderr, "tincan: delivery retained for recovery: %v\n", err)
+		}
+		return code
+	}
+	if err := d.Ack(logMsgs); err != nil {
+		fmt.Fprintf(stderr, "tincan: acknowledging output: %v\n", err)
+		return ExitError
+	}
+	return ExitOK
 }
 
 func cmdAsk(args []string, stdout, stderr io.Writer) int {
@@ -308,7 +341,7 @@ func cmdAsk(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
 		return ExitError
 	}
-	reply, err := sp.Recv(channel, time.Duration(*timeout)*time.Second, false)
+	reply, err := sp.ClaimContext(context.Background(), channel, time.Duration(*timeout)*time.Second)
 	if errors.Is(err, spool.ErrTimeout) {
 		// Leave the channel in place: a late reply still lands there and is
 		// collected with `tincan recv --as <channel>`.
@@ -319,7 +352,10 @@ func cmdAsk(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
 		return ExitError
 	}
-	code := printEnvelope(reply, *format, stdout, stderr)
+	code := deliver(reply, *format, false, stdout, stderr)
+	if code != ExitOK {
+		return code
+	}
 	if err := sp.RemoveInbox(channel); err != nil {
 		// Non-fatal: the answer is already delivered; a leaked r-<id> channel
 		// is reclaimed by the Phase-2 gc sweep.

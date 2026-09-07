@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/c0ze/tincan/internal/envelope"
 	"github.com/c0ze/tincan/internal/host"
 	"github.com/c0ze/tincan/internal/spool"
 )
@@ -33,12 +36,115 @@ func TestMain(m *testing.M) {
 // fakeAgent is the headless CLI stand-in: `echo <text…>` prints
 // "echo: <text>"; anything else is a usage error.
 func fakeAgent(args []string) int {
+	if len(args) > 0 && args[0] == "sleep" {
+		fmt.Println("working")
+		time.Sleep(30 * time.Second)
+		return 0
+	}
 	if len(args) > 0 && args[0] == "echo" {
 		fmt.Printf("echo: %s\n", strings.Join(args[1:], " "))
 		return 0
 	}
 	fmt.Fprintln(os.Stderr, "fake-agent: unknown mode")
 	return 2
+}
+
+func TestConcurrentUpStartsOneHost(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("detached up unsupported")
+	}
+	fakeAgentConfig(t)
+	room := t.TempDir()
+	t.Cleanup(func() { run("down", "fake", "--room", room, "--wait", "5") })
+	type result struct {
+		code     int
+		out, err string
+	}
+	results := make(chan result, 8)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, o, e := run("up", "fake", "--room", room, "--wait", "10")
+			results <- result{c, o, e}
+		}()
+	}
+	wg.Wait()
+	close(results)
+	started := 0
+	for r := range results {
+		if r.code != ExitOK {
+			t.Fatalf("up: %d %q %q", r.code, r.out, r.err)
+		}
+		if strings.HasPrefix(r.out, "up ") {
+			started++
+		}
+	}
+	if started != 1 {
+		t.Fatalf("started %d hosts", started)
+	}
+	data, err := os.ReadFile(host.LogPath(room, "fake"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(data), "serve name=fake "); got != 1 {
+		t.Fatalf("log contains %d host lifetimes: %s", got, data)
+	}
+}
+
+func TestUpReadyWhileQueuedBacklogIsBusy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("detached up unsupported")
+	}
+	fakeAgentConfig(t)
+	exe, _ := os.Executable()
+	writeAgentsConfig(t, os.Getenv("HOME"), fmt.Sprintf(`{"fake":{"exec":[%q,"fake-agent","sleep"]}}`, exe))
+	room := t.TempDir()
+	sp, err := spool.Open(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &envelope.Envelope{ID: envelope.NewID(), From: "orch", To: "fake", Body: "backlog", TS: time.Now().UTC()}
+	if err := sp.Send(e); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { run("down", "fake", "--room", room, "--wait", "5") })
+	start := time.Now()
+	code, out, stderr := run("up", "fake", "--room", room, "--wait", "2")
+	if code != ExitOK {
+		t.Fatalf("busy ready up: %d %q %q", code, out, stderr)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("up waited for busy job instead of exact readiness")
+	}
+	if !waitUntilTrue(func() bool { st, ok, _ := host.ReadState(room, "fake"); return ok && st.State == "busy" }, time.Second) {
+		t.Fatal("host did not consume backlog")
+	}
+}
+
+func TestDownDoesNotSignalUnrelatedReusedPID(t *testing.T) {
+	fakeAgentConfig(t)
+	exe, _ := os.Executable()
+	child := exec.Command(exe, "fake-agent", "sleep")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { child.Process.Kill(); child.Wait() })
+	room := t.TempDir()
+	if err := host.WriteState(room, "stale", host.State{PID: child.Process.Pid, Preset: "fake", State: "busy"}); err != nil {
+		t.Fatal(err)
+	}
+	code, out, stderr := run("down", "stale", "--room", room, "--wait", "0")
+	if code != ExitOK {
+		t.Fatalf("down: %d %q %q", code, out, stderr)
+	}
+	if !spool.ProcessAlive(child.Process.Pid) {
+		t.Fatal("down killed unrelated process selected only by stale PID")
+	}
+	if _, ok, _ := host.ReadState(room, "stale"); ok {
+		t.Fatal("stale state retained")
+	}
 }
 
 // fakeAgentConfig points $HOME at a temp dir holding an agents.json that
@@ -85,6 +191,8 @@ func waitUntilTrue(cond func() bool, d time.Duration) bool {
 func TestHostUsageErrorsExitTwo(t *testing.T) {
 	setHomeEnv(t, t.TempDir()) // no user presets
 	cases := [][]string{
+		{"serve", "x", "--exec", "echo {body}", "--session", "invalid"},
+		{"serve", "x", "--exec", "echo {body}", "--session", "persistent"},
 		{"serve"},                               // missing name
 		{"serve", "x", "--stdin", "weird"},      // bad enum
 		{"serve", "x", "--reply", "mail"},       // bad enum
@@ -277,6 +385,9 @@ func TestUpAskStatusDownRoundTrip(t *testing.T) {
 	}
 	if code, out, _ := run("up", "fake", "--room", room); code != ExitOK || !strings.HasPrefix(out, "already up name=fake pid=") {
 		t.Fatalf("second up: code=%d out=%q", code, out)
+	}
+	if code, _, errs := run("up", "fake", "--room", room, "--exec-timeout", "1"); code != ExitError || !strings.Contains(errs, "different configuration") {
+		t.Fatalf("explicit incompatible config: %d %q", code, errs)
 	}
 	code, reply, stderr := run("ask", "--room", room, "--to", "fake", "--from", "orch", "--body", "hello world", "--timeout", "30", "--format", "body")
 	if code != ExitOK || strings.TrimSpace(reply) != "echo: hello world" {

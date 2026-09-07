@@ -1,56 +1,69 @@
 package host
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/c0ze/tincan/internal/envelope"
+	"github.com/c0ze/tincan/internal/fsutil"
 	"github.com/c0ze/tincan/internal/spool"
 )
 
 // State is the on-disk record of one hosted listener,
 // <room>/.tincan/hosts/<name>.json. serve writes it on start and around
-// every message; status reads it for MODE/busy; down reads it for the pid.
+// every message; status reads it for MODE/busy; down authenticates its control endpoint.
 type State struct {
-	PID       int       `json:"pid"`
-	Preset    string    `json:"preset"`
-	Exec      []string  `json:"exec"`
-	Started   time.Time `json:"started"`
-	State     string    `json:"state"`                // "parked" | "busy"
-	CurrentID string    `json:"current_id,omitempty"` // message id while busy
+	Owner          string    `json:"owner,omitempty"`
+	ControlAddress string    `json:"control_address,omitempty"`
+	ControlToken   string    `json:"control_token,omitempty"`
+	PID            int       `json:"pid"`
+	Preset         string    `json:"preset"`
+	Session        string    `json:"session_mode,omitempty"`
+	Config         *Preset   `json:"config,omitempty"`
+	Exec           []string  `json:"exec"`
+	Started        time.Time `json:"started"`
+	State          string    `json:"state"`                // "parked" | "busy"
+	CurrentID      string    `json:"current_id,omitempty"` // message id while busy
 }
 
 // WriteState atomically replaces the state file (tmp file in the same dir,
 // then rename), so a concurrent status never sees a torn write.
 func WriteState(room, name string, st State) error {
-	dir := Dir(room)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := spool.ValidName(name); err != nil {
 		return err
+	}
+	dir := Dir(room)
+	if err := fsutil.MkdirPrivate(dir); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	previous, ok, err := ReadState(room, name)
+	if err != nil {
+		return err
+	}
+	if ok && previous.Owner != "" && previous.Owner != st.Owner {
+		return errors.New("host state belongs to another lifetime")
 	}
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(dir, "."+name+"."+envelope.NewID()+".tmp")
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, StatePath(room, name)); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+	return fsutil.WriteFileAtomic(StatePath(room, name), data)
 }
 
 // ReadState loads the state file for name; ok is false when there is none.
 // A corrupt file is an error (it is a real state file that cannot be trusted).
 func ReadState(room, name string) (st State, ok bool, err error) {
-	data, err := os.ReadFile(StatePath(room, name))
+	if err := spool.ValidName(name); err != nil {
+		return State{}, false, err
+	}
+	data, err := fsutil.ReadFile(StatePath(room, name), 1<<20)
 	if errors.Is(err, os.ErrNotExist) {
 		return State{}, false, nil
 	}
@@ -65,6 +78,9 @@ func ReadState(room, name string) (st State, ok bool, err error) {
 
 // RemoveState deletes the state file; a missing file is not an error.
 func RemoveState(room, name string) error {
+	if err := spool.ValidName(name); err != nil {
+		return err
+	}
 	err := os.Remove(StatePath(room, name))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -72,10 +88,22 @@ func RemoveState(room, name string) error {
 	return err
 }
 
-// Alive reports whether the recorded host process is still running. A state
-// file whose pid is dead is stale — the serve process was killed without a
-// chance to clean up — and callers must not trust its "busy"/"parked".
-func (st State) Alive() bool { return spool.ProcessAlive(st.PID) }
+// RemoveOwnedState removes only the state written by this host lifetime.
+// Callers must hold the listener's lifetime lock to exclude replacements.
+func RemoveOwnedState(room, name, owner string) error {
+	st, ok, err := ReadState(room, name)
+	if err != nil || !ok {
+		return err
+	}
+	if st.Owner != owner {
+		return nil
+	}
+	return RemoveState(room, name)
+}
+
+// Alive authenticates this exact host lifetime. Legacy PID-only records are
+// untrusted, because the recorded PID may now belong to another process.
+func (st State) Alive() bool { return st.Ready(context.Background()) }
 
 // ListStates returns every readable state file in the room keyed by
 // listener name, stale ones included (callers decide via Alive). Temp files

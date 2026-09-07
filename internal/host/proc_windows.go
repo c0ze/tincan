@@ -3,40 +3,81 @@
 package host
 
 import (
-	"os"
+	"context"
+	"errors"
+	"fmt"
 	"os/exec"
-	"strconv"
 	"syscall"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
-// childAttr starts the agent in a new process group, mirroring Setpgid on
-// unix, so killGroup can address it and its descendants as a tree.
+// Start suspended so descendants cannot escape before job assignment.
 func childAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
+	return &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | windows.CREATE_SUSPENDED}
 }
 
-// killGroup ends the agent and its descendants with `taskkill /T /F`; if
-// taskkill is unavailable or refuses, fall back to killing the direct child.
-// Best-effort: not verified on a Windows machine in this iteration.
-func killGroup(cmd *exec.Cmd) error {
-	if cmd.Process == nil {
-		return nil
+func runProcess(ctx context.Context, cmd *exec.Cmd) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	if err := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run(); err != nil {
-		return cmd.Process.Kill()
-	}
-	return nil
-}
-
-// Terminate has no SIGTERM equivalent on Windows: the serve process is ended
-// outright, so it cannot run its own cleanup — down removes the state file.
-func Terminate(pid int) error {
-	p, err := os.FindProcess(pid)
+	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return err
 	}
-	return p.Kill()
+	defer windows.CloseHandle(job)
+	limits := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
+	limits.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	if _, err = windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); err != nil {
+		return err
+	}
+	if err = cmd.Start(); err != nil {
+		return err
+	}
+	fail := func(err error) error { _ = cmd.Process.Kill(); _ = cmd.Wait(); return err }
+	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, uint32(cmd.Process.Pid))
+	if err != nil {
+		return fail(err)
+	}
+	defer windows.CloseHandle(process)
+	if err = windows.AssignProcessToJobObject(job, process); err != nil {
+		return fail(err)
+	}
+	if err = resumeChild(uint32(cmd.Process.Pid)); err != nil {
+		return fail(err)
+	}
+	exited := make(chan struct{})
+	go func() { windows.WaitForSingleObject(process, windows.INFINITE); close(exited) }()
+	select {
+	case <-exited:
+	case <-ctx.Done():
+	}
+	// A job handle has stable identity even after the direct child exits.
+	killErr := windows.TerminateJobObject(job, 1)
+	<-exited
+	err = cmd.Wait()
+	return errors.Join(err, killErr)
 }
 
-// Kill is the same as Terminate on Windows (there is only one way to stop).
-func Kill(pid int) error { return Terminate(pid) }
+func resumeChild(pid uint32) error {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(snapshot)
+	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
+	for err = windows.Thread32First(snapshot, &entry); err == nil; err = windows.Thread32Next(snapshot, &entry) {
+		if entry.OwnerProcessID != pid {
+			continue
+		}
+		thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
+		if err != nil {
+			return err
+		}
+		_, err = windows.ResumeThread(thread)
+		windows.CloseHandle(thread)
+		return err
+	}
+	return fmt.Errorf("cannot find suspended child thread: %w", err)
+}

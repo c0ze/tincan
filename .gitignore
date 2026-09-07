@@ -1,4 +1,7 @@
 .tincan/
 bin/
+/tincan
+/tincan.exe
+/dist/
 .DS_Store
 .claude/

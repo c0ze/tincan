@@ -25,6 +25,8 @@ type Preset struct {
 	Reply string `json:"reply"`
 	// ExecTimeoutSec kills the run after this many seconds; 0 = no bound.
 	ExecTimeoutSec int `json:"exec_timeout_sec"`
+	// Session is persistent or stateless. Empty selects supported provider defaults.
+	Session string `json:"session,omitempty"`
 }
 
 // configPreset is the on-disk shape of one ~/.config/tincan/agents.json
@@ -35,6 +37,7 @@ type configPreset struct {
 	Stdin          string   `json:"stdin"`
 	Reply          string   `json:"reply"`
 	ExecTimeoutSec *int     `json:"exec_timeout_sec"`
+	Session        string   `json:"session,omitempty"`
 }
 
 // Builtin returns the presets that ship with tincan: the headless
@@ -89,7 +92,7 @@ func LoadConfig(path string) (map[string]Preset, error) {
 	}
 	out := make(map[string]Preset, len(raw))
 	for name, c := range raw {
-		p := Preset{Exec: c.Exec, Stdin: c.Stdin, Reply: c.Reply, ExecTimeoutSec: DefaultExecTimeoutSec}
+		p := Preset{Exec: c.Exec, Stdin: c.Stdin, Reply: c.Reply, ExecTimeoutSec: DefaultExecTimeoutSec, Session: c.Session}
 		if c.ExecTimeoutSec != nil {
 			p.ExecTimeoutSec = *c.ExecTimeoutSec
 		}
@@ -122,6 +125,9 @@ func (p *Preset) normalize() error {
 	}
 	if p.ExecTimeoutSec < 0 {
 		return errors.New("exec_timeout_sec must be >= 0")
+	}
+	if p.Session != "" && p.Session != "persistent" && p.Session != "stateless" {
+		return fmt.Errorf("session must be persistent or stateless, got %q", p.Session)
 	}
 	if p.Reply == "file" && !hasPlaceholder(p.Exec, "{out}") {
 		return errors.New(`reply "file" requires an {out} placeholder in exec`)

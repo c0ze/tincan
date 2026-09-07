@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"runtime"
 	"strconv"
@@ -16,7 +18,21 @@ import (
 // tests stay hermetic (no daemon started).
 func writeStateFile(t *testing.T, room, name string, pid int, preset, state, currentID string) {
 	t.Helper()
+	owner, address := "", ""
+	if pid == os.Getpid() {
+		owner = "fixture-" + name
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer "+owner {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Write([]byte(owner))
+		}))
+		t.Cleanup(server.Close)
+		address = strings.TrimPrefix(server.URL, "http://")
+	}
 	err := host.WriteState(room, name, host.State{
+		Owner: owner, ControlAddress: address, ControlToken: owner,
 		PID: pid, Preset: preset, Exec: []string{preset, "-p", "{body}"},
 		Started: time.Now().UTC(), State: state, CurrentID: currentID,
 	})

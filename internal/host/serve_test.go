@@ -12,8 +12,218 @@ import (
 	"time"
 
 	"github.com/c0ze/tincan/internal/envelope"
+	"github.com/c0ze/tincan/internal/request"
 	"github.com/c0ze/tincan/internal/spool"
 )
+
+func TestServeRejectsDuplicateAndPreservesOwnerState(t *testing.T) {
+	room, sp, _, done, _ := startServe(t, echoPreset(), "fake")
+	before, _, _ := ReadState(room, "agent")
+	err := Serve(context.Background(), ServeOptions{Room: room, Name: "agent", Preset: echoPreset()})
+	if err == nil {
+		t.Fatal("duplicate Serve acquired the lifetime")
+	}
+	after, ok, _ := ReadState(room, "agent")
+	if !ok || after.Owner != before.Owner || !after.Alive() {
+		t.Fatalf("duplicate clobbered owner: %+v", after)
+	}
+	if err := RemoveOwnedState(room, "agent", "wrong-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := ReadState(room, "agent"); !ok {
+		t.Fatal("wrong owner deleted state")
+	}
+	if err := WriteState(room, "agent", State{Owner: "wrong-owner"}); err == nil {
+		t.Fatal("wrong owner overwrote state")
+	}
+	stopServe(t, sp, done)
+}
+
+func TestUpRejectsDifferentExistingConfiguration(t *testing.T) {
+	room, sp, _, done, _ := startServe(t, echoPreset(), "fake")
+	result, err := Up(context.Background(), UpOptions{Room: room, Name: "agent", Label: "fake", Preset: echoPreset()})
+	if err != nil || !result.Already || result.State.Session != "stateless" {
+		t.Fatalf("same config reconnect: %+v %v", result, err)
+	}
+	for _, change := range []func(*Preset){
+		func(p *Preset) { p.Stdin = "body" },
+		func(p *Preset) { p.ExecTimeoutSec = 1 },
+		func(p *Preset) { p.Exec = append(p.Exec, "changed") },
+	} {
+		p := echoPreset()
+		change(&p)
+		got, err := Up(context.Background(), UpOptions{Room: room, Name: "agent", Label: "fake", Preset: p})
+		if err == nil || !strings.Contains(err.Error(), "different configuration") || got.State.Owner != result.State.Owner {
+			t.Fatalf("configuration mismatch not rejected: %+v %v", got, err)
+		}
+	}
+	stopServe(t, sp, done)
+}
+
+func TestUpRejectsChangingExistingSessionMode(t *testing.T) {
+	room, sp, _, done, _ := startServe(t, echoPreset(), "claude")
+	p := echoPreset()
+	p.Session = "persistent"
+	result, err := Up(context.Background(), UpOptions{Room: room, Name: "agent", Label: "claude", Preset: p})
+	if err == nil || !strings.Contains(err.Error(), "different configuration") || result.State.Session != "stateless" {
+		t.Fatalf("session mismatch: %+v %v", result, err)
+	}
+	stopServe(t, sp, done)
+}
+
+func TestCancelInterruptsOnlyCurrentRequest(t *testing.T) {
+	pidfile := filepath.Join(t.TempDir(), "pid")
+	room, sp, _, done, _ := startServe(t, Preset{Exec: fakeExec("sleep", "30", pidfile)}, "custom")
+	e := send(t, sp, "cancel me", true)
+	pid := readPID(t, pidfile)
+	if err := Cancel(context.Background(), room, "agent", e.ID); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := sp.Recv(e.ReplyTo, 5*time.Second, false)
+	if err != nil || !strings.HasPrefix(reply.Body, "ERROR interrupted") {
+		t.Fatalf("cancel reply: %+v %v", reply, err)
+	}
+	if !waitFor(func() bool { return !spool.ProcessAlive(pid) }, 3*time.Second) {
+		t.Fatalf("canceled child %d alive", pid)
+	}
+	st, ok, _ := ReadState(room, "agent")
+	if !ok || !st.Alive() {
+		t.Fatal("cancel stopped the listener")
+	}
+	stopServe(t, sp, done)
+}
+
+func TestServeRecoversAbandonedRequestWithoutReplaying(t *testing.T) {
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	room := t.TempDir()
+	sp, err := spool.Open(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := send(t, sp, "uncertain side effect", true)
+	if _, err := sp.ClaimContext(context.Background(), "agent", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	pidfile := filepath.Join(room, "should-not-exist")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, ServeOptions{Room: room, Name: "agent", Label: "custom", Preset: Preset{Exec: fakeExec("sleep", "30", pidfile)}})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("recovery Serve did not stop")
+		}
+	})
+	reply, err := sp.Recv(e.ReplyTo, 5*time.Second, false)
+	if err != nil || !strings.Contains(reply.Body, "uncertain") {
+		t.Fatalf("recovery reply: %+v %v", reply, err)
+	}
+	if _, err := os.Stat(pidfile); !os.IsNotExist(err) {
+		t.Fatalf("abandoned side effect was replayed: %v", err)
+	}
+	r, err := request.Get(room, e.ID)
+	if err != nil || !r.Terminal() {
+		t.Fatalf("terminal result missing: %+v %v", r, err)
+	}
+	if !waitFor(func() bool { d, _ := sp.ListInFlight("agent"); return len(d) == 0 }, time.Second) {
+		t.Fatal("recovered delivery not acknowledged")
+	}
+}
+
+func TestServeSkipsCanceledQueuedRequest(t *testing.T) {
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	room := t.TempDir()
+	sp, err := spool.Open(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := request.Submit(context.Background(), room, "agent", "orch", "canceled work", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := request.Cancel(context.Background(), room, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	pidfile := filepath.Join(room, "should-not-exist")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, ServeOptions{Room: room, Name: "agent", Preset: Preset{Exec: fakeExec("sleep", "30", pidfile)}})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("Serve did not stop")
+		}
+	})
+	if !waitFor(func() bool {
+		queued, err := os.ReadDir(sp.InboxDir("agent"))
+		if err != nil || len(queued) != 0 {
+			return false
+		}
+		inflight, err := os.ReadDir(filepath.Join(room, ".tincan", "inflight", "agent"))
+		return err == nil && len(inflight) == 0
+	}, 5*time.Second) {
+		t.Fatal("canceled request was not acknowledged")
+	}
+	reply, err := request.Get(room, r.ID)
+	if err != nil || !strings.HasPrefix(reply.Result, "ERROR canceled") {
+		t.Fatalf("canceled result: %+v %v", reply, err)
+	}
+	if _, err := os.Stat(pidfile); !os.IsNotExist(err) {
+		t.Fatalf("canceled work ran: %v", err)
+	}
+}
+
+func TestServeRecoveryReusesTerminalResultWithReplyAlreadyQueued(t *testing.T) {
+	room, sp, _, done, _ := startServe(t, echoPreset(), "fake")
+	e := send(t, sp, "execute once", true)
+	if !waitFor(func() bool { r, err := request.Get(room, e.ID); return err == nil && r.Terminal() }, 5*time.Second) {
+		t.Fatal("initial execution did not finish")
+	}
+	stopServe(t, sp, done)
+	// Recreate a delivery left claimed after the terminal result and reply
+	// were durable, as with a crash immediately before Ack.
+	if err := sp.Send(e); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sp.ClaimContext(context.Background(), "agent", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	pidfile := filepath.Join(room, "must-not-run")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	second := make(chan error, 1)
+	go func() {
+		second <- Serve(ctx, ServeOptions{Room: room, Name: "agent", Preset: Preset{Exec: fakeExec("sleep", "30", pidfile)}})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-second:
+		case <-time.After(5 * time.Second):
+			t.Error("second Serve did not stop")
+		}
+	})
+	if !waitFor(func() bool { st, ok, _ := ReadState(room, "agent"); return ok && st.Ready(context.Background()) }, 5*time.Second) {
+		t.Fatal("host could not recover an already-queued terminal reply")
+	}
+	reply, err := sp.Recv(e.ReplyTo, time.Second, false)
+	if err != nil || reply.Body != "echo: execute once" {
+		t.Fatalf("terminal reply changed: %+v %v", reply, err)
+	}
+	if _, err := os.Stat(pidfile); !os.IsNotExist(err) {
+		t.Fatalf("terminal request executed again: %v", err)
+	}
+}
 
 // syncBuffer is a bytes.Buffer safe for the race detector: Serve writes the
 // log from its goroutine while tests may read it.

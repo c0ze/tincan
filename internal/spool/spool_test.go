@@ -380,18 +380,21 @@ func TestQuarantinesCorruptMessage(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(inbox, "00000000000000000001-bad.json"), []byte("not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := sp.Recv("b", time.Second, false)
-	if err == nil || errors.Is(err, ErrTimeout) {
-		t.Fatalf("want parse error, got %v", err)
+	if err := sp.Send(msg("a", "b", "healthy", 2)); err != nil {
+		t.Fatal(err)
 	}
-	// The corrupt file is quarantined out of the inbox into tmp/.
+	e, err := sp.Recv("b", time.Second, false)
+	if err != nil || e.Body != "healthy" {
+		t.Fatalf("corrupt file prevented delivery of healthy sibling: %+v, %v", e, err)
+	}
+	// The corrupt file is quarantined out of the inbox and receive continues.
 	entries, _ := os.ReadDir(inbox)
 	if len(entries) != 0 {
 		t.Fatalf("corrupt file still in inbox: %v", entries)
 	}
-	tmpEntries, _ := os.ReadDir(filepath.Join(room, ".tincan", "tmp"))
+	tmpEntries, _ := os.ReadDir(filepath.Join(room, ".tincan", "quarantine"))
 	if len(tmpEntries) != 1 {
-		t.Fatalf("want 1 quarantined file in tmp, got %v", tmpEntries)
+		t.Fatalf("want 1 quarantined file, got %v", tmpEntries)
 	}
 }
 

@@ -3,9 +3,41 @@
 package host
 
 import (
+	"context"
+	"errors"
 	"os/exec"
 	"syscall"
 )
+
+// runProcess leaves the child unreaped until its entire group is killed.
+// The unreaped group leader pins the PID/PGID and prevents a reuse race.
+// This also cleans up descendants when their direct parent exits normally.
+func runProcess(ctx context.Context, cmd *exec.Cmd) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- waitChildExit(cmd.Process.Pid) }()
+	var observeErr error
+	observed := false
+	select {
+	case observeErr = <-exited:
+		observed = true
+	case <-ctx.Done():
+	}
+	killErr := killGroup(cmd)
+	if !observed {
+		<-exited
+	}
+	err := cmd.Wait()
+	if err != nil {
+		return err
+	}
+	return errors.Join(observeErr, killErr)
+}
 
 // childAttr puts the agent in its own process group (pgid == its pid) so a
 // timeout or shutdown can kill it together with everything it spawned,
@@ -25,10 +57,3 @@ func killGroup(cmd *exec.Cmd) error {
 	}
 	return cmd.Process.Kill()
 }
-
-// Terminate asks a hosted serve process to wind down (SIGTERM): it kills any
-// in-flight agent, removes its state file and exits 0.
-func Terminate(pid int) error { return syscall.Kill(pid, syscall.SIGTERM) }
-
-// Kill forcibly ends a serve process that ignored Terminate.
-func Kill(pid int) error { return syscall.Kill(pid, syscall.SIGKILL) }

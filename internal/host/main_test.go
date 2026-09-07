@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,6 +37,25 @@ func fakeAgent(args []string) int {
 		return 2
 	}
 	switch args[0] {
+	case "volume":
+		fmt.Fprint(os.Stdout, strings.Repeat("o", 2*MaxCapturedOutput))
+		fmt.Fprint(os.Stderr, strings.Repeat("e", 2*MaxCapturedOutput))
+	case "progress":
+		fmt.Println("first chunk")
+		time.Sleep(30 * time.Second)
+	case "fork", "fork-pipes":
+		exe, _ := os.Executable()
+		child := exec.Command(exe, "sleep", "30")
+		if args[0] == "fork-pipes" {
+			child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		}
+		if err := child.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if err := os.WriteFile(args[1], []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			return 1
+		}
 	case "echo":
 		fmt.Printf("echo: %s\n", strings.Join(args[1:], " "))
 	case "stdin":
