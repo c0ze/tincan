@@ -83,7 +83,12 @@ func Poll(ctx context.Context, room, id string) (Record, error) {
 			}
 			return r, fmt.Errorf("reply sender %q does not match request agent %q", d.Envelope.From, r.Agent)
 		}
-		finished, err := Finish(room, r.Envelope, d.Envelope.Body)
+		finished, err := finishInteractiveReply(room, r.Envelope, d.Envelope)
+		if errors.Is(err, errReplyJournalBusy) {
+			// Retain the claim until a later Poll can persist its result. A
+			// publisher holding the journal must not stall this wait's timeout.
+			return Get(room, id)
+		}
 		if err != nil {
 			return r, err
 		}

@@ -27,6 +27,8 @@ const MaxResultBytes = 2 * 1024 * 1024
 // under JSON escaping. Every record we accept for writing must remain readable.
 const MaxRecordBytes = spool.MaxMessageBytes + 6*MaxResultBytes + 64*1024
 
+var errReplyJournalBusy = errors.New("interactive reply journal is busy")
+
 type Record struct {
 	ID              string    `json:"id"`
 	Agent           string    `json:"agent"`
@@ -38,8 +40,11 @@ type Record struct {
 	Interactive     bool      `json:"interactive,omitempty"`
 	// An interactive record is saved before dispatch. Until this confirmation
 	// is saved, only the creating Submit call may attempt publication.
-	InteractivePublished bool               `json:"interactive_published,omitempty"`
-	Envelope             *envelope.Envelope `json:"request"`
+	InteractivePublished bool `json:"interactive_published,omitempty"`
+	// Only publication uncertainty can be resolved by a later validated reply;
+	// execution failures, cancellations, and other terminal results stay final.
+	InteractivePublicationUncertain bool               `json:"interactive_publication_uncertain,omitempty"`
+	Envelope                        *envelope.Envelope `json:"request"`
 }
 
 func (r Record) Terminal() bool {
@@ -244,9 +249,11 @@ func resolveInteractivePublication(room string, r Record) (Record, error) {
 			return r, fmt.Errorf("%w: interactive request %s", spool.ErrEnvelopeConflict, r.ID)
 		}
 		r.InteractivePublished = true
+		r.InteractivePublicationUncertain = false
 		return r, save(room, r)
 	}
 	r.Status = "interrupted"
+	r.InteractivePublicationUncertain = true
 	r.Result = "ERROR interrupted: interactive request publication was not confirmed; delivery and execution may have occurred, and the request was not resent"
 	return r, save(room, r)
 }
@@ -282,7 +289,33 @@ func Start(room string, e *envelope.Envelope) (Record, error) {
 // Finish persists a terminal result before the host replies or acknowledges its
 // delivery. Existing terminal results win, including cancellations and duplicates.
 func Finish(room string, e *envelope.Envelope, body string) (Record, error) {
-	l, err := lock(context.Background(), room, e.ID)
+	return finish(room, e, body, nil)
+}
+
+// finishInteractiveReply is used only for an actual collected reply. Its
+// validation and terminal-state decision share the journal lock, so a Submit
+// retry cannot race a collector and make a real answer permanently disappear.
+func finishInteractiveReply(room string, e, reply *envelope.Envelope) (Record, error) {
+	if err := envelope.Validate(reply); err != nil {
+		return Record{}, err
+	}
+	return finish(room, e, reply.Body, reply)
+}
+
+func finish(room string, e *envelope.Envelope, body string, reply *envelope.Envelope) (Record, error) {
+	var l *filelock.Lock
+	var err error
+	if reply == nil {
+		l, err = lock(context.Background(), room, e.ID)
+	} else {
+		if err := validID(e.ID); err != nil {
+			return Record{}, err
+		}
+		l, err = filelock.Try(filepath.Join(Dir(room), "locks", e.ID+".lock"))
+		if errors.Is(err, filelock.ErrLocked) {
+			return Record{}, errReplyJournalBusy
+		}
+	}
 	if err != nil {
 		return Record{}, err
 	}
@@ -290,14 +323,30 @@ func Finish(room string, e *envelope.Envelope, body string) (Record, error) {
 	r, err := Get(room, e.ID)
 	if errors.Is(err, os.ErrNotExist) {
 		r = newRecord(e)
+		r.Interactive = reply != nil
 	} else if err != nil {
 		return Record{}, err
 	}
 	if !sameRequest(r, e) {
 		return Record{}, fmt.Errorf("request ID collision: %s", e.ID)
 	}
-	if r.Terminal() {
+	if reply != nil {
+		// A hosted handoff may have changed mode after Poll read the record.
+		// Interactive collection cannot finish native execution.
+		if !r.Interactive {
+			return r, nil
+		}
+		if reply.To != r.Envelope.ReplyTo || (reply.From != "" && reply.From != r.Agent) {
+			return r, errors.New("interactive reply does not match the request channel and agent")
+		}
+	}
+	resolvesPublication := reply != nil && r.Interactive && r.Status == "interrupted" && r.InteractivePublicationUncertain
+	if r.Terminal() && !resolvesPublication {
 		return r, nil
+	}
+	if reply != nil {
+		r.InteractivePublished = true
+		r.InteractivePublicationUncertain = false
 	}
 	if len(body) > MaxResultBytes {
 		body = body[:MaxResultBytes] + "\n[output truncated]"
@@ -353,7 +402,7 @@ func Wait(ctx context.Context, room, id string, timeout time.Duration) (Record, 
 	defer tick.Stop()
 	for {
 		r, err := Poll(ctx, room, id)
-		if err != nil || r.Terminal() || timeout == 0 {
+		if err != nil || (r.Terminal() && !r.InteractivePublicationUncertain) || timeout == 0 {
 			return r, err
 		}
 		select {

@@ -55,6 +55,9 @@ The follow-up fixes persist interactive publication intent/confirmation, resolve
 temporary-directory aliases before creating reply files, and read routing metadata
 through bounded snapshots that tolerate atomic replacement. Uncertain interactive
 publication is reported explicitly and never automatically republished.
+The follow-up review also checked a retry racing with reply collection. Validated
+interactive replies can resolve publication uncertainty, so recording uncertainty
+cannot discard an actual answer. Other terminal results remain immutable.
 
 ## Local verification
 

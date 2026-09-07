@@ -432,6 +432,12 @@ confirmed interactive work. If a crash prevents confirming publication and the
 envelope is no longer queued or in flight, the request becomes `interrupted` with
 an uncertain outcome. Inspect the receiver and workspace before submitting new
 work: delivery or side effects may already have occurred.
+A later validated reply can resolve this publication uncertainty and supply the
+actual result. Other terminal results remain unchanged by duplicate replies.
+MCP marks this case with `outcome_uncertain: true`. It is terminal for dispatch
+(the task will never be replayed), but wait/status can still collect an actual
+reply if the receiver handled it. A bounded wait uses its timeout to await that
+evidence; inspect the receiver and workspace if the uncertainty remains.
 
 ### Security caveat
 

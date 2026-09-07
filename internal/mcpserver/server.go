@@ -168,21 +168,22 @@ type SendInput struct {
 }
 
 type RequestView struct {
-	RequestID       string          `json:"request_id"`
-	Agent           string          `json:"agent"`
-	Status          string          `json:"status"`
-	Terminal        bool            `json:"terminal"`
-	Result          string          `json:"result,omitempty"`
-	CancelRequested bool            `json:"cancel_requested,omitempty"`
-	Cancellable     bool            `json:"cancellable"`
-	Created         time.Time       `json:"created"`
-	Updated         time.Time       `json:"updated"`
-	Events          []request.Event `json:"events,omitempty"`
-	NextCursor      int64           `json:"next_cursor"`
+	RequestID        string          `json:"request_id"`
+	Agent            string          `json:"agent"`
+	Status           string          `json:"status"`
+	Terminal         bool            `json:"terminal"`
+	Result           string          `json:"result,omitempty"`
+	CancelRequested  bool            `json:"cancel_requested,omitempty"`
+	Cancellable      bool            `json:"cancellable"`
+	OutcomeUncertain bool            `json:"outcome_uncertain,omitempty"`
+	Created          time.Time       `json:"created"`
+	Updated          time.Time       `json:"updated"`
+	Events           []request.Event `json:"events,omitempty"`
+	NextCursor       int64           `json:"next_cursor"`
 }
 
 func view(r request.Record) RequestView {
-	return RequestView{RequestID: r.ID, Agent: r.Agent, Status: r.Status, Terminal: r.Terminal(), Result: r.Result, CancelRequested: r.CancelRequested, Cancellable: !r.Interactive && !r.Terminal(), Created: r.Created, Updated: r.Updated}
+	return RequestView{RequestID: r.ID, Agent: r.Agent, Status: r.Status, Terminal: r.Terminal(), Result: r.Result, CancelRequested: r.CancelRequested, Cancellable: !r.Interactive && !r.Terminal(), OutcomeUncertain: r.InteractivePublicationUncertain, Created: r.Created, Updated: r.Updated}
 }
 
 func (s *service) sendTool(ctx context.Context, req *mcp.CallToolRequest, in SendInput) (*mcp.CallToolResult, RequestView, error) {
@@ -291,7 +292,7 @@ func (s *service) waitWithProgress(ctx context.Context, req *mcp.CallToolRequest
 			}
 			cursor = next
 		}
-		if r.Terminal() {
+		if r.Terminal() && !r.InteractivePublicationUncertain {
 			return r, nil
 		}
 		select {
