@@ -32,7 +32,15 @@ func Poll(ctx context.Context, room, id string) (Record, error) {
 	if err := spool.ValidName(channel); err != nil {
 		return r, err
 	}
-	owner, err := filelock.Acquire(ctx, pollLockPath(room, channel))
+	if err := ctx.Err(); err != nil {
+		return r, err
+	}
+	owner, err := filelock.Try(pollLockPath(room, channel))
+	if errors.Is(err, filelock.ErrLocked) {
+		// Another collector owns the reply. Return its latest journal state
+		// promptly so Wait can honor its own timeout and cancellation.
+		return Get(room, id)
+	}
 	if err != nil {
 		return r, err
 	}

@@ -133,9 +133,15 @@ func TestPollWaitsForCollectorOwnershipAndCanCancel(t *testing.T) {
 	if _, err := sp.ClaimContext(context.Background(), r.Envelope.ReplyTo, time.Second); err != nil {
 		t.Fatal(err)
 	}
+	shortCtx, shortCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer shortCancel()
+	pending, err := Wait(shortCtx, room, r.ID, 10*time.Millisecond)
+	if err != nil || pending.Terminal() {
+		t.Fatalf("collector ownership blocked Wait timeout: %+v, %v", pending, err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	if _, err := Poll(ctx, room, r.ID); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := Wait(ctx, room, r.ID, time.Second); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("competing collector did not wait: %v", err)
 	}
 	current, err := Get(room, r.ID)
