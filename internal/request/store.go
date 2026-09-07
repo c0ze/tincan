@@ -28,15 +28,18 @@ const MaxResultBytes = 2 * 1024 * 1024
 const MaxRecordBytes = spool.MaxMessageBytes + 6*MaxResultBytes + 64*1024
 
 type Record struct {
-	ID              string             `json:"id"`
-	Agent           string             `json:"agent"`
-	Status          string             `json:"status"`
-	Result          string             `json:"result,omitempty"`
-	Created         time.Time          `json:"created"`
-	Updated         time.Time          `json:"updated"`
-	CancelRequested bool               `json:"cancel_requested,omitempty"`
-	Interactive     bool               `json:"interactive,omitempty"`
-	Envelope        *envelope.Envelope `json:"request"`
+	ID              string    `json:"id"`
+	Agent           string    `json:"agent"`
+	Status          string    `json:"status"`
+	Result          string    `json:"result,omitempty"`
+	Created         time.Time `json:"created"`
+	Updated         time.Time `json:"updated"`
+	CancelRequested bool      `json:"cancel_requested,omitempty"`
+	Interactive     bool      `json:"interactive,omitempty"`
+	// An interactive record is saved before dispatch. Until this confirmation
+	// is saved, only the creating Submit call may attempt publication.
+	InteractivePublished bool               `json:"interactive_published,omitempty"`
+	Envelope             *envelope.Envelope `json:"request"`
 }
 
 func (r Record) Terminal() bool {
@@ -132,6 +135,8 @@ func Submit(ctx context.Context, room, agent, from, body, id string) (Record, er
 
 // SubmitInteractive bridges an existing interactive /listen receiver into the
 // request journal. Hosted MCP work uses Submit and needs no ephemeral reply.
+// A saved dispatch intent is never republished by a retry: legacy receivers can
+// consume work before replying, so missing transport evidence is uncertain.
 func SubmitInteractive(ctx context.Context, room, agent, from, body, id string) (Record, error) {
 	return submit(ctx, room, agent, from, body, id, true)
 }
@@ -168,6 +173,12 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 		if r.Status != "queued" {
 			return r, nil
 		}
+		if r.Interactive {
+			if r.InteractivePublished {
+				return r, nil
+			}
+			return resolveInteractivePublication(room, r)
+		}
 		e = r.Envelope
 	} else if errors.Is(err, os.ErrNotExist) {
 		r = newRecord(e)
@@ -183,9 +194,61 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 		return Record{}, err
 	}
 	if err := sp.Send(e); err != nil {
+		if r.Interactive {
+			resolved, resolveErr := resolveInteractivePublication(room, r)
+			if resolveErr != nil {
+				return r, fmt.Errorf("interactive request %s dispatch was not confirmed: %w (publication inspection: %v)", id, err, resolveErr)
+			}
+			return resolved, fmt.Errorf("interactive request %s dispatch returned an error and will not be resent automatically: %w", id, err)
+		}
 		return r, fmt.Errorf("request %s was saved but enqueue failed; retry the same request_id: %w", id, err)
 	}
+	if r.Interactive {
+		r.InteractivePublished = true
+		if err := save(room, r); err != nil {
+			return r, fmt.Errorf("interactive request %s was published but confirmation failed; retry the same request_id to inspect without resending: %w", id, err)
+		}
+	}
 	return r, nil
+}
+
+// resolveInteractivePublication handles a durable dispatch intent left by a
+// process exit or older interactive records without confirmation. Absence is
+// not permission to resend: a legacy receiver may already have consumed and
+// acted on the envelope without writing anything to the request journal.
+// Native queued requests deliberately retain their separate enqueue repair.
+func resolveInteractivePublication(room string, r Record) (Record, error) {
+	if err := envelope.Validate(r.Envelope); err != nil {
+		return r, err
+	}
+	root := filepath.Join(canonicalRoom(room), ".tincan")
+	filename := envelope.Filename(r.Envelope)
+	paths := []string{
+		filepath.Join(root, "inbox", r.Agent, filename),
+		filepath.Join(root, "inflight", r.Agent, filename, "message.json"),
+	}
+	for _, path := range paths {
+		data, err := fsutil.ReadFile(path, spool.MaxMessageBytes)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return r, fmt.Errorf("cannot inspect interactive publication: %w", err)
+		}
+		existing, err := envelope.Unmarshal(data)
+		if err != nil {
+			return r, fmt.Errorf("cannot inspect interactive publication: %w", err)
+		}
+		if existing.ID != r.ID || !sameRequest(r, existing) || !existing.TS.Equal(r.Envelope.TS) ||
+			existing.ReplyTo != r.Envelope.ReplyTo || existing.CorrID != r.Envelope.CorrID {
+			return r, fmt.Errorf("%w: interactive request %s", spool.ErrEnvelopeConflict, r.ID)
+		}
+		r.InteractivePublished = true
+		return r, save(room, r)
+	}
+	r.Status = "interrupted"
+	r.Result = "ERROR interrupted: interactive request publication was not confirmed; delivery and execution may have occurred, and the request was not resent"
+	return r, save(room, r)
 }
 
 // Start marks an accepted request running, unless it has a terminal result.

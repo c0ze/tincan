@@ -48,6 +48,14 @@ Pending interactive work retains its route while the listener is busy. These
 receivers cannot reliably honor targeted cancellation, so their request records
 explicitly report that cancellation is unavailable.
 
+An independent Codex review found three additional defects: interactive retries
+could republish consumed work, macOS temporary-directory aliases could prevent
+file replies, and atomic journal replacements could spuriously fail route scans.
+The follow-up fixes persist interactive publication intent/confirmation, resolve
+temporary-directory aliases before creating reply files, and read routing metadata
+through bounded snapshots that tolerate atomic replacement. Uncertain interactive
+publication is reported explicitly and never automatically republished.
+
 ## Local verification
 
 Automated coverage includes real stdio MCP discovery/calls, reconnect and cached

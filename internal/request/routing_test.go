@@ -100,3 +100,41 @@ func TestRouteLockSerializesConnectionsAndScanHonorsCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRouteScanDuringAtomicRequestLifecycleUpdates(t *testing.T) {
+	room := t.TempDir()
+	ctx := context.Background()
+	r, err := Submit(ctx, room, "updating-agent", "test", strings.Repeat("x", 128<<10), "updating-job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		// Start is idempotent and rewrites the durable running snapshot. Stress
+		// the real journal writer, then its terminal transition, while another
+		// agent's sends inspect routing headers in the same request directory.
+		for i := 0; i < 96; i++ {
+			if _, err := Start(room, r.Envelope); err != nil {
+				done <- err
+				return
+			}
+		}
+		_, err := Finish(room, r.Envelope, strings.Repeat("answer", 8<<10))
+		done <- err
+	}()
+	for {
+		pending, err := InteractivePending(ctx, room, "unrelated-agent")
+		if err != nil || pending {
+			<-done
+			t.Fatalf("atomic update disturbed unrelated route: %v, %v", pending, err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			return
+		default:
+		}
+	}
+}

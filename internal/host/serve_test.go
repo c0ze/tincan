@@ -370,6 +370,32 @@ func TestServeReplyFilePreset(t *testing.T) {
 	}
 }
 
+func TestServeReplyFileWithSymlinkTemporaryDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require elevated privileges")
+	}
+	base := t.TempDir()
+	target := filepath.Join(base, "actual-temp")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "temp-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	_, sp, _, done, _ := startServe(t, Preset{Exec: fakeExec("outfile", "{out}", "{body}"), Reply: "file"}, "custom")
+	t.Setenv("TMPDIR", link)
+	reply := askVia(t, sp, "through a symlink temporary directory")
+	if reply.Body != "file: through a symlink temporary directory" {
+		t.Fatalf("reply body = %q", reply.Body)
+	}
+	stopServe(t, sp, done)
+	entries, err := os.ReadDir(target)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("reply temporary file was not cleaned up: %v %v", entries, err)
+	}
+}
+
 func TestServeNonZeroExitRepliesError(t *testing.T) {
 	_, sp, _, done, _ := startServe(t, Preset{Exec: fakeExec("fail", "{body}")}, "custom")
 	reply := askVia(t, sp, "x")

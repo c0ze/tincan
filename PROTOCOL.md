@@ -427,6 +427,11 @@ interactive requests keep routing to that receiver while it is busy and has no
 parked presence. The interactive
 receiver does not report hosted running/progress state, and request cancellation
 is unsupported for that legacy loop; use the interactive session's own controls.
+Publication intent is saved before dispatch, and identical retries never republish
+confirmed interactive work. If a crash prevents confirming publication and the
+envelope is no longer queued or in flight, the request becomes `interrupted` with
+an uncertain outcome. Inspect the receiver and workspace before submitting new
+work: delivery or side effects may already have occurred.
 
 ### Security caveat
 

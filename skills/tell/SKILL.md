@@ -5,11 +5,38 @@ description: Delegate a task to another running agent via tincan and act on its 
 
 # tincan: tell
 
-You are the **orchestrator** side of tincan. Send a task to a named agent that is
-running `/listen`, then act on its reply. See `PROTOCOL.md` in the tincan repo for
+You are the **orchestrator** side of tincan. Send a task to a named agent, then
+act on its reply. Tincan can host the agent or reach an existing `/listen`
+receiver. See `PROTOCOL.md` in the tincan repo for
 the full model. Your name defaults to `orch`.
 
-## Setup
+## Native MCP workflow
+
+When tincan MCP tools are available for the intended room, use them and skip the
+CLI workflow below. Tool names may have a client-specific namespace prefix.
+
+1. Call `tincan_status` to confirm its fixed room matches the task's workspace.
+   Use `tincan_presets` when you need to check available providers.
+2. Call `tincan_send` with `agent`, `body`, `from: "orch"`, and a new unique
+   `request_id` that you retain for this task. Send starts a configured listener
+   automatically. For an alias or explicit session mode, first call
+   `tincan_launch` with `name`, `preset`, and optionally `session_mode`.
+3. Call `tincan_wait` with that same `request_id` and `timeout_seconds: 30`.
+   Retain `next_cursor` and pass it as `cursor` on subsequent waits. Continue
+   until `terminal` is true; a wait timeout does not resubmit or cancel work.
+4. Act on the final `result`. Inspect failed/interrupted results and the
+   workspace before deciding whether new work is needed. Reuse an existing ID
+   only for identical work, never to retry the side effects of a failed task.
+
+For several agents, submit their tasks independently, then collect each request
+by its own ID while continuing useful local work. Keep listeners running between
+follow-ups: supported providers retain conversation context across calls and MCP
+reconnects. `tincan_cancel` targets one request when `cancellable` is true;
+`tincan_stop` ends a listener, and `tincan_reset` clears its saved conversation.
+Stopping/resetting preserves queued work. Stop listeners you started when the
+session's work is done.
+
+## CLI setup (when MCP is unavailable)
 
 Resolve the room once: `ROOM="$(git rev-parse --show-toplevel)"` (absolute CWD if
 not in a repo). tincan does NOT auto-climb — always pass `--room "$ROOM"`; the

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -181,7 +182,7 @@ func complete(sp *spool.Spool, o ServeOptions, d *spool.Delivery, body string) e
 			return fmt.Errorf("reply %s: %w", e.ID, err)
 		}
 	} else {
-		logf(o.Log, "--- %s has no reply_to; output logged only", e.ID)
+		logf(o.Log, "--- %s has no reply_to; result retained in request journal", e.ID)
 	}
 	return d.Ack(false)
 }
@@ -218,7 +219,7 @@ func handle(ctx context.Context, o ServeOptions, e *envelope.Envelope) string {
 	}
 	vars := Vars{Body: e.Body, Room: o.Room, Name: o.Name, ID: e.ID}
 	if p.Reply == "file" {
-		f, err := os.CreateTemp("", "tincan-reply-*.md")
+		f, err := newReplyFile()
 		if err != nil {
 			logf(o.Log, "=== exit=error duration=%.1fs reply file: %v", time.Since(started).Seconds(), err)
 			return "ERROR exec: cannot create reply file: " + err.Error()
@@ -240,6 +241,21 @@ func handle(ctx context.Context, o ServeOptions, e *envelope.Envelope) string {
 		return "ERROR session: " + err.Error()
 	}
 	return PostProcess(o.Label, body)
+}
+
+// Canonicalize the system temporary directory before creating the private
+// reply file. On macOS it commonly contains /var -> /private/var; the returned
+// path must pass the regular-file reader's checks on every ancestor.
+func newReplyFile() (*os.File, error) {
+	dir, err := filepath.Abs(os.TempDir())
+	if err != nil {
+		return nil, err
+	}
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
+		return nil, err
+	}
+	return os.CreateTemp(dir, "tincan-reply-*.md")
 }
 
 func exitLabel(res Result) string {

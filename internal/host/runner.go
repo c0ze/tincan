@@ -171,7 +171,7 @@ func ReplyBody(spec RunSpec, res Result) string {
 		return string(data)
 	default:
 		if res.StdoutTruncated {
-			return "[output truncated; see host log for the full stream]\n" + string(res.Stdout)
+			return "[output truncated; recent output is in the host log]\n" + string(res.Stdout)
 		}
 		return string(res.Stdout)
 	}

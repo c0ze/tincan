@@ -1,6 +1,7 @@
 package request
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -31,7 +32,7 @@ func LockRoute(ctx context.Context, room, agent string) (*filelock.Lock, error) 
 // the durable source of truth, including after an MCP reconnect or crash.
 //
 // Call while holding LockRoute. Directory reads and metadata reads are bounded;
-// prompts/results are never loaded. Unreadable relevant metadata is an error,
+// full prompts/results are never loaded. Unreadable relevant metadata is an error,
 // never permission to start a different hosted agent under the same name.
 func InteractivePending(ctx context.Context, room, agent string) (bool, error) {
 	if err := spool.ValidName(agent); err != nil {
@@ -85,14 +86,13 @@ func InteractivePending(ctx context.Context, room, agent string) (bool, error) {
 }
 
 func interactiveHeader(path, id, agent string) (bool, error) {
-	f, err := fsutil.OpenFile(path, os.O_RDONLY, 0)
+	prefix, err := fsutil.ReadPrefix(path, 16<<10, MaxRecordBytes)
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
 	// save writes routing fields before the potentially large request body.
 	// Terminal records can be skipped before their potentially large result.
-	decoder := json.NewDecoder(io.LimitReader(f, 16<<10))
+	decoder := json.NewDecoder(bytes.NewReader(prefix))
 	start, err := decoder.Token()
 	if err != nil || start != json.Delim('{') {
 		return false, errors.New("invalid request metadata")

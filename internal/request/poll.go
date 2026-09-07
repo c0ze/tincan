@@ -66,7 +66,7 @@ func Poll(ctx context.Context, room, id string) (Record, error) {
 	if len(claims) == 0 {
 		d, err := sp.ClaimContext(ctx, channel, time.Millisecond)
 		if errors.Is(err, spool.ErrTimeout) {
-			return r, nil
+			return reconcileIdleInteractivePublication(ctx, room, r, sp)
 		}
 		if err != nil {
 			return r, err
@@ -93,4 +93,42 @@ func Poll(ctx context.Context, room, id string) (Record, error) {
 		}
 	}
 	return r, nil
+}
+
+// Reconcile an abandoned publication intent without asking a caller to submit
+// again. A live Submit holds the journal lock until its publication confirmation
+// is saved; Try keeps Poll/Wait bounded while that owner is still working.
+func reconcileIdleInteractivePublication(ctx context.Context, room string, r Record, sp *spool.Spool) (Record, error) {
+	if r.Terminal() || r.InteractivePublished {
+		return r, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return r, err
+	}
+	// A very short Claim timeout may expire while preparing directories, even
+	// though a reply is queued. Give that real response priority over declaring
+	// the original publication uncertain; the next Poll can collect it.
+	presence, _, err := sp.Present(r.Envelope.ReplyTo)
+	if err != nil {
+		return r, err
+	}
+	if presence.Queued > 0 {
+		return r, nil
+	}
+	owner, err := filelock.Try(filepath.Join(Dir(room), "locks", r.ID+".lock"))
+	if errors.Is(err, filelock.ErrLocked) {
+		return Get(room, r.ID)
+	}
+	if err != nil {
+		return r, err
+	}
+	defer owner.Close()
+	current, err := Get(room, r.ID)
+	if err != nil {
+		return r, err
+	}
+	if current.Status != "queued" || !current.Interactive || current.InteractivePublished {
+		return current, nil
+	}
+	return resolveInteractivePublication(room, current)
 }
