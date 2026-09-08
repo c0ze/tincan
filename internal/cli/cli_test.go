@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -274,9 +273,6 @@ func TestPingExitsOneForAbsentPresence(t *testing.T) {
 }
 
 func TestPingExitsOneForDeadPIDPresence(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("processAlive is conservative on Windows (see alive_other.go); dead-PID detection is unix-only")
-	}
 	room := t.TempDir()
 	writePresenceFile(t, room, "ghost", 1<<30, time.Now())
 	code, stdout, _ := run("ping", "--room", room, "--to", "ghost")

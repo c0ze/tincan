@@ -68,8 +68,7 @@ func validName(name string) error { return envelope.ValidComponent(name) }
 func ValidName(name string) error { return validName(name) }
 
 // ProcessAlive reports whether pid names a live process, using the same
-// per-OS check status/ping apply to presence tokens (see alive_unix.go and
-// alive_other.go for the Windows caveat). Exported so hosted-listener state
+// per-OS check status/ping apply to presence tokens. Exported so hosted-listener state
 // files get the identical answer.
 func ProcessAlive(pid int) bool { return processAlive(pid) }
 

@@ -87,10 +87,24 @@ func openFile(path string, flags int, mode os.FileMode) (*os.File, error) {
 func SyncDir(string) error { return nil }
 
 func renameFile(oldPath, newPath string) error {
-	var err error
+	// Root.Rename uses Windows' POSIX replacement semantics when available,
+	// unlike os.Rename's MoveFileEx path. Existing readers keep the old snapshot
+	// while new opens see the replacement. Atomic writes use the same directory.
+	dir := filepath.Dir(oldPath)
+	newName, err := filepath.Rel(dir, newPath)
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	for attempt := 0; attempt < 8; attempt++ {
-		err = os.Rename(oldPath, newPath)
-		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		err = root.Rename(filepath.Base(oldPath), newName)
+		// Windows can also report an open destination as ACCESS_DENIED. Keep
+		// retries bounded so a real permission failure is still returned.
+		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_LOCK_VIOLATION) && !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 			return err
 		}
 		if attempt < 7 {

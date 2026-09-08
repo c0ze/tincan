@@ -501,9 +501,6 @@ func TestPresenceFileRemovedAfterRecvReturnsMessage(t *testing.T) {
 }
 
 func TestListPresenceMarksDeadPIDNotAlive(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("processAlive is conservative on Windows (see alive_other.go); dead-PID detection is unix-only")
-	}
 	room := t.TempDir()
 	sp, _ := Open(room)
 	presentDir := filepath.Join(room, ".tincan", "present", "ghost")
@@ -590,9 +587,6 @@ func TestPresentReturnsFalseForUnknownName(t *testing.T) {
 }
 
 func TestPresentReturnsFalseForDeadPIDPresenceFile(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("processAlive is conservative on Windows (see alive_other.go); dead-PID detection is unix-only")
-	}
 	room := t.TempDir()
 	sp, _ := Open(room)
 	presentDir := filepath.Join(room, ".tincan", "present", "ghost")
