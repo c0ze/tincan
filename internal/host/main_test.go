@@ -38,6 +38,7 @@ func canonicalTempDir(t *testing.T) string {
 //
 //	echo <text…>            stdout "echo: <text>\n", exit 0
 //	stdin                   stdout "stdin: " + all of stdin + "\n", exit 0
+//	stdout <text>           stdout verbatim text, exit 0
 //	fail <text…>            stderr "boom: <text>\n", stdout "partial", exit 3
 //	sleep <sec> [pidfile]   write own pid to pidfile, then sleep <sec>
 //	outfile <path> <text…>  write "file: <text>" to path, stdout "noise on stdout"
@@ -69,6 +70,8 @@ func fakeAgent(args []string) int {
 		}
 	case "echo":
 		fmt.Printf("echo: %s\n", strings.Join(args[1:], " "))
+	case "stdout":
+		fmt.Print(args[1])
 	case "stdin":
 		data, _ := io.ReadAll(os.Stdin)
 		fmt.Printf("stdin: %s\n", data)

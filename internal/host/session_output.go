@@ -177,6 +177,14 @@ func (p *sessionParser) event(line []byte) (string, error) {
 	if len(line) == 0 {
 		return "", nil
 	}
+	// Claude Code's bundled MCP client can print this informational diagnostic
+	// on stdout, including after the final JSON result. It stays in the private
+	// host log and must not invalidate a completed answer or become progress.
+	// Match only the observed diagnostic; malformed JSON and other output still
+	// fail rather than hiding a provider error behind an earlier success.
+	if p.provider == "claude" && string(line) == "Client.listTools() called but server does not advertise tools capability - returning empty list" {
+		return "", nil
+	}
 	var m jsonFields
 	if err := json.Unmarshal(line, &m); err != nil || m == nil {
 		return "", errors.New("provider emitted invalid JSON output")
