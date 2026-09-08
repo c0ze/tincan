@@ -17,7 +17,9 @@ import (
 
 func TestProgressWaitCollectsReplyAfterPublicationUncertainty(t *testing.T) {
 	room := t.TempDir()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Fixture creation performs several durable writes. Keep its deadline
+	// separate so a slow filesystem cannot consume the MCP call's budget.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	r, err := request.SubmitInteractive(ctx, room, "legacy", "mcp", "one task", "uncertain-job")
 	if err != nil {
@@ -46,18 +48,20 @@ func TestProgressWaitCollectsReplyAfterPublicationUncertainty(t *testing.T) {
 	}
 	params := &mcp.CallToolParams{Name: "tincan_wait", Arguments: map[string]any{"request_id": r.ID, "timeout_seconds": 2}}
 	params.SetProgressToken("uncertain-progress")
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWait()
 	type response struct {
 		result *mcp.CallToolResult
 		err    error
 	}
 	done := make(chan response, 1)
 	go func() {
-		result, err := cs.CallTool(ctx, params)
+		result, err := cs.CallTool(waitCtx, params)
 		done <- response{result, err}
 	}()
 	select {
 	case early := <-done:
-		t.Fatalf("bounded wait ended before collecting evidence: %+v", early)
+		t.Fatalf("bounded wait ended before collecting evidence: result=%+v err=%v", early.result, early.err)
 	case <-time.After(100 * time.Millisecond):
 	}
 	if err := sp.Send(&envelope.Envelope{ID: envelope.NewID(), From: r.Agent, To: r.Envelope.ReplyTo, TS: time.Now().UTC(), Body: "actual answer"}); err != nil {
@@ -66,11 +70,14 @@ func TestProgressWaitCollectsReplyAfterPublicationUncertainty(t *testing.T) {
 	var got response
 	select {
 	case got = <-done:
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
+	case <-waitCtx.Done():
+		t.Fatal(waitCtx.Err())
 	}
-	if got.err != nil || got.result.IsError {
-		t.Fatalf("wait: %+v", got)
+	if got.err != nil {
+		t.Fatalf("wait: %v", got.err)
+	}
+	if got.result == nil || got.result.IsError {
+		t.Fatalf("wait result: %+v", got.result)
 	}
 	data, _ = json.Marshal(got.result.StructuredContent)
 	var result mcpserver.RequestView
