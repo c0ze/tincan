@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/c0ze/tincan/internal/envelope"
-	"github.com/c0ze/tincan/internal/spool"
+	"github.com/c0ze/tincan/v2/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 // run invokes the CLI and returns (exit code, stdout, stderr).

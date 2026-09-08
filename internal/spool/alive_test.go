@@ -12,8 +12,7 @@ func TestProcessAliveTrueForOwnPID(t *testing.T) {
 }
 
 func TestProcessAliveFalseForDefinitelyDeadPID(t *testing.T) {
-	// A PID far above any realistic live range; on unix pids are bounded
-	// well under this on every mainstream kernel.
+	// A deliberately unused PID, far above the ordinary live process range.
 	const deadPID = 1 << 30
 	if processAlive(deadPID) {
 		t.Fatal("processAlive(huge unused pid) = true, want false")

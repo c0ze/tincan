@@ -5,7 +5,7 @@ package main
 import (
 	"os"
 
-	"github.com/c0ze/tincan/internal/cli"
+	"github.com/c0ze/tincan/v2/internal/cli"
 )
 
 func main() {

@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/c0ze/tincan/internal/fsutil"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 )
 
 // OpenLog opens a private regular append-only log, refusing special files.

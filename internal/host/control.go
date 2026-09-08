@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/c0ze/tincan/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/envelope"
 )
 
 // control is kept responsive while the listener is executing a job. Its

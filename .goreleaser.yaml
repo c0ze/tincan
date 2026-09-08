@@ -4,7 +4,7 @@ project_name: tincan
 builds:
   - main: ./cmd/tincan
     ldflags:
-      - -s -w -X github.com/c0ze/tincan/internal/buildinfo.Version={{.Tag}} -X github.com/c0ze/tincan/internal/buildinfo.Commit={{.FullCommit}} -X github.com/c0ze/tincan/internal/buildinfo.Date={{.Date}}
+      - -s -w -X github.com/c0ze/tincan/v2/internal/buildinfo.Version={{.Tag}} -X github.com/c0ze/tincan/v2/internal/buildinfo.Commit={{.FullCommit}} -X github.com/c0ze/tincan/v2/internal/buildinfo.Date={{.Date}}
     env:
       - CGO_ENABLED=0
     goos: [linux, darwin, windows]

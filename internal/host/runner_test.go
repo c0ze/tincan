@@ -5,12 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/c0ze/tincan/internal/spool"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 func TestRunKillsDescendantsAfterDirectChildExits(t *testing.T) {
@@ -123,7 +122,7 @@ func TestRunTimeoutKillsProcessGroup(t *testing.T) {
 		t.Fatalf("ReplyBody = %q", got)
 	}
 	pid := readPID(t, pidfile)
-	if runtime.GOOS != "windows" && !waitFor(func() bool { return !spool.ProcessAlive(pid) }, 3*time.Second) {
+	if !waitFor(func() bool { return !spool.ProcessAlive(pid) }, 3*time.Second) {
 		t.Fatalf("agent pid %d still alive after timeout kill", pid)
 	}
 }
@@ -145,7 +144,7 @@ func TestRunContextCancelKillsAndReportsInterrupted(t *testing.T) {
 		t.Fatalf("ReplyBody = %q", got)
 	}
 	pid := readPID(t, pidfile)
-	if runtime.GOOS != "windows" && !waitFor(func() bool { return !spool.ProcessAlive(pid) }, 3*time.Second) {
+	if !waitFor(func() bool { return !spool.ProcessAlive(pid) }, 3*time.Second) {
 		t.Fatalf("agent pid %d still alive after cancel", pid)
 	}
 }

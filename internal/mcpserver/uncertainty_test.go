@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/c0ze/tincan/internal/envelope"
-	"github.com/c0ze/tincan/internal/fsutil"
-	"github.com/c0ze/tincan/internal/mcpserver"
-	"github.com/c0ze/tincan/internal/request"
-	"github.com/c0ze/tincan/internal/spool"
+	"github.com/c0ze/tincan/v2/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
+	"github.com/c0ze/tincan/v2/internal/mcpserver"
+	"github.com/c0ze/tincan/v2/internal/request"
+	"github.com/c0ze/tincan/v2/internal/spool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

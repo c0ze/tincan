@@ -12,9 +12,9 @@ import (
 // no controlling terminal and never gets the shell's SIGHUP), stdin from
 // /dev/null, stdout+stderr appended to logPath, cwd = dir. The returned
 // channel yields the child's exit status once it exits — up uses it to fail
-// fast when serve dies before parking. The process handle is deliberately
-// not released: keeping a Wait running lets the caller reap the child while
-// it is still alive; the daemon outlives the caller either way.
+// fast when serve dies before authenticated readiness. The process handle is
+// kept for Wait to reap the child if it exits before the caller. The daemon
+// can outlive its caller without holding a controlling terminal.
 func StartDetached(exe string, args []string, dir, logPath string) (*os.Process, <-chan error, error) {
 	logf, err := OpenLog(logPath)
 	if err != nil {

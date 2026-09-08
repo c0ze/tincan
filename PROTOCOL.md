@@ -1,8 +1,9 @@
 # tincan — operating protocol
 
 tincan passes messages between AI coding agents on one machine, scoped to a repo,
-over a filesystem spool. No network service or background coordinator; messages,
-hosted logs and request state are stored locally. Near-zero tokens while idle.
+over a filesystem spool. Messages, hosted logs and request state are stored
+locally, without a shared broker. Hosted readiness and shutdown use an
+authenticated loopback control endpoint. Near-zero tokens while idle.
 Design rationale lives in `docs/superpowers/specs/`; this file is the operating guide
 that the `/tell` and `/listen` skills point to.
 
@@ -245,7 +246,9 @@ file ← command-line flags:
 Persistent adapters use structured output and return only the final assistant
 answer. Assistant text becomes progress; startup inventories, thoughts and
 provider stderr remain in the private host log. Empty, invalid, incomplete or
-oversized structured output produces an explicit error. Stateless commands keep
+oversized structured output produces an explicit error. Claude's exact known SDK
+no-tools diagnostic line is tolerated alongside valid JSON and kept in the log;
+other non-JSON output remains an error. Stateless commands keep
 their legacy text/file replies; trailing whitespace and Kimi's resume-hint footer
 are trimmed.
 
@@ -349,8 +352,8 @@ Start a server with `tincan mcp --room /absolute/path/to/repo`. The room is fixe
 for that server's lifetime; tools cannot override it. MCP uses stdin/stdout and
 diagnostics use stderr. The binary's `tincan version --format json` reports
 version, commit, date, modification status, Go version and module identity.
-Build this checkout for the interface below: the `v0.1.0` release does not
-contain it, and `@main` includes only changes published to the main branch.
+The interface below ships in v2.0.0. See the [setup guide](docs/setup.md) for
+client configuration and [release notes](docs/releases/v2.0.0.md) for upgrading.
 
 Clients with an `mcpServers` JSON configuration can use:
 
@@ -442,8 +445,8 @@ evidence; inspect the receiver and workspace if the uncertainty remains.
 ### Security caveat
 
 Same trust boundary as before, stated more loudly: **anything that can write
-into `<room>/.tincan/inbox/<name>/` drives the hosted agent**, and the presets
-bake in auto-approval flags — that is the point. Mitigations: presets use the
+into `<room>/.tincan/inbox/<name>/` drives the hosted agent**, and several presets
+include auto-approval flags for unattended work. Mitigations: presets use the
 narrowest mode that works unattended (`codex -s workspace-write`, never
 `danger-full-access`); `cwd` is the room; the body is an argv element or
 stdin, never interpolated into a shell string. Fine on a single-user machine
@@ -452,13 +455,23 @@ with a trusted orchestrator; think before widening that boundary.
 ### Platform note
 
 Detaching (`up`) is implemented for Linux/macOS (new session, stdio to the
-log). On Windows `up` fails with a clear message in this iteration; `tincan
-serve <name>` in a terminal works there. Agent processes run in a Windows Job
-Object so interruption terminates their descendants too.
+log). On Windows, `up` and MCP automatic launch are unsupported; run
+`tincan serve <name> --room <path>` in a terminal first, then use MCP to send
+and collect work through that existing host. Agent processes run in a Windows
+Job Object so interruption terminates their descendants too. Process liveness
+checks recognize exited Windows processes even while another process retains
+a handle; atomic state replacement also supports concurrent readers.
+
+Each room belongs to one machine. Installing tincan on several computers does
+not connect their rooms. Run the MCP server and workers on the same machine as
+the room; a cloud client needs access to that environment to use a local server.
 
 ## Starting a listener, per agent
 
-tincan listeners are implemented using the `listen` skill. Although all three supported agents execute the same underlying `recv` loop defined in `SKILL.md`, how they discover and invoke the skill varies:
+Interactive listeners use the `listen` skill and the same `recv` loop. These
+examples show how clients discover and invoke it. Hosted listeners instead use
+the six [provider presets](#presets-and-configtincanagentsjson); they do not
+require an interactive session or an installed listener skill.
 
 | Agent | Skill Discovery | How to Invoke | Recommended Auto-Approve Setup |
 | :--- | :--- | :--- | :--- |
@@ -503,7 +516,7 @@ duration and you cannot background the call.
 ## TELL / orchestrate
 
 - **One target (blocking consult):**
-  `tincan ask --to codex --from orch --body "review PR 56"` → act on the reply.
+  `tincan ask --to codex --from orch --room "$ROOM" --body "review PR 56"` → act on the reply.
 - **Several targets / fire-and-continue:** run each `ask` in the **background**
   (e.g. Claude Code `run_in_background`). Keep working; act on each reply as its
   courier completes. Each `ask` waits on its own `r-<id>` channel, so parallel
@@ -546,9 +559,13 @@ machine with a trusted orchestrator; think before widening that boundary.
   `tincan ping --to <name> --room <path>` or `tincan status --room <path>`
   instead of guessing from `ps`.
 - `invalid name`: use a portable path component; see the naming rules above.
-- `up` said `did not park` / `exited before parking`: read
+- `up` said `did not become ready` / `serve exited before readiness`: read
   `<room>/.tincan/hosts/<name>.log` — the agent CLI's own usage/auth errors
   land there. `tincan serve <name> --room <path>` runs the same loop in the
   foreground for a closer look.
 - A reply body starting `ERROR exit=` / `ERROR timeout` / `ERROR exec:` came
   from a hosted listener whose agent failed; the details are in the same log.
+- MCP lists the tools but a worker fails authentication: tool discovery only
+  verifies the tincan server. Log the provider in under the same OS account and
+  execution context as the host. For GUI/SSH differences and macOS Keychain
+  access, see [setup troubleshooting](docs/setup.md#troubleshooting).

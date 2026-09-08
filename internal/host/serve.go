@@ -11,10 +11,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/c0ze/tincan/internal/envelope"
-	"github.com/c0ze/tincan/internal/filelock"
-	"github.com/c0ze/tincan/internal/request"
-	"github.com/c0ze/tincan/internal/spool"
+	"github.com/c0ze/tincan/v2/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/filelock"
+	"github.com/c0ze/tincan/v2/internal/request"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 // ServeOptions configures one hosted listener loop.

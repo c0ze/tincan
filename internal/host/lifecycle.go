@@ -11,9 +11,9 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/c0ze/tincan/internal/envelope"
-	"github.com/c0ze/tincan/internal/filelock"
-	"github.com/c0ze/tincan/internal/spool"
+	"github.com/c0ze/tincan/v2/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/filelock"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 func lifetimePath(room, name string) string {

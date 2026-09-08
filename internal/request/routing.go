@@ -11,9 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/c0ze/tincan/internal/filelock"
-	"github.com/c0ze/tincan/internal/fsutil"
-	"github.com/c0ze/tincan/internal/spool"
+	"github.com/c0ze/tincan/v2/internal/filelock"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 // LockRoute serializes an agent's route selection and submission across MCP

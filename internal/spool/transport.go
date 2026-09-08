@@ -8,9 +8,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/c0ze/tincan/internal/envelope"
-	"github.com/c0ze/tincan/internal/filelock"
-	"github.com/c0ze/tincan/internal/fsutil"
+	"github.com/c0ze/tincan/v2/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/filelock"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 )
 
 // ErrEnvelopeConflict means a queued/in-flight filename already identifies

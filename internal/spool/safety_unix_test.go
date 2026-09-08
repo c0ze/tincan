@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/c0ze/tincan/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/envelope"
 	"golang.org/x/sys/unix"
 )
 

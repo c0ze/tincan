@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/c0ze/tincan/internal/fsutil"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 )
 
 // RunSpec is one rendered agent invocation.

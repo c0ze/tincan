@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/c0ze/tincan/internal/envelope"
-	"github.com/c0ze/tincan/internal/fsutil"
+	"github.com/c0ze/tincan/v2/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -68,8 +68,8 @@ func validName(name string) error { return envelope.ValidComponent(name) }
 func ValidName(name string) error { return validName(name) }
 
 // ProcessAlive reports whether pid names a live process, using the same
-// per-OS check status/ping apply to presence tokens. Exported so hosted-listener state
-// files get the identical answer.
+// per-OS check status/ping apply to presence tokens. Hosted-listener state
+// files use the identical check.
 func ProcessAlive(pid int) bool { return processAlive(pid) }
 
 // MaxMessageBytes bounds both sends and reads, including JSON metadata.
@@ -159,8 +159,8 @@ func (s *Spool) Recv(name string, timeout time.Duration, logConsumed bool) (*env
 
 // RecvContext is Recv with cancellation: it returns ctx.Err() as soon as ctx
 // is done while parked, clearing its presence token on the way out like any
-// other exit path. Hosted listeners use it to unpark on SIGTERM/SIGINT
-// without leaving a stale presence file behind.
+// other exit path. Hosted listeners use ClaimContext directly so they can
+// defer acknowledgement until the result has been delivered.
 func (s *Spool) RecvContext(ctx context.Context, name string, timeout time.Duration, logConsumed bool) (*envelope.Envelope, error) {
 	delivery, err := s.ClaimContext(ctx, name, timeout)
 	if err != nil {
@@ -257,10 +257,9 @@ func (s *Spool) ClaimContext(ctx context.Context, name string, timeout time.Dura
 }
 
 // retryClaimOp runs op, retrying briefly while it fails with a Windows
-// sharing/lock violation — the signature of a racing receiver's in-flight
-// handle-based rename. The race resolves in microseconds: either the file
-// moves away (op then fails NotExist → lost race) or the handle is released
-// (op succeeds). On POSIX this never retries.
+// sharing/lock violation from a concurrent file operation. A missing source
+// ends the retry so the caller can recognize a lost claim race. Persistent
+// failures are returned after the bounded retry; POSIX operations never retry.
 func retryClaimOp(op func() error) error {
 	var err error
 	for i := 0; i < 5; i++ {
@@ -276,13 +275,10 @@ func retryClaimOp(op func() error) error {
 // sharing failures must surface rather than turning into a misleading timeout.
 func lostClaimRace(err error) bool { return errors.Is(err, fs.ErrNotExist) }
 
-// RemoveInbox deletes a participant's inbox directory, and also its
-// present/<name>/ dir (which removePresence deliberately leaves behind — see
-// removePresence). Used to clean up ephemeral r-<id> reply channels after a
-// successful ask, so those per-request presence dirs don't accumulate
-// forever. This cannot race a Recv: an r-<id> channel has exactly one
-// receiver (the ask caller's Recv), which has already returned — and thus
-// already run its own removePresence — before ask calls RemoveInbox.
+// RemoveInbox deletes a participant's inbox and presence directories. It is
+// used to clean up ephemeral reply channels after collection. The caller must
+// ensure the channel has no active receiver or pending delivery; this method
+// does not cancel a parked receive or an in-flight claim.
 func (s *Spool) RemoveInbox(name string) error {
 	if err := validName(name); err != nil {
 		return err
@@ -327,17 +323,15 @@ type presenceFile struct {
 }
 
 // presentNameDir returns <root>/present/<name>, the directory holding one
-// token file per Recv currently parked as name.
+// token file per ClaimContext currently parked as name.
 func (s *Spool) presentNameDir(name string) string {
 	return filepath.Join(s.presentDir(), name)
 }
 
-// writePresence records that a Recv for name is parked right now: it writes
-// <root>/present/<name>/<token> atomically (tmp/ then rename), mirroring
-// Send. token is unique per Recv call (see Recv), so concurrent receivers
-// parked as the same name each get their own file and never collide. This is
-// a heartbeat, not part of message delivery, so any failure here is
-// swallowed — it must never change Recv's success/err/timeout result.
+// writePresence records a parked ClaimContext by publishing a temporary token
+// with an atomic rename. Each receive gets a unique token so concurrent
+// receivers with the same name do not replace one another. Presence is
+// best-effort metadata; failure must not change the delivery result.
 func (s *Spool) writePresence(name, token string) {
 	dir := s.presentNameDir(name)
 	for _, d := range []string{dir, s.tmpDir()} {
@@ -365,26 +359,11 @@ func (s *Spool) writePresence(name, token string) {
 	}
 }
 
-// removePresence clears only the token file this Recv wrote via
-// writePresence — never a sibling receiver's, and never the present/<name>/
-// directory itself. Called via defer on every Recv exit path (message,
-// timeout, error); best-effort, like writePresence.
-//
-// Deliberately does NOT remove the now-possibly-empty present/<name>/ dir.
-// An earlier version did (best-effort, swallowing "not empty"/any other
-// error), which raced a concurrent receiver's startup: that receiver could
-// have MkdirAll'd this same dir in writePresence but not yet renamed its
-// token in, so this call's rmdir could remove the directory out from under
-// it, ENOENT-ing its rename and losing its presence entirely — a listener
-// that would then show as wrongly absent in status/ping. Removing only the
-// token, never the directory, makes that race impossible by construction:
-// there is no code path left that deletes present/<name>/ while a Recv may
-// be parked under it. The resulting empty dirs are harmless — presenceFor
-// already treats an empty present/<name>/ dir as absent, the same way it
-// treats a missing one — and mirror how inbox/<name>/ dirs already persist
-// (both bounded by the set of participant names; see RemoveInbox for the
-// one place present/<name>/ IS cleaned up, for ephemeral r-<id> channels
-// where no such race can occur).
+// removePresence clears only the token owned by this ClaimContext, including
+// on cancellation or timeout. It leaves the parent directory intact because
+// another receiver may be between creating that directory and publishing its
+// own token. Empty presence directories count as absent. RemoveInbox performs
+// explicit cleanup only when the caller has finished using a reply channel.
 func (s *Spool) removePresence(name, token string) {
 	// Wrap the remove in retryClaimOp for the same reason as writePresence's
 	// rename: under concurrent same-name churn on Windows a peer's in-flight

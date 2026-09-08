@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/c0ze/tincan/internal/envelope"
-	"github.com/c0ze/tincan/internal/host"
-	"github.com/c0ze/tincan/internal/request"
-	"github.com/c0ze/tincan/internal/spool"
+	"github.com/c0ze/tincan/v2/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/host"
+	"github.com/c0ze/tincan/v2/internal/request"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 func TestBusyInteractiveRouteAcrossMCPConnections(t *testing.T) {

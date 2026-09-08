@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/c0ze/tincan/internal/envelope"
-	"github.com/c0ze/tincan/internal/request"
-	"github.com/c0ze/tincan/internal/spool"
+	"github.com/c0ze/tincan/v2/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/request"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 func TestServeRejectsDuplicateAndPreservesOwnerState(t *testing.T) {
@@ -413,7 +413,7 @@ func TestServeTimeoutRepliesErrorAndKillsAgent(t *testing.T) {
 		t.Fatalf("reply body = %q", reply.Body)
 	}
 	pid := readPID(t, pidfile)
-	if runtime.GOOS != "windows" && !waitFor(func() bool { return !spool.ProcessAlive(pid) }, 3*time.Second) {
+	if !waitFor(func() bool { return !spool.ProcessAlive(pid) }, 3*time.Second) {
 		t.Fatalf("agent %d still alive after timeout", pid)
 	}
 	stopServe(t, sp, done)
@@ -443,7 +443,7 @@ func TestServeShowsBusyThenCancelKillsInFlightAgent(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Serve did not exit after cancel")
 	}
-	if runtime.GOOS != "windows" && spool.ProcessAlive(pid) {
+	if spool.ProcessAlive(pid) {
 		t.Fatalf("in-flight agent %d survived shutdown", pid)
 	}
 	if _, ok, _ := ReadState(room, "agent"); ok {

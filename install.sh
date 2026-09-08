@@ -43,7 +43,7 @@ install_bin() {
     ( cd "$REPO_DIR" && go install ./cmd/tincan )
   else
     echo ">> installing tincan from GitHub"
-    go install github.com/c0ze/tincan/cmd/tincan@main
+    go install github.com/c0ze/tincan/v2/cmd/tincan@latest
   fi
   local gobin; gobin="$(go env GOBIN)"; [ -n "$gobin" ] || gobin="$(go env GOPATH)/bin"
   echo ">> installed to $gobin/tincan"

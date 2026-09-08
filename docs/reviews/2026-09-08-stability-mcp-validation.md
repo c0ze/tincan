@@ -92,3 +92,28 @@ provider response differences, not evidence of lost session state.
 The final live run stopped all four listeners and left zero queued messages.
 These checks establish functional behavior and targeted failure recovery, not
 long-duration endurance or production availability guarantees.
+
+## Follow-up validation and v2 release preparation
+
+The results above describe the initial local audit run. Subsequent live MCP
+checks on a Linux ThinkPad and an Apple Silicon Mac mini passed for Claude,
+Codex, Grok, Agy and Kimi. Claude, Grok, Agy and Kimi retained conversation context
+across reconnects; Codex used stateless runs. These are checks of installed local
+provider executables, not tests of desktop UI automation or cloud harnesses.
+
+On macOS, Claude authentication required unlocking the login Keychain in the
+same SSH session that launched the verifier. A Claude SDK no-tools diagnostic
+printed alongside structured JSON exposed a parser issue; commit `f1f8612`
+accepts that exact diagnostic without accepting arbitrary malformed output.
+The final Claude retest passed readiness, reconnect, same-host identity,
+conversation memory and shutdown.
+
+Native CI subsequently passed all six Linux/macOS/Windows and Go 1.25/stable
+jobs on [`676c6ae`](https://github.com/c0ze/tincan/actions/runs/34200099252),
+including Windows snapshot replacement and exited-process liveness regressions.
+This supersedes the earlier cross-compilation-only platform evidence. Windows
+detached launch remains unsupported.
+
+The v2.0.0 release changes the Go module path to `github.com/c0ze/tincan/v2`.
+Current installation and compatibility guidance lives in the
+[release notes](../releases/v2.0.0.md) and [setup guide](../setup.md).

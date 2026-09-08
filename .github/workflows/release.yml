@@ -21,16 +21,18 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
-      - name: Verify release tag matches the tested commit
+      - name: Verify release tag and notes
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          test -s "docs/releases/$RELEASE_TAG.md"
       - uses: actions/setup-go@v5
         with:
           go-version: stable
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
-          args: release --clean
+          args: release --clean --release-notes docs/releases/${{ github.ref_name }}.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

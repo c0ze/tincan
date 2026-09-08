@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/c0ze/tincan/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/envelope"
 )
 
 // msg builds a test envelope with a deterministic timestamp for ordering.

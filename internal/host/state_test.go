@@ -173,9 +173,6 @@ func TestStateAliveRequiresExactOwner(t *testing.T) {
 	if st.Alive() {
 		t.Fatal("wrong owner was trusted")
 	}
-	if runtime.GOOS == "windows" {
-		t.Skip("dead-pid detection is unix-only (see spool/alive_other.go)")
-	}
 	if (State{PID: 1 << 30}).Alive() {
 		t.Fatal("huge unused pid reported alive")
 	}

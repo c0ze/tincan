@@ -12,10 +12,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/c0ze/tincan/internal/buildinfo"
-	"github.com/c0ze/tincan/internal/host"
-	"github.com/c0ze/tincan/internal/request"
-	"github.com/c0ze/tincan/internal/spool"
+	"github.com/c0ze/tincan/v2/internal/buildinfo"
+	"github.com/c0ze/tincan/v2/internal/host"
+	"github.com/c0ze/tincan/v2/internal/request"
+	"github.com/c0ze/tincan/v2/internal/spool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

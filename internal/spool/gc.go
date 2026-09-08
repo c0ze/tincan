@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/c0ze/tincan/internal/fsutil"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 )
 
 // GCStats counts terminal artifacts removed by GC.

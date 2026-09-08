@@ -95,4 +95,43 @@ if bash "$case_dir/repo/install.sh" --skills-only --bin-only >"$case_dir/output"
   fail 'conflicting install modes accepted'
 fi
 
+# Record Go invocations without downloading modules or installing real binaries.
+fake_go() {
+  mkdir -p "$case_dir/bin"
+  cat >"$case_dir/bin/go" <<'GO'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  'env GOBIN') printf '%s\n' "$TINCAN_TEST_GOBIN" ;;
+  'install '*)
+    printf '%s\n' "$*" >"$TINCAN_TEST_RECORD"
+    pwd -P >"$TINCAN_TEST_RECORD.cwd"
+    ;;
+  *) exit 1 ;;
+esac
+GO
+  chmod +x "$case_dir/bin/go"
+}
+install_binary() {
+  PATH="$case_dir/bin:$PATH" \
+  TINCAN_TEST_GOBIN="$case_dir/bin" \
+  TINCAN_TEST_RECORD="$case_dir/go-args" \
+    bash "$case_dir/repo/install.sh" --bin-only >"$case_dir/output"
+}
+
+new_case released_binary
+fake_go
+install_binary
+[ "$(cat "$case_dir/go-args")" = 'install github.com/c0ze/tincan/v2/cmd/tincan@latest' ] ||
+  fail 'standalone installer did not select the stable v2 module'
+[ ! -e "$case_dir/agents" ] || fail 'binary-only install changed skills'
+
+new_case checkout_binary
+mkdir -p "$case_dir/repo/cmd/tincan"
+fake_go
+install_binary
+[ "$(cat "$case_dir/go-args")" = 'install ./cmd/tincan' ] || fail 'checkout was not built locally'
+[ "$(cat "$case_dir/go-args.cwd")" = "$(cd "$case_dir/repo" && pwd -P)" ] ||
+  fail 'checkout build used the wrong working directory'
+
 echo 'Installer regression tests passed.'

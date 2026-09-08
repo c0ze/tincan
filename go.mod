@@ -1,4 +1,4 @@
-module github.com/c0ze/tincan
+module github.com/c0ze/tincan/v2
 
 go 1.25.0
 

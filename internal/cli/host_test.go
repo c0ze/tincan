@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/c0ze/tincan/internal/envelope"
-	"github.com/c0ze/tincan/internal/host"
-	"github.com/c0ze/tincan/internal/spool"
+	"github.com/c0ze/tincan/v2/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/host"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 // TestMain lets this test binary stand in for the tincan binary. `up`
@@ -355,9 +355,6 @@ func TestDownWithNothingRunningIsANoop(t *testing.T) {
 }
 
 func TestDownRemovesStaleStateFile(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("dead-pid detection is unix-only (see spool/alive_other.go)")
-	}
 	room := t.TempDir()
 	writeStateFile(t, room, "ghost", 1<<30, "codex", "busy", "m1")
 	if code, _, stderr := run("down", "ghost", "--room", room); code != ExitOK {

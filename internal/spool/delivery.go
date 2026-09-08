@@ -9,9 +9,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/c0ze/tincan/internal/envelope"
-	"github.com/c0ze/tincan/internal/filelock"
-	"github.com/c0ze/tincan/internal/fsutil"
+	"github.com/c0ze/tincan/v2/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/filelock"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 )
 
 // Delivery owns a durable envelope claim. Ack commits successful delivery;

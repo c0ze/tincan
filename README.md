@@ -13,49 +13,48 @@ logs and request state stay in the room. Near-zero tokens while idle.
   (codex, gemini, claude, …) as a listener itself, detached, and `down` stops it.
 - **`tincan mcp --room /absolute/repo`** — expose structured orchestration tools
   to an MCP client over stdio, with durable request handles and bounded waits.
+  Launch and talk to workers from tools without opening a terminal for each one.
 
-Design: [`docs/superpowers/specs/2026-07-03-tincan-design.md`](docs/superpowers/specs/2026-07-03-tincan-design.md).
-Operating guide: [`PROTOCOL.md`](PROTOCOL.md).
-
-> **Development checkout:** This README describes the current source tree.
-> The published `v0.1.0` tag predates the hosted listener and MCP interfaces;
-> `@latest` does not provide all features documented here. Build this checkout
-> until a release containing these changes passes the release checks. CI tests
-> Go 1.25 and stable Go on Linux/macOS/Windows; publishing requires the same
-> checks on the exact tagged commit. Detached listeners support Linux/macOS;
-> Windows can run `tincan serve` in a terminal.
+Operating guide: [`PROTOCOL.md`](PROTOCOL.md). Client setup and session prompts:
+[`docs/setup.md`](docs/setup.md). Release notes: [`v2.0.0`](docs/releases/v2.0.0.md).
+All current guides and historical design documents: [`docs/README.md`](docs/README.md).
 
 ## Install
 
 ### 1. The binary
 
-```sh
-# From this checkout, including changes not yet on the published main branch:
-go install ./cmd/tincan
+Download a prebuilt binary from the
+[v2.0.0 release](https://github.com/c0ze/tincan/releases/tag/v2.0.0) for
+Linux, macOS or Windows, on amd64 or arm64. Verify the archive against the
+release's `checksums.txt`, extract it, and put `tincan` (`tincan.exe` on Windows)
+on your `PATH`. Prebuilt binaries do not require Go.
 
-# To install the newest published main commit:
-go install github.com/c0ze/tincan/cmd/tincan@main
+With Go 1.25 or newer:
+
+```sh
+go install github.com/c0ze/tincan/v2/cmd/tincan@v2.0.0
 tincan version --format json
 ```
 
-Requires Go 1.25+. (Note: `go get <tool>` no longer installs executables — use
-`go install …@version`.) Make sure Go's bin dir is on your `PATH`:
+Use `@latest` instead of `@v2.0.0` to follow stable v2 releases. Make sure Go's
+bin directory is on your `PATH` (use `GOBIN` instead if you have configured it):
 
 ```sh
 export PATH="$(go env GOPATH)/bin:$PATH"   # add to your shell profile
 ```
 
-Prebuilt binaries are published on
-[Releases](https://github.com/c0ze/tincan/releases) for Linux/macOS/Windows,
-amd64+arm64. Check the release notes and `tincan version`: older artifacts lack
-the interfaces in this README. Until a matching release exists, build the source.
+**Upgrading from v0.1.0 or a development build:** use the `/v2/` install path
+above. The old `github.com/c0ze/tincan/cmd/tincan@latest` command does not select
+v2. Check that `tincan version --format json` reports `v2.0.0`, update any MCP
+configuration pointing at a different binary, and restart the MCP client.
+Existing hosted processes keep running their original executable; let active
+work finish and stop/relaunch those listeners to use the new binary. See the
+[upgrade notes](docs/releases/v2.0.0.md#upgrading).
 
-**Already have tincan installed?** An older binary predates `status`/`ping`/
-`stop`/`up`/`down`/`presets` — reinstall to get them: `go install ./cmd/tincan`
-from a clone (or `go install github.com/c0ze/tincan/cmd/tincan@main`), then check
-`tincan --help` and `tincan version --format json`. `./install.sh` does the same
-local build. `@main` follows the published main branch and excludes unpublished
-branch changes.
+To build a checkout, use `go install ./cmd/tincan` or `./install.sh --bin-only`.
+CI tests Go 1.25 and stable Go on Linux, macOS and Windows. Detached listeners
+and MCP automatic launch work on Linux/macOS. Windows supports foreground
+`tincan serve` listeners; see the [platform limits](PROTOCOL.md#platform-note).
 
 Add `.tincan/` to your projects' `.gitignore` (or your global excludes): it holds
 the spool and, with hosted listeners, per-agent logs and durable request state.
@@ -96,7 +95,7 @@ The skill installer requires a checkout. MCP clients can use the binary directly
 
 ### 3. MCP clients
 
-Build this checkout, then configure a stdio MCP server with an absolute room path.
+Install v2, then configure a stdio MCP server with an absolute room path.
 For clients using an `mcpServers` JSON configuration:
 
 ```json
@@ -127,6 +126,10 @@ For example, call `tincan_send` with
 then `tincan_wait` with `{"request_id":"review-1","timeout_seconds":30}`. Keep
 waiting on that ID until `terminal` is true. Reusing an explicit ID with identical
 work is idempotent while its request record is retained.
+
+Desktop and CLI clients can use the same MCP tools when they support local stdio
+servers. The workers are installed provider executables; tincan does not launch
+or control desktop application windows. See [client and provider setup](docs/setup.md).
 
 Claude, Grok, Agy and Kimi use persistent conversations by default with their
 native executable presets. Their saved conversation survives calls, reconnects
@@ -166,7 +169,8 @@ completed run gets a reply, including agent failures (`ERROR exit=…`) and time
 Interrupted work is recorded for inspection and is never automatically replayed;
 it may already have changed the workspace.
 Mind the trust boundary: a hosted listener runs whatever lands in its inbox
-with auto-approval — see PROTOCOL.md "Hosted listeners".
+with its configured provider permissions, including auto-approval in several
+built-in presets. See [the trust boundary](PROTOCOL.md#security-caveat).
 
 ## Brand
 

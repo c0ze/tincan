@@ -33,7 +33,7 @@ func Current() Info {
 
 func fromBuildInfo(build *debug.BuildInfo, version, commit, date string) Info {
 	info := Info{Version: version, Commit: commit, Date: date,
-		GoVersion: runtime.Version(), Module: "github.com/c0ze/tincan"}
+		GoVersion: runtime.Version(), Module: "github.com/c0ze/tincan/v2"}
 	if build == nil {
 		return info
 	}

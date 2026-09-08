@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/c0ze/tincan/internal/filelock"
-	"github.com/c0ze/tincan/internal/fsutil"
-	"github.com/c0ze/tincan/internal/spool"
+	"github.com/c0ze/tincan/v2/internal/filelock"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 // SupportsSessions identifies adapters with tested command and output formats.

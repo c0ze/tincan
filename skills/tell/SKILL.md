@@ -1,6 +1,6 @@
 ---
 name: tell
-description: Delegate a task to another running agent via tincan and act on its reply. Use for "/tell <agent> <task>" (e.g. "/tell codex review PR 56", "/tell gemini generate an image from prompt.md") or when asked to consult/hand work to another agent. Supports parallel fan-out to several agents at once.
+description: Delegate a task to a hosted or running interactive agent via tincan and act on its reply. Use for "/tell <agent> <task>" (e.g. "/tell codex review PR 56", "/tell gemini generate an image from prompt.md") or when asked to consult/hand work to another agent. Supports parallel fan-out to several agents at once.
 ---
 
 # tincan: tell
@@ -34,7 +34,7 @@ follow-ups: supported providers retain conversation context across calls and MCP
 reconnects. `tincan_cancel` targets one request when `cancellable` is true;
 `tincan_stop` ends a listener, and `tincan_reset` clears its saved conversation.
 Stopping/resetting preserves queued work. Stop listeners you started when the
-session's work is done.
+session's work is done, unless the user asked to keep them available.
 
 ## CLI setup (when MCP is unavailable)
 
@@ -117,5 +117,6 @@ summary + artifact pointer — keeping your context clean.
   need self-contained briefs. Select `--session persistent|stateless` on launch;
   MCP `tincan_reset` stops a listener and explicitly starts its next conversation
   fresh. Stopping alone preserves the saved conversation.
-- When the session's work is done, stop what you started:
+- When the session's work is done, stop what you started unless the user asked
+  to keep the listeners available:
   `tincan down <who> --room "$ROOM"` for each hosted listener you brought up.

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/c0ze/tincan/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/envelope"
 
-	"github.com/c0ze/tincan/internal/fsutil"
-	"github.com/c0ze/tincan/internal/spool"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 func TestConcurrentIdempotentSubmissionAndTerminalReplay(t *testing.T) {

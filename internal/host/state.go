@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/c0ze/tincan/internal/fsutil"
-	"github.com/c0ze/tincan/internal/spool"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 // State is the on-disk record of one hosted listener,

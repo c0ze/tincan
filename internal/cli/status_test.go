@@ -5,13 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/c0ze/tincan/internal/host"
+	"github.com/c0ze/tincan/v2/internal/host"
 )
 
 // writeStateFile records a hosted listener the way serve does, so status
@@ -89,9 +88,6 @@ func TestStatusHostedBusyWithoutPresence(t *testing.T) {
 }
 
 func TestStatusStaleStateFileIsIgnored(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("dead-pid detection is unix-only (see spool/alive_other.go)")
-	}
 	room := t.TempDir()
 	writeStateFile(t, room, "ghost", 1<<30, "codex", "busy", "m9")
 	_, table, _ := run("status", "--room", room)
