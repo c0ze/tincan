@@ -167,7 +167,7 @@ func TestRunMissingBinaryIsExecError(t *testing.T) {
 
 func TestReplyBodyReadsOutFile(t *testing.T) {
 	t.Setenv("TINCAN_FAKE_AGENT", "1")
-	out := filepath.Join(t.TempDir(), "reply.md")
+	out := filepath.Join(canonicalTempDir(t), "reply.md")
 	spec := RunSpec{Argv: fakeExec("outfile", out, "the answer"), Dir: t.TempDir(), OutFile: out}
 	res := Run(context.Background(), spec)
 	if res.ExitCode != 0 {

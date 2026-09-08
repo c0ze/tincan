@@ -9,7 +9,13 @@ import (
 )
 
 func TestExclusiveAndCancelable(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "owner.lock")
+	// Low-level storage requires canonical paths; macOS temp dirs use /var,
+	// which is a system symlink to /private/var.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "owner.lock")
 	first, err := Try(path)
 	if err != nil {
 		t.Fatal(err)

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,6 +22,16 @@ func TestMain(m *testing.M) {
 		os.Exit(fakeAgent(os.Args[1:]))
 	}
 	os.Exit(m.Run())
+}
+
+// Low-level file helpers expect the canonical room used by the host boundary.
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 // fakeAgent modes (args[0]):

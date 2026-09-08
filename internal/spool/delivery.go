@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/c0ze/tincan/internal/envelope"
+	"github.com/c0ze/tincan/internal/filelock"
 	"github.com/c0ze/tincan/internal/fsutil"
 )
 
@@ -136,6 +137,40 @@ func (s *Spool) claimOldest(ctx context.Context, name string) (*Delivery, bool, 
 		return nil, false, err
 	}
 	defer lock.Close()
+	return s.claimOldestLocked(ctx, name)
+}
+
+// TryClaim checks the queue once without parking a receiver or waiting for
+// transport ownership. A false result means the queue is empty or busy. This
+// avoids using a tiny timeout that can expire during filesystem setup before
+// an already queued message is examined. The caller owns successful deliveries
+// and must Ack or explicitly Nack them, as with ClaimContext.
+func (s *Spool) TryClaim(ctx context.Context, name string) (*Delivery, bool, error) {
+	if err := validName(name); err != nil {
+		return nil, false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	if err := s.ensurePrivateRoot(); err != nil {
+		return nil, false, err
+	}
+	if err := fsutil.MkdirPrivate(s.InboxDir(name)); err != nil {
+		return nil, false, err
+	}
+	lock, err := filelock.Try(filepath.Join(s.root, "transport.lock"))
+	if errors.Is(err, filelock.ErrLocked) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	defer lock.Close()
+	return s.claimOldestLocked(ctx, name)
+}
+
+// The caller must hold transport ownership throughout the queue transition.
+func (s *Spool) claimOldestLocked(ctx context.Context, name string) (*Delivery, bool, error) {
 	inbox := s.InboxDir(name)
 	if err := fsutil.CheckDir(inbox); err != nil {
 		return nil, false, err

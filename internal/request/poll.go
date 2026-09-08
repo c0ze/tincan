@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"time"
 
 	"github.com/c0ze/tincan/internal/filelock"
 	"github.com/c0ze/tincan/internal/spool"
@@ -64,12 +63,12 @@ func Poll(ctx context.Context, room, id string) (Record, error) {
 		return r, err
 	}
 	if len(claims) == 0 {
-		d, err := sp.ClaimContext(ctx, channel, time.Millisecond)
-		if errors.Is(err, spool.ErrTimeout) {
-			return reconcileIdleInteractivePublication(ctx, room, r, sp)
-		}
+		d, ok, err := sp.TryClaim(ctx, channel)
 		if err != nil {
 			return r, err
+		}
+		if !ok {
+			return reconcileIdleInteractivePublication(ctx, room, r, sp)
 		}
 		claims = []*spool.Delivery{d}
 	}
@@ -110,9 +109,9 @@ func reconcileIdleInteractivePublication(ctx context.Context, room string, r Rec
 	if err := ctx.Err(); err != nil {
 		return r, err
 	}
-	// A very short Claim timeout may expire while preparing directories, even
-	// though a reply is queued. Give that real response priority over declaring
-	// the original publication uncertain; the next Poll can collect it.
+	// A busy transport may leave a real response queued. Give that response
+	// priority over declaring the original publication uncertain; the next
+	// Poll can collect it.
 	presence, _, err := sp.Present(r.Envelope.ReplyTo)
 	if err != nil {
 		return r, err

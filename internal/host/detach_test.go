@@ -15,7 +15,7 @@ func TestStartDetachedRunsChildWithStdioInLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
+	dir := canonicalTempDir(t)
 	logPath := filepath.Join(dir, ".tincan", "hosts", "agent.log")
 	proc, exited, err := StartDetached(exe, []string{"echo", "detached"}, dir, logPath)
 	if runtime.GOOS == "windows" {
