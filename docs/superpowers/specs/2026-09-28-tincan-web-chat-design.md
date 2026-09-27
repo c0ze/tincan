@@ -2,8 +2,10 @@
 
 Status: design approved section by section by the owner on 2026-09-28
 (brainstorming in a Claude Code session), then revised after a Codex review
-(gpt-6-astra, xhigh) whose 14 findings are addressed below (§14). Awaits the
-owner's review before an implementation plan is written.
+(gpt-6-astra, xhigh) whose 14 findings are addressed below (§14). Approved by
+the owner; amended on 2026-09-28 for the two-way machine link, quota panels,
+the dispatcher lock location and registry exclusions (§15), as required by the
+committees design (`2026-09-28-tincan-committees-design.md`, phase 2).
 
 ## 1. Problem
 
@@ -51,6 +53,9 @@ Non-goals (v1)
   notifications, multiple human users, Codex persistent sessions.
 - More than one peer in the UI (the code accepts several; two machines tested).
 - A central store; each machine's `.tincan/` stays the only source of truth.
+  (Phase 2 adds one exception: committee definitions live on the hub.)
+- Fetching quota data: tincan only reads the caches that existing refreshers
+  write (§15.2).
 
 ## 3. Decisions taken during design
 
@@ -80,6 +85,8 @@ Non-goals (v1)
 
 Every instance serves the same UI and API for its own machine. A hub is an
 instance started with `--peer`; it forwards `/api/peers/<name>/…` to that peer.
+The link is two-way: both machines may list each other as `--peer`, so either
+page shows both (§15.1).
 Agents always run on the machine that owns the room.
 
 ### 4.1 Units
@@ -91,7 +98,8 @@ Agents always run on the machine that owns the room.
    path), `hidden`, `last_used`. Written under a file lock with atomic replace.
    - `Touch(room)` is called by `mcp` (at startup), `up`, `serve`, `send`,
      `ask` and `recv`. A registry failure is logged to stderr and never fails
-     the command.
+     the command. Paths under `<state dir>/reviews/` (phase 2 review
+     workspaces) are never registered.
    - First run of `tincan web` imports existing `.tincan/` directories at
      depth ≤ 3 under each `--scan` directory (default `~/projects`).
    - The UI can add a room by absolute path (it must exist and be a directory;
@@ -197,7 +205,8 @@ A turn is dispatched in this order; every step is idempotent:
    with the same ID.
 
 One dispatcher per room owns steps 2 onwards: `tincan web` holds
-`.tincan/threads/dispatcher.lock` for each room it serves, so two web
+`.tincan/dispatcher.lock` for each room it serves (phase 2 reviews use the same
+lock), so two web
 processes (or a restarted one racing its predecessor) never collect or hand off
 concurrently. A second instance serves reads and forwards writes' dispatch
 work to the lock holder by leaving intents in the journal, which the holder
@@ -347,7 +356,8 @@ Errors are `{"error": "…"}` with a 4xx/5xx status.
 
 - **Sidebar**: machines (with online dot), their rooms, each room's threads
   plus "Activity (n running)", and "+ new thread" (title, primary agent picker
-  listing available presets). Hidden rooms are behind a toggle.
+  listing available presets). Hidden rooms are behind a toggle. Each machine
+  also has a **Limits** panel (§15.2).
 - **Thread view**: header with title, one chip per participant
   (idle/busy/elapsed) and Stop. Messages in `n` order; running agent messages
   show "working… (k/budget used)" with a collapsible live-output block; errors
@@ -404,9 +414,10 @@ else, and the docs say so.
   `tailscale serve --bg --set-path /tincan unix:<socket>`, giving
   `https://cachyos.brill-decibel.ts.net/tincan/` beside the existing `/` and
   `/comics` routes.
-- macmini (peer): launchd agent `net.tincan.web.plist`; the same serve route
-  via the Tailscale app's CLI, using the socket if the app can reach it and
-  loopback TCP otherwise.
+- macmini (peer): launchd agent `net.tincan.web.plist` running
+  `tincan web --peer cachyos=https://cachyos.brill-decibel.ts.net/tincan/`
+  (two-way link, §15.1); the same serve route via the Tailscale app's CLI,
+  using the socket if the app can reach it and loopback TCP otherwise.
 - `docs/web.md` documents flags, both service files, the serve commands and
   the threat model. `install.sh` does not install services in v1.
 
@@ -502,3 +513,62 @@ Codex review (2026-09-28) and resolution:
 | 12 | Proxy CSRF and base path underspecified | `--public-path`, hub-side Origin check, outbound header rules, path join (§7.3). |
 | 13 | Service hostname conflicts with peer auth | Deferred (§2, §9). |
 | 14 | Tests could pass without proving behaviour | Crash-boundary, race, branching-budget, torn-tail, session-resume and real-Serve checks (§12). |
+
+## 15. Amendments (2026-09-28)
+
+### 15.1 Two-way machine link
+
+- Each `tincan web` may list the other machine as `--peer`. Either page then
+  shows both machines; phase 2 needs this so a Mac room can reach cachyos
+  reviewers and vice versa.
+- Peers are never chained: `api/peers/<a>/peers/…` is refused (400), and an
+  instance lists only its own rooms plus its direct peers' rooms, so two
+  instances that list each other never loop.
+- The owner check is unchanged: each side's `tailscale serve` identifies calls
+  from the other machine as the owner's device.
+
+### 15.2 Quota panels (read-only)
+
+- **Source.** `tincan web` reads the cache files existing refreshers write:
+  `~/.cache/<provider>-quota.json` and `~/.cache/<provider>-quota-<profile>.json`
+  (cachyos: conky `texeci` scripts every 60 s; macmini: the `tr.gand.aiquota`
+  LaunchAgent). It never runs quota scripts, calls provider APIs or reads
+  credentials. Entry ID: `<provider>` or `<provider>-<profile>` from the file
+  name (`claude`, `codex-default`, `codex-gmail`, …). Files larger than 64 KiB
+  or not regular files are ignored.
+- **Normalization.** Two schemas exist:
+  - schema 2 (cachyos): `percent`, `reset_at`, `short_percent`,
+    `short_reset_at`, `fetched_at`, `attempted_at`, optional `error`;
+  - legacy (macmini): `percent`, `reset_secs`, `fetched_at`, optional
+    `short_percent` (reset = `fetched_at + reset_secs`; no short reset time).
+  The normalized entry keeps nullable values and records last success
+  (`fetched_at`) and last attempt (`attempted_at`, or `fetched_at` when absent)
+  separately, plus `error`. Timestamps outside 2020-01-01 … now + 400 days and
+  percentages outside 0–1000 are treated as missing.
+- **State**, recomputed on every read: `error` when the last attempt failed and
+  is newer than the last success; `stale` when the last success is older than
+  15 minutes or its reset time has passed without a newer success; otherwise
+  `ok`. Bars are red at ≥ 95 %.
+- **Mapping.** Optional `~/.config/tincan/quotas.json`:
+  `{"codex-default": {"label": "Codex gand", "presets": ["codex"]}, …}`.
+  Without it, `codex-default` maps to preset `codex` and every other entry to
+  the preset with the same ID. Phase 2 extends entries with `blocking`.
+- **API.** `GET api/quotas` → `[{id, label, presets, percent, reset_at,
+  short_percent, short_reset_at, fetched_at, attempted_at, error, state}]`,
+  also through the hub for the peer.
+- **Updates.** The change scanner fingerprints the cache files; a `quota` note
+  is also published every minute so time-based staleness reaches the UI
+  without file changes.
+- **UI.** A Limits panel per machine in the sidebar: label, bar, percent, time
+  to reset ("2d 4h"), the short window in small type, grey when stale, "error"
+  when failing, red at ≥ 95 %. Agent chips and the @-autocomplete show the
+  mapped preset's percent.
+- **Tests.** Both schemas, failure-only records, missing and invalid values,
+  staleness transitions over time with a fixed clock, mapping defaults, the
+  per-minute note.
+
+### 15.3 Dispatcher lock and registry exclusion
+
+- The per-room dispatcher lock is `.tincan/dispatcher.lock` (not under
+  `threads/`), so phase 2 review coordination shares it.
+- `rooms.Touch` ignores paths under `<state dir>/reviews/`.
