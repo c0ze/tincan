@@ -15,7 +15,7 @@ import (
 
 // RunSpec is one rendered agent invocation.
 type RunSpec struct {
-	Argv    []string      // rendered command line; Argv[0] is looked up on PATH
+	Argv    []string      // rendered command line; Argv[0] is resolved by ResolveExecutable
 	Dir     string        // working directory (the room)
 	Stdin   *string       // body to pipe to stdin, or nil for no stdin at all
 	OutFile string        // the {out} path when the preset replies via file, else ""
@@ -88,7 +88,11 @@ func Run(ctx context.Context, spec RunSpec) Result {
 		runCtx, cancel = context.WithTimeout(runCtx, spec.Timeout)
 		defer cancel()
 	}
-	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
+	path, err := ResolveExecutable(spec.Argv[0], spec.Dir)
+	if err != nil {
+		return Result{ExitCode: -1, Err: err, Duration: time.Since(start)}
+	}
+	cmd := exec.Command(path, spec.Argv[1:]...)
 	cmd.Dir = spec.Dir
 	cmd.SysProcAttr = childAttr()
 	if spec.Stdin != nil {
@@ -118,7 +122,7 @@ func Run(ctx context.Context, spec RunSpec) Result {
 	cmd.WaitDelay = 2 * time.Second
 
 	res := Result{ExitCode: -1}
-	err := runProcess(runCtx, cmd)
+	err = runProcess(runCtx, cmd)
 	res.Stdout, res.Stderr = stdout.data, stderr.data
 	res.StdoutTruncated, res.StderrTruncated = stdout.truncated, stderr.truncated
 	res.Duration = time.Since(start)

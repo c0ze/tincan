@@ -46,7 +46,8 @@ Hosted listeners (tincan runs a headless agent CLI for you):
   tincan serve   <name> [same flags as up] [--daemon]
   tincan down    <name> [--wait <sec>] [flags]
   tincan presets [--format table|json]
-  tincan mcp [--room <path>]     native MCP tools over stdin/stdout
+  tincan mcp [--room <path>]     native MCP tools over stdin/stdout (room defaults to
+                                 the git work tree containing the working directory)
   tincan version [--format json]
   tincan gc [--older-than 168h] [--room <path>]
 
@@ -63,6 +64,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usageText)
 		return ExitUsage
 	}
+	// Agent CLIs often live in per-user bin directories that GUI clients and
+	// detached hosts leave off PATH; hosts and the agents they run inherit this.
+	host.AugmentPATH()
 	switch args[0] {
 	case "send":
 		return cmdSend(args[1:], stdout, stderr)

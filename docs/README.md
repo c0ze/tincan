@@ -27,5 +27,3 @@ historical; use the guides above for current behavior.
   [phase-one implementation plan](superpowers/plans/2026-07-03-tincan-phase1.md).
 - [Hosted-listener design](superpowers/specs/2026-09-07-hosted-listeners-design.md)
   and [implementation plan](superpowers/plans/2026-09-07-hosted-listeners.md).
-- [Legacy Codex prompt shim](../skills/codex/listen.md), retained for reference;
-  the installer now uses native skills.

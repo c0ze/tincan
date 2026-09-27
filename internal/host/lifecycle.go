@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"time"
@@ -103,8 +102,8 @@ func Up(ctx context.Context, o UpOptions) (UpResult, error) {
 	if len(o.Preset.Exec) == 0 {
 		return UpResult{}, errors.New("exec is required to launch a new host")
 	}
-	if _, err := exec.LookPath(o.Preset.Exec[0]); err != nil {
-		return UpResult{}, fmt.Errorf("agent binary %q not found on PATH (preset %s): %w", o.Preset.Exec[0], o.Label, err)
+	if _, err := ResolveExecutable(o.Preset.Exec[0], room); err != nil {
+		return UpResult{}, fmt.Errorf("agent binary %q not found on PATH or in user bin directories (preset %s; fix the exec path in %s or install the CLI): %w", o.Preset.Exec[0], o.Label, ConfigPath(), err)
 	}
 	exe := o.Executable
 	if exe == "" {

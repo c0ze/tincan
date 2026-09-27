@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"time"
@@ -93,7 +92,7 @@ func (s *service) presetsTool(ctx context.Context, req *mcp.CallToolRequest, in 
 		p := all[name]
 		available := false
 		if len(p.Exec) > 0 {
-			_, err := exec.LookPath(p.Exec[0])
+			_, err := host.ResolveExecutable(p.Exec[0], s.Room)
 			available = err == nil
 		}
 		out.Presets = append(out.Presets, PresetView{Name: name, Available: available, SessionSupported: host.SupportsSessions(name)})

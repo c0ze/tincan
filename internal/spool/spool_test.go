@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1056,5 +1057,43 @@ func TestValidNameExported(t *testing.T) {
 	}
 	if err := ValidName("codex"); err != nil {
 		t.Fatalf("ValidName(codex) = %v", err)
+	}
+}
+
+func TestSendIgnoresSpoolInGitAndKeepsExistingIgnoreFile(t *testing.T) {
+	room := t.TempDir()
+	sp, err := Open(room)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := sp.Send(msg("orch", "codex", "hello", 1)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	path := filepath.Join(room, ".tincan", ".gitignore")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "\n*\n") {
+		t.Fatalf(".gitignore does not ignore everything: %q", data)
+	}
+	if err := os.WriteFile(path, []byte("custom\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Send(msg("orch", "codex", "again", 2)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if data, _ := os.ReadFile(path); string(data) != "custom\n" {
+		t.Fatalf("existing .gitignore was rewritten: %q", data)
+	}
+	// An empty file left by an interrupted write is repaired.
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Send(msg("orch", "codex", "third", 3)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if data, _ := os.ReadFile(path); !strings.Contains(string(data), "\n*\n") {
+		t.Fatalf("empty .gitignore was not repaired: %q", data)
 	}
 }

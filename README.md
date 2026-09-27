@@ -11,7 +11,7 @@ logs and request state stay in the room. Near-zero tokens while idle.
 - **`listen` / `/listen`** — park on the repo's inbox and answer requests, at ~no token cost while idle.
 - **`tincan up <agent>`** — or skip the terminal: tincan hosts a headless agent CLI
   (codex, gemini, claude, …) as a listener itself, detached, and `down` stops it.
-- **`tincan mcp --room /absolute/repo`** — expose structured orchestration tools
+- **`tincan mcp`** — expose structured orchestration tools
   to an MCP client over stdio, with durable request handles and bounded waits.
   Launch and talk to workers from tools without opening a terminal for each one.
 
@@ -56,8 +56,10 @@ CI tests Go 1.25 and stable Go on Linux, macOS and Windows. Detached listeners
 and MCP automatic launch work on Linux/macOS. Windows supports foreground
 `tincan serve` listeners; see the [platform limits](PROTOCOL.md#platform-note).
 
-Add `.tincan/` to your projects' `.gitignore` (or your global excludes): it holds
-the spool and, with hosted listeners, per-agent logs and durable request state.
+Each room gets a `.tincan/` directory holding the spool and, with hosted
+listeners, per-agent logs and durable request state. tincan writes a
+`.tincan/.gitignore` that ignores the whole directory, so it stays out of commits
+without editing your project's `.gitignore`.
 New runtime directories use `0700` and files use `0600` on POSIX. Keep rooms
 private: prompts, replies and logs may contain repository content or credentials.
 
@@ -81,7 +83,7 @@ Per-agent shims installed by the same script:
 
 - **Codex**: uses the native skills installed in `~/.agents/skills/`, so they are
   available outside this checkout. Invoke with `listen as codex` or a request to
-  `tell <agent> <task>`. No legacy prompt shim is installed.
+  `tell <agent> <task>`.
 - **Claude Code**: uses `~/.claude/skills/`; invoke `/tell` or `/listen`.
 - **Gemini CLI**: when `~/.gemini` exists, installs
   `~/.gemini/commands/listen.toml` for `/listen`. Set `GEMINI_COMMANDS_DIR` to
@@ -91,27 +93,37 @@ Per-agent shims installed by the same script:
   other repos, make the installed skills available through that workspace path
   if the client does not discover user-level skills.
 
-The skill installer requires a checkout. MCP clients can use the binary directly.
+Without Go, `install.sh` downloads the release binary for your platform, verifies
+it against `checksums.txt`, and installs it to `~/.local/bin` (`TINCAN_BIN_DIR`);
+`--from-release` forces this. Outside a checkout it fetches the skills from the
+same release, so it also works as `curl -fsSL <raw install.sh URL> | bash`.
 
 ### 3. MCP clients
 
-Install v2, then configure a stdio MCP server with an absolute room path.
-For clients using an `mcpServers` JSON configuration:
+Install v2, then register a stdio MCP server once per user. `./install.sh --mcp`
+does this for Claude Code and Codex when their CLIs are installed. The server
+uses the session's project (its git work tree) as the room, so one registration
+works in every repository. For clients using an `mcpServers` JSON configuration:
 
 ```json
 {
   "mcpServers": {
     "tincan": {
       "command": "/absolute/path/to/tincan",
-      "args": ["mcp", "--room", "/absolute/path/to/repo"]
+      "args": ["mcp"]
     }
   }
 }
 ```
 
-Replace both paths before adding the configuration to your client. Using the
-absolute binary path avoids differences between GUI and shell `PATH` values.
-Each server is bound to one room; tool calls cannot switch rooms. Standard output
+Replace the binary path before adding the configuration to your client. Using
+the absolute binary path avoids differences between GUI and shell `PATH` values.
+Clients that start servers outside a project, such as Claude Desktop (which uses
+`/`), need `"args": ["mcp", "--room", "/absolute/path/to/repo"]`. Each server is
+bound to one room; tool calls cannot switch rooms. Do not freeze a `PATH` into
+the registration: tincan searches `PATH` and common per-user bin directories
+(`~/.local/bin`, mise/asdf shims, Homebrew, Volta, Bun, npm-global, Go) when it
+launches agents. Standard output
 is reserved for MCP messages and diagnostics go to standard error.
 
 The tools are `tincan_launch`, `tincan_send`, `tincan_wait`, `tincan_status`,

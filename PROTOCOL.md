@@ -33,8 +33,10 @@ that the `/tell` and `/listen` skills point to.
 
 ## Rooms — always pass the repo root
 
-`--room` defaults to the **current working directory, literally** — there is no
-auto-climb to a repo root. An agent that `cd`s into a subdirectory and runs tincan
+For messaging and lifecycle commands, `--room` defaults to the **current working
+directory, literally** — there is no auto-climb to a repo root. (`tincan mcp` is
+the exception: without `--room` it uses the enclosing git work tree; see
+[MCP stdio](#mcp-stdio).) An agent that `cd`s into a subdirectory and runs tincan
 bare will silently create a *second* room there. Always pass the room explicitly:
 
 ```
@@ -72,12 +74,13 @@ tincan serve  <name> [same flags as up] [--daemon]
 tincan down   <name> [--wait <sec=15>]
 tincan presets [--format table|json]
 tincan version [--format json]
-tincan mcp --room <absolute-path>
+tincan mcp [--room <absolute-path>]
 tincan gc [--older-than 168h] [--room <path>]
 ```
 
 Messaging, hosted lifecycle and cleanup commands take `--room <path>` (default
-`.`); MCP binds its room at startup. `presets` and `version` are room-independent.
+`.`); MCP binds its room at startup (default: the git work tree containing its
+working directory). `presets` and `version` are room-independent.
 `up`/`serve`/`down` are the **hosted listener** commands — tincan runs a headless
 agent CLI for you so no human terminal is needed per agent; see below.
 
@@ -197,7 +200,9 @@ tincan down codex --room "$ROOM"        # down name=codex
   hosted configuration; stop it before selecting another preset or session mode.
   For a new listener it resolves the preset (`--preset`, else `<name>` if that is a
   known preset, else `--exec` is required → exit 2), checks the agent binary
-  is on `PATH` (exit 1 if not), starts `serve … --daemon` detached (own
+  resolves (exit 1 if not) — on `PATH`, then in common per-user bin directories
+  (`~/.local/bin`, mise/asdf shims, Homebrew, Volta, Bun, npm-global, Go); an
+  absolute path that no longer exists falls back to its base name — starts `serve … --daemon` detached (own
   session, stdio on the host log) and waits up to `--wait` seconds for authenticated
   readiness. A listener can become ready while already processing queued work.
   Failure reports the host log path.
@@ -348,8 +353,13 @@ and idempotency protection are gone; do not reuse old request IDs for new work.
 
 ## MCP stdio
 
-Start a server with `tincan mcp --room /absolute/path/to/repo`. The room is fixed
-for that server's lifetime; tools cannot override it. MCP uses stdin/stdout and
+Start a server with `tincan mcp`. Without `--room`, the room is the git work
+tree containing the server's working directory, or that directory itself
+outside a repository. Claude Code, Codex and Grok start stdio servers in the
+session's project, so one user-level registration serves every project. The
+home directory and its ancestors are refused: clients that start servers
+elsewhere (Claude Desktop starts them in `/`) need `--room /absolute/path/to/repo`.
+The room is fixed for that server's lifetime; tools cannot override it. MCP uses stdin/stdout and
 diagnostics use stderr. The binary's `tincan version --format json` reports
 version, commit, date, modification status, Go version and module identity.
 The interface below ships in v2.0.0. See the [setup guide](docs/setup.md) for
@@ -362,7 +372,7 @@ Clients with an `mcpServers` JSON configuration can use:
   "mcpServers": {
     "tincan": {
       "command": "/absolute/path/to/tincan",
-      "args": ["mcp", "--room", "/absolute/path/to/repo"]
+      "args": ["mcp"]
     }
   }
 }

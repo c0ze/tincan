@@ -143,14 +143,18 @@ func cmdPresets(args []string, stdout, stderr io.Writer) int {
 		return ExitOK
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSTDIN\tREPLY\tTIMEOUT\tEXEC")
+	fmt.Fprintln(tw, "NAME\tSTDIN\tREPLY\tTIMEOUT\tBINARY\tEXEC")
 	for _, n := range host.Names(presets) {
 		p := presets[n]
 		timeout := "none"
 		if p.ExecTimeoutSec > 0 {
 			timeout = strconv.Itoa(p.ExecTimeoutSec) + "s"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", n, p.Stdin, p.Reply, timeout, strings.Join(p.Exec, " "))
+		binary, err := host.ResolveExecutable(p.Exec[0], "")
+		if err != nil {
+			binary = "missing"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", n, p.Stdin, p.Reply, timeout, binary, strings.Join(p.Exec, " "))
 	}
 	tw.Flush()
 	return ExitOK

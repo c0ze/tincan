@@ -31,24 +31,28 @@ path. Provider models, credentials, network access and billing remain governed
 by the installed provider. Grok cloud execution is a separate environment and
 is not configured by tincan's local `grok` preset.
 
-Custom commands and absolute executable paths belong in
-`~/.config/tincan/agents.json`. Each override replaces the preset entry, so include
+Custom commands belong in `~/.config/tincan/agents.json`. Prefer bare
+executable names there: tincan resolves them on `PATH` and in common per-user
+bin directories, so the file stays valid across machines and version-manager
+changes. An absolute path that no longer exists falls back to its base name;
+`tincan presets` shows the binary each preset resolves to. Each override replaces the preset entry, so include
 its full command and input/output settings. Custom wrappers default to stateless
 execution unless they explicitly select a supported session adapter. See
 [preset configuration](../PROTOCOL.md#presets-and-configtincanagentsjson).
 
 ## Connect an MCP client
 
-Choose an existing project directory and keep its absolute path fixed as the
-room. Add a stdio server to any CLI or desktop client that supports local MCP
-servers. For clients accepting an `mcpServers` JSON object:
+Register one user-level stdio server. `./install.sh --mcp` does this for Claude
+Code and Codex. Without `--room`, the room is the git work tree of the directory
+the client starts the server in; Claude Code, Codex and Grok use the session's
+project. For clients accepting an `mcpServers` JSON object:
 
 ```json
 {
   "mcpServers": {
     "tincan": {
       "command": "/absolute/path/to/tincan",
-      "args": ["mcp", "--room", "/absolute/path/to/repo"]
+      "args": ["mcp"]
     }
   }
 }
@@ -59,14 +63,17 @@ For Codex's TOML configuration, the equivalent server entry is:
 ```toml
 [mcp_servers.tincan]
 command = "/absolute/path/to/tincan"
-args = ["mcp", "--room", "/absolute/path/to/repo"]
+args = ["mcp"]
 ```
 
-Use the configuration location supported by your client, replace both paths,
-and restart or reconnect it. Desktop clients may have a different `PATH` from
-your terminal; an absolute tincan path resolves only the server executable.
-Workers must also be discoverable in that environment, or use absolute paths
-in their preset entries.
+Use the configuration location supported by your client, replace the binary
+path, and restart or reconnect it. Desktop clients that start servers outside
+a project (Claude Desktop uses `/`) need `"args": ["mcp", "--room",
+"/absolute/path/to/repo"]`; tincan refuses to use the home directory or `/` as
+a room. Desktop clients may also have a smaller `PATH` than your terminal;
+tincan adds common per-user bin directories when it launches workers. Workers
+installed elsewhere need that directory on `PATH` or an absolute path in their
+preset entry.
 
 There is no separate desktop preset: a Claude, Codex or other desktop client
 uses the tools if it supports local stdio MCP. Worker names still refer to the

@@ -16,7 +16,9 @@ When tincan MCP tools are available for the intended room, use them and skip the
 CLI workflow below. Tool names may have a client-specific namespace prefix.
 
 1. Call `tincan_status` to confirm its fixed room matches the task's workspace.
-   Use `tincan_presets` when you need to check available providers.
+   If it names a different room, use the CLI workflow below with this
+   workspace's room rather than working in the wrong one. Use `tincan_presets`
+   when you need to check available providers.
 2. Call `tincan_send` with `agent`, `body`, `from: "orch"`, and a new unique
    `request_id` that you retain for this task. Send starts a configured listener
    automatically. For an alias or explicit session mode, first call

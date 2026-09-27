@@ -55,7 +55,26 @@ func (s *Spool) ensurePrivateRoot() error {
 	if err := fsutil.MkdirPrivate(s.root); err != nil {
 		return err
 	}
-	return os.Chmod(s.root, 0o700)
+	if err := os.Chmod(s.root, 0o700); err != nil {
+		return err
+	}
+	return s.ensureGitignore()
+}
+
+// ensureGitignore keeps the room's runtime state out of version control even
+// when the project has no .tincan/ ignore rule: prompts, replies and logs may
+// contain credentials. A non-empty file or any non-regular entry is left alone;
+// a missing or empty one (an interrupted earlier write) is written atomically.
+func (s *Spool) ensureGitignore() error {
+	path := filepath.Join(s.root, ".gitignore")
+	info, err := os.Lstat(path)
+	if err == nil && (!info.Mode().IsRegular() || info.Size() > 0) {
+		return nil
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return fsutil.WriteFileAtomic(path, []byte("# Created by tincan: runtime state, never commit.\n*\n"))
 }
 
 // validName rejects names that could escape the spool root: a name must be a
