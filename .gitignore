@@ -5,3 +5,4 @@ bin/
 /dist/
 .DS_Store
 .claude/
+.superpowers/
