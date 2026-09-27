@@ -35,7 +35,14 @@ func TestMain(m *testing.M) {
 			os.Exit(0)
 		}
 	}
-	os.Exit(m.Run())
+	state, err := os.MkdirTemp("", "tincan-state-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("TINCAN_STATE_DIR", state)
+	code := m.Run()
+	os.RemoveAll(state)
+	os.Exit(code)
 }
 
 func fixture(t *testing.T) host.Preset {

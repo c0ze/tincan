@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/host"
+	"github.com/c0ze/tincan/v2/internal/rooms"
 	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
@@ -192,6 +193,7 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 	if w := roomRootWarning(room); w != "" {
 		fmt.Fprintln(stderr, w)
 	}
+	rooms.TouchQuiet(room, stderr)
 	// In daemon mode `up` already pointed our stdio at the host log, so
 	// stderr is the log. In the foreground we append to the log file
 	// ourselves and tee to the terminal for debugging.
@@ -231,6 +233,7 @@ func cmdUp(args []string, stdout, stderr io.Writer) int {
 	if w := roomRootWarning(room); w != "" {
 		fmt.Fprintln(stderr, w)
 	}
+	rooms.TouchQuiet(room, stderr)
 	if h.preset == "" && h.execTpl == "" && h.stdin == "" && h.reply == "" && h.session == "" && h.execTimeout < 0 {
 		if st, ok := host.Existing(context.Background(), room, h.name); ok {
 			fmt.Fprintf(stdout, "already up name=%s pid=%d\n", h.name, st.PID)

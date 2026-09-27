@@ -30,7 +30,14 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(Run(os.Args[1:], os.Stdout, os.Stderr))
 	}
-	os.Exit(m.Run())
+	state, err := os.MkdirTemp("", "tincan-state-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("TINCAN_STATE_DIR", state)
+	code := m.Run()
+	os.RemoveAll(state)
+	os.Exit(code)
 }
 
 // fakeAgent is the headless CLI stand-in: `echo <text…>` prints

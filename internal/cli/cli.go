@@ -18,6 +18,7 @@ import (
 
 	"github.com/c0ze/tincan/v2/internal/envelope"
 	"github.com/c0ze/tincan/v2/internal/host"
+	"github.com/c0ze/tincan/v2/internal/rooms"
 	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
@@ -224,6 +225,7 @@ func cmdSend(args []string, stdout, stderr io.Writer) int {
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)
 	}
+	rooms.TouchQuiet(*room, stderr)
 	sp, err := spool.Open(*room)
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan send: %v\n", err)
@@ -265,6 +267,7 @@ func cmdRecv(args []string, stdout, stderr io.Writer) int {
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)
 	}
+	rooms.TouchQuiet(*room, stderr)
 	sp, err := spool.Open(*room)
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan recv: %v\n", err)
@@ -331,6 +334,7 @@ func cmdAsk(args []string, stdout, stderr io.Writer) int {
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)
 	}
+	rooms.TouchQuiet(*room, stderr)
 	sp, err := spool.Open(*room)
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan ask: %v\n", err)

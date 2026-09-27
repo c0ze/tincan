@@ -9,13 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/buildinfo"
 	"github.com/c0ze/tincan/v2/internal/mcpserver"
 	"github.com/c0ze/tincan/v2/internal/request"
+	"github.com/c0ze/tincan/v2/internal/rooms"
 	"github.com/c0ze/tincan/v2/internal/spool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -43,6 +43,7 @@ func cmdMCP(args []string, stdout, stderr io.Writer) int {
 		}
 		*room = inferred
 	}
+	rooms.TouchQuiet(*room, stderr)
 	server, err := mcpserver.New(mcpserver.Options{Room: *room})
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan mcp: %v\n", err)
@@ -69,31 +70,13 @@ func inferRoom() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Compare canonical paths so a symlinked alias (macOS /var and
-	// /private/var, say) cannot slip past the home check.
 	if c, err := filepath.EvalSymlinks(cwd); err == nil {
 		cwd = c
 	}
-	home, _ := os.UserHomeDir()
-	if home != "" {
-		if h, err := filepath.EvalSymlinks(home); err == nil {
-			home = h
-		}
-	}
-	tooBroad := func(dir string) bool {
-		if filepath.Dir(dir) == dir {
-			return true // a filesystem or volume root, whatever home is
-		}
-		if home == "" {
-			return false
-		}
-		rel, err := filepath.Rel(dir, home)
-		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-	}
-	if tooBroad(cwd) {
+	if rooms.TooBroad(cwd) {
 		return "", fmt.Errorf("cannot infer a room from working directory %s; start the client in a project directory or pass --room /absolute/project", cwd)
 	}
-	for dir := cwd; !tooBroad(dir); dir = filepath.Dir(dir) {
+	for dir := cwd; !rooms.TooBroad(dir); dir = filepath.Dir(dir) {
 		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
 			return dir, nil
 		}
