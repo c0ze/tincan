@@ -4,7 +4,6 @@ package mcpserver
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/buildinfo"
+	"github.com/c0ze/tincan/v2/internal/dispatch"
 	"github.com/c0ze/tincan/v2/internal/host"
 	"github.com/c0ze/tincan/v2/internal/request"
 	"github.com/c0ze/tincan/v2/internal/spool"
@@ -65,12 +65,11 @@ func add[I, O any](s *mcp.Server, name, description string, readOnly, idempotent
 	mcp.AddTool(s, &mcp.Tool{Name: name, Description: description, Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly, IdempotentHint: idempotent, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, handler)
 }
 
-func (s *service) presets() (map[string]host.Preset, error) {
-	if s.Presets != nil {
-		return s.Presets, nil
-	}
-	return host.Effective(host.ConfigPath())
+func (s *service) opts() dispatch.Options {
+	return dispatch.Options{Room: s.Room, Executable: s.Executable, Presets: s.Presets}
 }
+
+func (s *service) presets() (map[string]host.Preset, error) { return s.opts().PresetMap() }
 
 type Empty struct{}
 type PresetView struct {
@@ -121,37 +120,16 @@ type LaunchOutput struct {
 	Already bool      `json:"already"`
 }
 
+func agentView(name string, st host.State) AgentView {
+	return AgentView{Name: name, Preset: st.Preset, Alive: true, Busy: st.State == "busy", PID: st.PID, CurrentRequest: st.CurrentID, SessionMode: st.Session}
+}
+
 func (s *service) launch(ctx context.Context, in LaunchInput) (LaunchOutput, error) {
-	if err := spool.ValidName(in.Name); err != nil {
-		return LaunchOutput{}, err
-	}
-	if st, alive := host.Existing(ctx, s.Room, in.Name); alive && in.Preset == "" {
-		if in.SessionMode == "" {
-			return LaunchOutput{Agent: AgentView{Name: in.Name, Preset: st.Preset, Alive: true, Busy: st.State == "busy", PID: st.PID, CurrentRequest: st.CurrentID, SessionMode: st.Session}, Already: true}, nil
-		}
-		// An alias keeps its existing provider when only the session mode is
-		// specified. Up still rejects changing a live configuration.
-		if st.Preset != "" {
-			in.Preset = st.Preset
-		}
-	}
-	all, err := s.presets()
+	res, err := dispatch.Launch(ctx, s.opts(), in.Name, in.Preset, in.SessionMode)
 	if err != nil {
 		return LaunchOutput{}, err
 	}
-	label, p, err := host.Resolve(all, in.Name, in.Preset, host.Overrides{ExecTimeoutSec: -1})
-	if err != nil {
-		return LaunchOutput{}, err
-	}
-	p, err = host.WithSession(p, label, in.SessionMode)
-	if err != nil {
-		return LaunchOutput{}, err
-	}
-	result, err := host.Up(ctx, host.UpOptions{Room: s.Room, Name: in.Name, Label: label, Preset: p, Wait: 10 * time.Second, Executable: s.Executable})
-	if err != nil {
-		return LaunchOutput{}, err
-	}
-	return LaunchOutput{Agent: AgentView{Name: in.Name, Preset: result.State.Preset, Alive: true, Busy: result.State.State == "busy", PID: result.State.PID, CurrentRequest: result.State.CurrentID, SessionMode: result.State.Session}, Already: result.Already}, nil
+	return LaunchOutput{Agent: agentView(in.Name, res.State), Already: res.Already}, nil
 }
 
 func (s *service) launchTool(ctx context.Context, req *mcp.CallToolRequest, in LaunchInput) (*mcp.CallToolResult, LaunchOutput, error) {
@@ -186,60 +164,9 @@ func view(r request.Record) RequestView {
 }
 
 func (s *service) sendTool(ctx context.Context, req *mcp.CallToolRequest, in SendInput) (*mcp.CallToolResult, RequestView, error) {
-	if in.From == "" {
-		in.From = "mcp"
-	}
-	if err := spool.ValidName(in.Agent); err != nil {
+	r, err := dispatch.Send(ctx, s.opts(), dispatch.SendSpec{Agent: in.Agent, From: in.From, Body: in.Body, RequestID: in.RequestID})
+	if r.ID == "" {
 		return nil, RequestView{}, err
-	}
-	if err := spool.ValidName(in.From); err != nil {
-		return nil, RequestView{}, err
-	}
-	if in.RequestID != "" {
-		if err := request.ValidateID(in.RequestID); err != nil {
-			return nil, RequestView{}, err
-		}
-	}
-	if len(in.Body) > request.MaxBodyBytes {
-		return nil, RequestView{}, fmt.Errorf("prompt exceeds %d bytes", request.MaxBodyBytes)
-	}
-	// A cached result must remain retrievable even when the worker is stopped,
-	// uninstalled, or named with an alias that is not itself a preset.
-	if in.RequestID != "" {
-		existing, err := request.Get(s.Room, in.RequestID)
-		if err == nil && existing.Terminal() {
-			r, err := request.Submit(ctx, s.Room, in.Agent, in.From, in.Body, in.RequestID)
-			return nil, view(r), err
-		}
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, RequestView{}, err
-		}
-	}
-	route, err := request.LockRoute(ctx, s.Room, in.Agent)
-	if err != nil {
-		return nil, RequestView{}, err
-	}
-	defer route.Close()
-	state, alive := host.Existing(ctx, s.Room, in.Agent)
-	interactive := alive && state.Owner == ""
-	if !alive {
-		interactive, err = request.InteractivePending(ctx, s.Room, in.Agent)
-		if err != nil {
-			return nil, RequestView{}, err
-		}
-	}
-	submit := request.Submit
-	if interactive {
-		submit = request.SubmitInteractive
-	}
-	r, err := submit(ctx, s.Room, in.Agent, in.From, in.Body, in.RequestID)
-	if err != nil {
-		return nil, view(r), err
-	}
-	if !r.Terminal() && !alive && !interactive {
-		if _, err := s.launch(ctx, LaunchInput{Name: in.Agent}); err != nil {
-			return nil, view(r), fmt.Errorf("request %s is saved; launch its listener or retry this same request_id: %w", r.ID, err)
-		}
 	}
 	return nil, view(r), err
 }
