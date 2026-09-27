@@ -3,8 +3,11 @@ package thread
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -146,6 +149,90 @@ func TestClientIDLookupAndMetaSave(t *testing.T) {
 	snap, _ := th.Snapshot()
 	if _, ok := snap.ByClientID("k1"); !ok || snap.Meta.Status != StatusStopping {
 		t.Fatalf("snap %+v", snap)
+	}
+}
+
+func TestSaveMetaCapturesFinalMetaAtCommit(t *testing.T) {
+	th, _ := Create(room(t), "t", "claude", "", 6)
+	err := th.Update(context.Background(), func(tx *Tx) error {
+		tx.SaveMeta()
+		// Changes made after SaveMeta must still be in the committed event.
+		if tx.Meta.Listeners == nil {
+			tx.Meta.Listeners = map[string]string{}
+		}
+		tx.Meta.Listeners["claude.abcd1234"] = "claude"
+		tx.Meta.Status = StatusStopping
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs, err := th.events()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var last *Event
+	for i := range evs {
+		if evs[i].Kind == KindThread {
+			last = &evs[i]
+		}
+	}
+	if last == nil || last.Meta == nil {
+		t.Fatalf("no thread event carrying meta: %+v", evs)
+	}
+	if last.Meta.Status != StatusStopping || last.Meta.Listeners["claude.abcd1234"] != "claude" {
+		t.Fatalf("committed event does not carry final meta: %+v", last.Meta)
+	}
+	snap, _ := th.Snapshot()
+	if snap.Meta.Status != StatusStopping || snap.Meta.Listeners["claude.abcd1234"] != "claude" {
+		t.Fatalf("snapshot meta: %+v", snap.Meta)
+	}
+}
+
+func TestJournalMetaSurvivesMetaWriteCrash(t *testing.T) {
+	th, _ := Create(room(t), "t", "claude", "", 6)
+	before, err := os.ReadFile(th.metaPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := th.Update(context.Background(), func(tx *Tx) error {
+		tx.Meta.Status = StatusStopping
+		tx.SaveMeta()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a crash between the event commit and the thread.json write: put
+	// the OLD cached bytes back, as if writeMeta never ran.
+	if err := os.WriteFile(th.metaPath(), before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := th.Snapshot()
+	if err != nil || snap.Meta.Status != StatusStopping {
+		t.Fatalf("journal-derived meta lost after simulated crash: %+v %v", snap.Meta, err)
+	}
+	// The next Update must repair the stale cache to match the journal.
+	if err := th.Update(context.Background(), func(tx *Tx) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := os.ReadFile(th.metaPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m Meta
+	if err := json.Unmarshal(repaired, &m); err != nil || m.Status != StatusStopping {
+		t.Fatalf("thread.json not repaired: %s", repaired)
+	}
+}
+
+func TestUppercaseThreadIDRejected(t *testing.T) {
+	r := room(t)
+	th, err := Create(r, "t", "claude", "", 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(r, strings.ToUpper(th.ID)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("uppercase id accepted: %v", err)
 	}
 }
 

@@ -73,6 +73,7 @@ type Event struct {
 	State     string    `json:"state,omitempty"`
 	Produced  []string  `json:"produced,omitempty"`
 	Op        string    `json:"op,omitempty"`
+	Meta      *Meta     `json:"meta,omitempty"`
 }
 
 type Message struct {
@@ -140,6 +141,13 @@ func (s *Snapshot) apply(e Event) {
 			}
 		case KindHandoffs:
 			m.Handoffs = true
+		}
+	case KindThread:
+		// The journal is authoritative for meta: a thread event carrying a
+		// non-nil Meta (written at commit time by SaveMeta) replaces the
+		// snapshot's meta, overriding the thread.json cache it started from.
+		if e.Meta != nil {
+			s.Meta = *e.Meta
 		}
 	case KindChain:
 		c := s.Chains[e.Chain]

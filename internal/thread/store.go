@@ -43,8 +43,12 @@ func validTID(id string) bool {
 	if len(id) != 8 {
 		return false
 	}
-	_, err := hex.DecodeString(id)
-	return err == nil
+	for _, c := range id {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (t *Thread) metaPath() string   { return filepath.Join(t.dir, "thread.json") }
@@ -148,26 +152,30 @@ func (t *Thread) events() ([]Event, error) {
 	return evs, err
 }
 
-func (t *Thread) load() (*Snapshot, int64, error) {
-	m, err := t.readMeta()
+// load reads the thread.json cache and the journal, and folds the journal
+// over the cached meta. It also returns the cached meta on its own (before
+// any journal-derived thread event overrides it) so Update can tell whether
+// the cache is stale relative to the journal, which is authoritative.
+func (t *Thread) load() (s *Snapshot, cached Meta, valid int64, err error) {
+	cached, err = t.readMeta()
 	if err != nil {
-		return nil, 0, err
+		return nil, Meta{}, 0, err
 	}
 	evs, valid, err := t.readEvents()
 	if err != nil {
-		return nil, 0, err
+		return nil, Meta{}, 0, err
 	}
-	s := newSnapshot(m)
+	s = newSnapshot(cached)
 	for _, e := range evs {
 		s.apply(e)
 	}
 	s.sortMessages()
-	return s, valid, nil
+	return s, cached, valid, nil
 }
 
 // Snapshot reads the thread without locking; it never sees a torn line.
 func (t *Thread) Snapshot() (Snapshot, error) {
-	s, _, err := t.load()
+	s, _, _, err := t.load()
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -175,11 +183,12 @@ func (t *Thread) Snapshot() (Snapshot, error) {
 }
 
 type Tx struct {
-	Meta     Meta
-	Snap     *Snapshot
-	appended []Event
-	metaSave bool
-	nextSeq  int64
+	Meta         Meta
+	Snap         *Snapshot
+	appended     []Event
+	metaSave     bool
+	metaEventIdx int
+	nextSeq      int64
 }
 
 // Append assigns seq and time (and N and ID for messages), applies the event
@@ -199,23 +208,61 @@ func (tx *Tx) Append(e Event) Event {
 	return e
 }
 
-// SaveMeta persists tx.Meta at commit and records a thread event.
+// SaveMeta records a thread event once per transaction. Its Meta payload is
+// filled in at commit time (see Update), from the final value of tx.Meta
+// after fn returns, so any changes made after calling SaveMeta are included.
 func (tx *Tx) SaveMeta() {
 	if !tx.metaSave {
 		tx.metaSave = true
+		tx.metaEventIdx = len(tx.appended)
 		tx.Append(Event{Kind: KindThread})
 	}
 }
 
+func deepCopyMeta(m Meta) Meta {
+	cp := m
+	if m.Listeners != nil {
+		cp.Listeners = make(map[string]string, len(m.Listeners))
+		for k, v := range m.Listeners {
+			cp.Listeners[k] = v
+		}
+	}
+	return cp
+}
+
+// metaEqual compares two Meta values field-by-field, using time.Time.Equal
+// for Created so wall-clock/monotonic representation differences never cause
+// a spurious cache repair.
+func metaEqual(a, b Meta) bool {
+	if a.ID != b.ID || a.Title != b.Title || a.Primary != b.Primary || a.Status != b.Status || a.Budget != b.Budget || a.ClientID != b.ClientID {
+		return false
+	}
+	if !a.Created.Equal(b.Created) {
+		return false
+	}
+	if len(a.Listeners) != len(b.Listeners) {
+		return false
+	}
+	for k, v := range a.Listeners {
+		if bv, ok := b.Listeners[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
 // Update runs fn under the thread lock against a fresh snapshot and commits
-// its staged events (after repairing any torn tail) and meta.
+// its staged events (after repairing any torn tail) and meta. The journal is
+// authoritative for meta: thread.json is only a cache, and Update rewrites it
+// whenever it is stale relative to the journal-derived meta, in addition to
+// whenever fn itself calls SaveMeta.
 func (t *Thread) Update(ctx context.Context, fn func(*Tx) error) error {
 	l, err := filelock.Acquire(ctx, t.lockPath())
 	if err != nil {
 		return err
 	}
 	defer l.Close()
-	s, valid, err := t.load()
+	s, cached, valid, err := t.load()
 	if err != nil {
 		return err
 	}
@@ -223,12 +270,16 @@ func (t *Thread) Update(ctx context.Context, fn func(*Tx) error) error {
 	if err := fn(tx); err != nil {
 		return err
 	}
+	if tx.metaSave {
+		final := deepCopyMeta(tx.Meta)
+		tx.appended[tx.metaEventIdx].Meta = &final
+	}
 	if len(tx.appended) > 0 {
 		if err := t.appendEvents(valid, tx.appended); err != nil {
 			return err
 		}
 	}
-	if tx.metaSave {
+	if tx.metaSave || !metaEqual(cached, tx.Meta) {
 		return t.writeMeta(tx.Meta)
 	}
 	return nil
