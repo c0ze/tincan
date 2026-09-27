@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.25 standard library (`net/http` pattern routing, `httputil.ReverseProxy`, `embed`, `html`), existing modules only (`github.com/fsnotify/fsnotify`), plain HTML/CSS/JS with no build step.
 
-**Spec:** `docs/superpowers/specs/2026-09-28-tincan-web-chat-design.md`
+**Spec:** `docs/superpowers/specs/2026-09-28-tincan-web-chat-design.md` (including §15 amendments: two-way link, quota panels, dispatcher lock at `.tincan/dispatcher.lock`, registry exclusion of review workspaces)
 
 ## Global Constraints
 
@@ -22,6 +22,8 @@
 - Default chain budget 6 automatic executions per user message (user's own targets do not count); `--idle-stop 30m`; reconcile every 2 s.
 - Security: default listen `unix:$XDG_RUNTIME_DIR/tincan/web.sock` (fallback `<state dir>/web.sock`), dir 0700, socket 0600; TCP only on loopback; every request needs `Tailscale-User-Login` == owner; POST/PATCH need `X-Tincan-Request: 1` and a matching `Origin` when present; CSP `default-src 'self'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
 - Registry: `$TINCAN_STATE_DIR` > `$XDG_STATE_HOME/tincan` > `%LocalAppData%\tincan` (Windows) > `~/.local/state/tincan`; file `rooms.json`; room ID = first 12 hex of SHA-256 of the canonical path. Registry failures never fail a CLI command.
+- Machine link is two-way: each `tincan web` may list the other as `--peer`; peers are never chained (`api/peers/<a>/peers/…` → 400) and each instance shows only its own rooms plus its direct peers.
+- Quotas are read-only: tincan reads `~/.cache/<provider>-quota[-<profile>].json`, never runs quota scripts, calls provider APIs or reads credentials; stale after 15 minutes; red at ≥ 95 %.
 - Tests that start detached hosts skip on Windows (`runtime.GOOS == "windows"`), as existing tests do.
 
 ## Review Focus
@@ -60,6 +62,7 @@
 | `internal/web/markdown.go` | Safe Markdown-subset renderer. |
 | `internal/web/events.go` | SSE hub and change scanner/watcher. |
 | `internal/web/proxy.go` | Peer proxy and health. |
+| `internal/quota/quota.go`, `quota_test.go` | Quota cache discovery, normalization and state. |
 | `internal/web/ui/index.html`, `app.js`, `app.css` | Embedded UI. |
 | `internal/web/*_test.go` | Web tests. |
 | `internal/cli/web.go` | `tincan web` command. |
@@ -221,6 +224,20 @@ func TestListMarksMissingRooms(t *testing.T) {
 	}
 }
 
+func TestTouchIgnoresReviewWorkspaces(t *testing.T) {
+	state := mkroom(t, "state")
+	t.Setenv("TINCAN_STATE_DIR", state)
+	ws := filepath.Join(state, "reviews", "workspaces", "rv-1-0")
+	os.MkdirAll(ws, 0o700)
+	r := tempRegistry(t)
+	if err := r.Touch(ws); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := r.List(); len(list) != 0 {
+		t.Fatalf("review workspace registered: %+v", list)
+	}
+}
+
 func TestEmptyPathRegistryIsNoop(t *testing.T) {
 	r := Open("")
 	if err := r.Touch(t.TempDir()); err != nil {
@@ -338,6 +355,20 @@ func TooBroad(dir string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// excluded reports paths never registered: phase 2 review workspaces under
+// <state dir>/reviews/.
+func excluded(path string) bool {
+	d := StateDir()
+	if d == "" {
+		return false
+	}
+	if c, err := Canonical(d); err == nil {
+		d = c
+	}
+	rel, err := filepath.Rel(filepath.Join(d, "reviews"), path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // TouchQuiet records room in the default registry, reporting (not returning)
 // any failure.
 func TouchQuiet(room string, stderr io.Writer) {
@@ -406,6 +437,9 @@ func (r *Registry) Touch(room string) error {
 	path, err := Canonical(room)
 	if err != nil {
 		return err
+	}
+	if excluded(path) {
+		return nil
 	}
 	return r.update(func(f *file) error { upsert(f, path, time.Now().UTC()); return nil })
 }
@@ -546,7 +580,7 @@ Note on `Import` depth: a `.tincan` directory is found when its **parent** is at
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/rooms/ -count=1 -v`
-Expected: PASS for all eight tests.
+Expected: PASS for all nine tests.
 
 - [ ] **Step 5: Wire `TooBroad` and `Touch` into the CLI**
 
@@ -2465,10 +2499,10 @@ func (d *Dispatcher) Acquire() error {
 	if d.lock != nil {
 		return nil
 	}
-	if err := fsutil.MkdirPrivate(Root(d.Opts.Room)); err != nil {
+	if err := fsutil.MkdirPrivate(filepath.Join(d.Opts.Room, ".tincan")); err != nil {
 		return err
 	}
-	l, err := filelock.Try(filepath.Join(Root(d.Opts.Room), "dispatcher.lock"))
+	l, err := filelock.Try(filepath.Join(d.Opts.Room, ".tincan", "dispatcher.lock"))
 	if errors.Is(err, filelock.ErrLocked) {
 		return ErrNotOwner
 	}
@@ -3210,7 +3244,7 @@ git commit -m "Add Stop and archive barriers, retry and idle janitor to threads"
 ### Task 8: Web server core — config, listener, owner and CSRF middleware, `tincan web`
 
 **Files:**
-- Create: `internal/web/server.go`, `internal/web/owner.go`, `internal/web/ui/index.html` (placeholder shell, finished in Task 12), `internal/web/ui/app.js` (empty file), `internal/web/ui/app.css` (empty file), `internal/web/server_test.go`, `internal/cli/web.go`
+- Create: `internal/web/server.go`, `internal/web/owner.go`, `internal/web/ui/index.html` (placeholder shell, finished in Task 13), `internal/web/ui/app.js` (empty file), `internal/web/ui/app.css` (empty file), `internal/web/server_test.go`, `internal/cli/web.go`
 - Modify: `internal/cli/cli.go` (`Run` switch, `usageText`)
 
 **Interfaces:**
@@ -3710,7 +3744,7 @@ func (s *Server) watchPeers(ctx context.Context)                   {}
 
 `POST /api/rooms` is registered by Task 9; until then `TestMutationsNeedCSRFHeaderAndSameOrigin`'s last assertion only requires "not 403" (a 404/405 from the mux is fine).
 
-UI shell (finished in Task 12):
+UI shell (finished in Task 13):
 
 ```html
 <!-- internal/web/ui/index.html -->
@@ -5072,6 +5106,9 @@ func TestProxyRejectsTraversalAndUnknownPeer(t *testing.T) {
 	if rec := do(t, hub.Handler(), "GET", "/api/peers/nobody/rooms", "", ownerHdr()); rec.Code != 404 {
 		t.Fatalf("unknown peer: %d", rec.Code)
 	}
+	if rec := do(t, hub.Handler(), "GET", "/api/peers/macmini/peers/cachyos/rooms", "", ownerHdr()); rec.Code != 400 {
+		t.Fatalf("chained peer: %d", rec.Code)
+	}
 }
 
 func TestPeerHealthTracksOffline(t *testing.T) {
@@ -5228,7 +5265,454 @@ git commit -m "Proxy a peer tincan web with health tracking"
 
 ---
 
-### Task 12: UI
+### Task 12: Quota panels backend
+
+**Files:**
+- Create: `internal/quota/quota.go`, `internal/quota/quota_test.go`
+- Modify: `internal/web/server.go` (`Config.QuotaDir`, `Config.QuotaConfig`, route), `internal/web/api.go` (`apiQuotas`), `internal/web/events.go` (quota fingerprint and per-minute note), `internal/web/api_test.go`
+
+**Interfaces:**
+- Consumes: Task 8 `Server`, Task 10 `scan`/`tick`/`hub.publish`.
+- Produces:
+  - `type quota.Entry struct { ID, Label, Error, State string; Presets []string; Percent, ShortPercent *float64; ResetAt, ShortResetAt, FetchedAt, AttemptedAt *time.Time }` (JSON: `id, label, presets, percent, reset_at, short_percent, short_reset_at, fetched_at, attempted_at, error, state`)
+  - States: `quota.StateOK = "ok"`, `StateStale = "stale"`, `StateError = "error"`, `StateUnknown = "unknown"`; `const quota.StaleAfter = 15 * time.Minute`
+  - `func quota.Parse(id string, data []byte, now time.Time) (Entry, error)`
+  - `func quota.Load(cacheDir, configPath string, now time.Time) ([]Entry, error)`
+  - `func quota.DefaultCacheDir() string`, `func quota.DefaultConfigPath() string`
+  - `func quota.Files(cacheDir string) (map[string]string, error)` — entry ID → path (used for fingerprints)
+  - `GET /api/quotas` → `[]quota.Entry`; SSE note `{"kind":"quota"}`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```go
+// internal/quota/quota_test.go
+package quota
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+var now = time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+
+func unix(t time.Time) float64 { return float64(t.Unix()) }
+
+func TestParseSchema2(t *testing.T) {
+	data := []byte(`{"percent": 83.5, "reset_at": ` + ftoa(unix(now.Add(50*time.Hour))) + `, "short_percent": 12, "short_reset_at": ` + ftoa(unix(now.Add(2*time.Hour))) +
+		`, "fetched_at": ` + ftoa(unix(now.Add(-time.Minute))) + `, "attempted_at": ` + ftoa(unix(now.Add(-time.Minute))) + `, "schema": 2}`)
+	e, err := Parse("codex-gmail", data, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.State != StateOK || *e.Percent != 83.5 || *e.ShortPercent != 12 || !e.ResetAt.Equal(now.Add(50*time.Hour)) || e.ShortResetAt == nil {
+		t.Fatalf("entry %+v", e)
+	}
+}
+
+func TestParseLegacyUsesResetSecs(t *testing.T) {
+	data := []byte(`{"percent": 40, "reset_secs": 3600, "fetched_at": ` + ftoa(unix(now.Add(-2*time.Minute))) + `}`)
+	e, err := Parse("claude", data, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.State != StateOK || !e.ResetAt.Equal(now.Add(58*time.Minute)) || e.AttemptedAt == nil || !e.AttemptedAt.Equal(*e.FetchedAt) || e.ShortResetAt != nil {
+		t.Fatalf("entry %+v", e)
+	}
+}
+
+func TestParseFailureOnlyRecordIsError(t *testing.T) {
+	e, err := Parse("mimo", []byte(`{"attempted_at": `+ftoa(unix(now.Add(-time.Minute)))+`, "error": "auth expired", "schema": 2}`), now)
+	if err != nil || e.State != StateError || e.Percent != nil || e.Error != "auth expired" {
+		t.Fatalf("entry %+v %v", e, err)
+	}
+}
+
+func TestErrorNewerThanSuccessWins(t *testing.T) {
+	data := []byte(`{"percent": 10, "reset_at": ` + ftoa(unix(now.Add(time.Hour))) + `, "fetched_at": ` + ftoa(unix(now.Add(-10*time.Minute))) +
+		`, "attempted_at": ` + ftoa(unix(now.Add(-time.Minute))) + `, "error": "429"}`)
+	e, _ := Parse("claude", data, now)
+	if e.State != StateError || e.Percent == nil {
+		t.Fatalf("entry %+v", e)
+	}
+}
+
+func TestStaleness(t *testing.T) {
+	old := []byte(`{"percent": 10, "reset_at": ` + ftoa(unix(now.Add(time.Hour))) + `, "fetched_at": ` + ftoa(unix(now.Add(-16*time.Minute))) + `}`)
+	if e, _ := Parse("grok", old, now); e.State != StateStale {
+		t.Fatalf("16-minute-old reading: %s", e.State)
+	}
+	passed := []byte(`{"percent": 100, "reset_at": ` + ftoa(unix(now.Add(-time.Minute))) + `, "fetched_at": ` + ftoa(unix(now.Add(-5*time.Minute))) + `}`)
+	if e, _ := Parse("grok", passed, now); e.State != StateStale {
+		t.Fatalf("reset passed without a newer success: %s", e.State)
+	}
+}
+
+func TestInvalidValuesBecomeMissing(t *testing.T) {
+	data := []byte(`{"percent": 5000, "reset_at": 12, "fetched_at": ` + ftoa(unix(now.Add(-time.Minute))) + `}`)
+	e, err := Parse("x", data, now)
+	if err != nil || e.Percent != nil || e.ResetAt != nil || e.State != StateUnknown {
+		t.Fatalf("entry %+v %v", e, err)
+	}
+	if _, err := Parse("x", []byte(`not json`), now); err == nil {
+		t.Fatal("malformed JSON accepted")
+	}
+}
+
+func TestLoadDiscoversFilesAndAppliesMapping(t *testing.T) {
+	dir := t.TempDir()
+	good := []byte(`{"percent": 1, "reset_at": ` + ftoa(unix(now.Add(time.Hour))) + `, "fetched_at": ` + ftoa(unix(now.Add(-time.Minute))) + `}`)
+	for _, name := range []string{"claude-quota.json", "codex-quota-default.json", "codex-quota-gmail.json", "weather.json", "notes-quota.txt"} {
+		os.WriteFile(filepath.Join(dir, name), good, 0o600)
+	}
+	os.WriteFile(filepath.Join(dir, "huge-quota.json"), make([]byte, 70<<10), 0o600)
+	cfg := filepath.Join(t.TempDir(), "quotas.json")
+	os.WriteFile(cfg, []byte(`{"codex-gmail": {"label": "Codex gmail", "presets": ["codex-gmail"]}}`), 0o600)
+	entries, err := Load(dir, cfg, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]Entry{}
+	for _, e := range entries {
+		got[e.ID] = e
+	}
+	if len(got) != 3 {
+		t.Fatalf("entries %v", got)
+	}
+	if p := got["codex-default"].Presets; len(p) != 1 || p[0] != "codex" {
+		t.Fatalf("codex-default presets %v", p)
+	}
+	if g := got["codex-gmail"]; g.Label != "Codex gmail" || g.Presets[0] != "codex-gmail" {
+		t.Fatalf("mapped entry %+v", g)
+	}
+	if p := got["claude"].Presets; p[0] != "claude" {
+		t.Fatalf("claude presets %v", p)
+	}
+}
+```
+
+Add at the end of the test file:
+
+```go
+func ftoa(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
+```
+
+(and import `strconv`).
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `go test ./internal/quota/ -count=1`
+Expected: FAIL — package has no Go files.
+
+- [ ] **Step 3: Implement**
+
+```go
+// internal/quota/quota.go
+
+// Package quota reads the usage caches written by the owner's existing quota
+// refreshers. It never runs those refreshers, calls provider APIs or reads
+// credentials.
+package quota
+
+import (
+	"encoding/json"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"time"
+)
+
+const (
+	StateOK      = "ok"
+	StateStale   = "stale"
+	StateError   = "error"
+	StateUnknown = "unknown"
+
+	StaleAfter = 15 * time.Minute
+	maxFile    = 64 << 10
+)
+
+type Entry struct {
+	ID           string     `json:"id"`
+	Label        string     `json:"label"`
+	Presets      []string   `json:"presets"`
+	Percent      *float64   `json:"percent"`
+	ResetAt      *time.Time `json:"reset_at"`
+	ShortPercent *float64   `json:"short_percent"`
+	ShortResetAt *time.Time `json:"short_reset_at"`
+	FetchedAt    *time.Time `json:"fetched_at"`
+	AttemptedAt  *time.Time `json:"attempted_at"`
+	Error        string     `json:"error,omitempty"`
+	State        string     `json:"state"`
+}
+
+type mapping struct {
+	Label   string   `json:"label"`
+	Presets []string `json:"presets"`
+}
+
+var fileRE = regexp.MustCompile(`^([a-z0-9]+)-quota(?:-([A-Za-z0-9_-]+))?\.json$`)
+
+func DefaultCacheDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".cache")
+}
+
+func DefaultConfigPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "tincan", "quotas.json")
+}
+
+var minTime = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+
+func number(raw map[string]any, key string) (float64, bool) {
+	v, ok := raw[key].(float64)
+	return v, ok
+}
+
+func stamp(raw map[string]any, key string, now time.Time) *time.Time {
+	v, ok := number(raw, key)
+	if !ok {
+		return nil
+	}
+	t := time.Unix(0, int64(v*float64(time.Second))).UTC()
+	if t.Before(minTime) || t.After(now.Add(400*24*time.Hour)) {
+		return nil
+	}
+	return &t
+}
+
+func pct(raw map[string]any, key string) *float64 {
+	v, ok := number(raw, key)
+	if !ok || v < 0 || v > 1000 {
+		return nil
+	}
+	return &v
+}
+
+// Parse normalizes one cache file of either known schema.
+func Parse(id string, data []byte, now time.Time) (Entry, error) {
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return Entry{}, err
+	}
+	e := Entry{ID: id, Label: id}
+	e.FetchedAt = stamp(raw, "fetched_at", now)
+	e.AttemptedAt = stamp(raw, "attempted_at", now)
+	if e.AttemptedAt == nil {
+		e.AttemptedAt = e.FetchedAt
+	}
+	e.Percent = pct(raw, "percent")
+	e.ShortPercent = pct(raw, "short_percent")
+	e.ResetAt = stamp(raw, "reset_at", now)
+	if e.ResetAt == nil && e.FetchedAt != nil {
+		if secs, ok := number(raw, "reset_secs"); ok && secs >= 0 && secs < 400*24*3600 {
+			t := e.FetchedAt.Add(time.Duration(secs * float64(time.Second)))
+			e.ResetAt = &t
+		}
+	}
+	e.ShortResetAt = stamp(raw, "short_reset_at", now)
+	if s, ok := raw["error"].(string); ok {
+		e.Error = s
+	}
+	e.State = state(e, now)
+	return e, nil
+}
+
+func state(e Entry, now time.Time) string {
+	if e.Error != "" && e.AttemptedAt != nil && (e.FetchedAt == nil || e.AttemptedAt.After(*e.FetchedAt)) {
+		return StateError
+	}
+	if e.FetchedAt == nil || e.Percent == nil {
+		return StateUnknown
+	}
+	if now.Sub(*e.FetchedAt) > StaleAfter {
+		return StateStale
+	}
+	if e.ResetAt != nil && !e.ResetAt.After(now) && e.FetchedAt.Before(*e.ResetAt) {
+		return StateStale
+	}
+	return StateOK
+}
+
+// Files maps entry IDs to cache files in dir (regular files ≤ 64 KiB only).
+func Files(dir string) (map[string]string, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, de := range entries {
+		m := fileRE.FindStringSubmatch(de.Name())
+		if m == nil {
+			continue
+		}
+		info, err := de.Info()
+		if err != nil || !info.Mode().IsRegular() || info.Size() > maxFile {
+			continue
+		}
+		id := m[1]
+		if m[2] != "" {
+			id += "-" + m[2]
+		}
+		out[id] = filepath.Join(dir, de.Name())
+	}
+	return out, nil
+}
+
+// Load reads every cache file in cacheDir and applies the optional mapping.
+func Load(cacheDir, configPath string, now time.Time) ([]Entry, error) {
+	files, err := Files(cacheDir)
+	if err != nil {
+		return nil, err
+	}
+	maps := map[string]mapping{}
+	if data, err := os.ReadFile(configPath); err == nil {
+		if err := json.Unmarshal(data, &maps); err != nil {
+			return nil, err
+		}
+	}
+	out := []Entry{}
+	for id, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		e, err := Parse(id, data, now)
+		if err != nil {
+			e = Entry{ID: id, Label: id, State: StateError, Error: "unreadable cache: " + err.Error()}
+		}
+		e.Presets = []string{id}
+		if id == "codex-default" {
+			e.Presets = []string{"codex"}
+		}
+		if m, ok := maps[id]; ok {
+			if m.Label != "" {
+				e.Label = m.Label
+			}
+			if len(m.Presets) > 0 {
+				e.Presets = m.Presets
+			}
+		}
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
+	return out, nil
+}
+```
+
+- [ ] **Step 4: Wire it into the web server**
+
+In `internal/web/server.go` `Config` add:
+
+```go
+	QuotaDir    string // default quota.DefaultCacheDir()
+	QuotaConfig string // default quota.DefaultConfigPath()
+```
+
+and in `New`, after the defaults:
+
+```go
+	if cfg.QuotaDir == "" {
+		cfg.QuotaDir = quota.DefaultCacheDir()
+	}
+	if cfg.QuotaConfig == "" {
+		cfg.QuotaConfig = quota.DefaultConfigPath()
+	}
+```
+
+Add `lastQuotaNote time.Time` to the `Server` struct. In `apiRoutes` (`internal/web/api.go`) register `s.mux.HandleFunc("GET /api/quotas", s.apiQuotas)` and add:
+
+```go
+func (s *Server) apiQuotas(w http.ResponseWriter, r *http.Request) {
+	entries, err := quota.Load(s.cfg.QuotaDir, s.cfg.QuotaConfig, time.Now())
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, entries)
+}
+```
+
+In `internal/web/events.go` `scan`, before comparing with `prev`, add the quota fingerprint:
+
+```go
+	if files, err := quota.Files(s.cfg.QuotaDir); err == nil {
+		fp := ""
+		for _, id := range sortedKeys(files) {
+			fp += id + "=" + statFP(files[id]) + ";"
+		}
+		next["q:"] = fp
+	}
+```
+
+with the helper
+
+```go
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+```
+
+and in the note switch add `case 'q': notes = append(notes, note{Kind: "quota"})`. At the end of `tick`, publish the time-based note:
+
+```go
+	if time.Since(s.lastQuotaNote) >= time.Minute {
+		s.lastQuotaNote = time.Now()
+		s.hub.publish(note{Kind: "quota"})
+	}
+```
+
+Add imports (`sort`, `github.com/c0ze/tincan/v2/internal/quota`).
+
+Add to `internal/web/api_test.go`:
+
+```go
+func TestQuotasEndpoint(t *testing.T) {
+	s, _ := apiServer(t)
+	dir := t.TempDir()
+	s.cfg.QuotaDir = dir
+	s.cfg.QuotaConfig = filepath.Join(dir, "none.json")
+	now := time.Now()
+	os.WriteFile(filepath.Join(dir, "claude-quota.json"), []byte(fmt.Sprintf(`{"percent": 97, "reset_at": %d, "fetched_at": %d}`, now.Add(time.Hour).Unix(), now.Unix())), 0o600)
+	rec := do(t, s.Handler(), "GET", "/api/quotas", "", ownerHdr())
+	var got []struct{ ID, State string; Percent float64 }
+	decode(t, rec.Body.String(), &got)
+	if len(got) != 1 || got[0].ID != "claude" || got[0].State != "ok" || got[0].Percent != 97 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+}
+```
+
+(imports `fmt`, `time`).
+
+- [ ] **Step 5: Run tests**
+
+Run: `go vet ./... && go test ./internal/quota/ ./internal/web/ -race -count=1`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add internal/quota internal/web
+git commit -m "Read quota caches and serve them to the web UI"
+```
+
+---
+
+### Task 13: UI
 
 **Files:**
 - Modify: `internal/web/ui/index.html`, `internal/web/ui/app.js`, `internal/web/ui/app.css`
@@ -5258,7 +5742,7 @@ func TestUIContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(js)
-	for _, want := range []string{`meta[name="tincan-base"]`, `"X-Tincan-Request"`, "new EventSource(", "client_id", "api/peers/"} {
+	for _, want := range []string{`meta[name="tincan-base"]`, `"X-Tincan-Request"`, "new EventSource(", "client_id", "api/peers/", `"quotas"`, "renderLimits"} {
 		if !strings.Contains(src, want) {
 			t.Errorf("app.js missing %q", want)
 		}
@@ -5365,6 +5849,16 @@ button.icon { border: 0; padding: 4px 8px; }
 .item.new { color: var(--muted); }
 .item .count { color: var(--busy); font-size: 12px; }
 .toggle { font-size: 12px; color: var(--muted); }
+.limits { margin: 2px 0 8px; font-size: 12px; }
+.limit { display: grid; grid-template-columns: 1fr 70px auto; gap: 6px; align-items: center; padding: 1px 6px; }
+.limit .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.limit .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.limit .fill { display: block; height: 100%; background: var(--accent); }
+.limit.hot .fill, .chip.hot { background: var(--err); color: #fff; border-color: var(--err); }
+.limit .val { color: var(--muted); font-variant-numeric: tabular-nums; }
+.limit .short { grid-column: 1 / -1; color: var(--muted); font-size: 11px; padding-left: 8px; }
+.limit.stale, .limit.unknown { opacity: .55; }
+.limit.error .val { color: var(--err); }
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #top { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
 #title { font-size: 16px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -5440,7 +5934,45 @@ const state = {
   agents: { presets: [], listeners: [] },
   progress: new Map(), // request id -> {cursor, text}
   sources: {},
+  quotas: {},          // key -> [quota entry]
 };
+
+function fmtLeft(iso) {
+  if (!iso) return "";
+  const s = Math.max(0, (new Date(iso) - Date.now()) / 1000);
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
+}
+
+function quotaFor(key, preset) {
+  return (state.quotas[key] || []).find((q) => (q.presets || []).includes(preset));
+}
+
+function quotaText(q) {
+  return q && q.percent != null ? ` ${Math.round(q.percent)}%` : "";
+}
+
+async function loadQuotas(m) {
+  state.quotas[m.key] = m.online ? await api(m.key, "quotas").catch(() => []) : [];
+}
+
+function renderLimits(m) {
+  const box = el("div", "limits");
+  for (const q of state.quotas[m.key] || []) {
+    const row = el("div", "limit " + q.state + (q.percent >= 95 ? " hot" : ""));
+    row.title = q.state === "error" ? q.error : q.fetched_at ? "fetched " + new Date(q.fetched_at).toLocaleTimeString() : "";
+    const label = el("span", "label", q.label);
+    const bar = el("span", "bar");
+    const fill = el("span", "fill");
+    fill.style.width = Math.min(100, q.percent || 0) + "%";
+    bar.append(fill);
+    const right = q.state === "error" ? "error" : q.percent == null ? "?" : `${Math.round(q.percent)}% · ${fmtLeft(q.reset_at)}`;
+    row.append(label, bar, el("span", "val", right));
+    if (q.short_percent != null) row.append(el("span", "short", `short ${Math.round(q.short_percent)}%` + (q.short_reset_at ? ` · ${fmtLeft(q.short_reset_at)}` : "")));
+    box.append(row);
+  }
+  return box;
+}
 
 function prefix(key) { return key === "local" ? "api/" : `api/peers/${encodeURIComponent(key)}/`; }
 
@@ -5475,7 +6007,7 @@ async function loadMachines() {
   const self = await api("local", "self");
   state.machines = [{ key: "local", name: self.machine, online: true },
     ...self.peers.map((p) => ({ key: p.name, name: p.name, online: p.online }))];
-  await Promise.all(state.machines.map(loadRooms));
+  await Promise.all(state.machines.map((m) => Promise.all([loadRooms(m), loadQuotas(m)])));
   renderSidebar();
 }
 
@@ -5500,7 +6032,7 @@ function renderSidebar() {
     const box = el("div", "machine" + (m.online ? "" : " offline"));
     const name = el("div", "name");
     name.append(el("span", "dot" + (m.online ? " on" : "")), document.createTextNode(m.name + (m.online ? "" : " (offline)")));
-    box.append(name);
+    box.append(name, renderLimits(m));
     for (const r of state.rooms[m.key] || []) {
       if ((r.hidden && !showHidden) || r.missing) continue;
       const room = el("div", "room");
@@ -5593,9 +6125,12 @@ function renderThread() {
     if (m.state === "running" || m.state === "pending") chips.set(m.listener, "busy");
     else if (!chips.has(m.listener)) chips.set(m.listener, "idle");
   }
+  const cur = state.current;
   $("chips").replaceChildren(...[...chips].map(([name, s]) => {
-    const c = el("span", "chip");
-    c.append(el("span", "dot" + (s === "busy" ? " busy" : " on")), document.createTextNode(name));
+    const preset = (meta.listeners || {})[name] || name.split(".")[0];
+    const q = quotaFor(cur.key, preset);
+    const c = el("span", "chip" + (q && q.percent >= 95 ? " hot" : ""));
+    c.append(el("span", "dot" + (s === "busy" ? " busy" : " on")), document.createTextNode(name + quotaText(q)));
     return c;
   }));
   const view = $("view");
@@ -5744,8 +6279,10 @@ function updateSuggest() {
   const names = [...state.agents.presets, ...Object.keys((state.meta || {}).listeners || {}), ...state.agents.listeners, "you"];
   const hits = at ? [...new Set(names)].filter((n) => n.startsWith(at.word)).slice(0, 8) : [];
   box.hidden = hits.length === 0;
+  const key = (state.current || {}).key;
   box.replaceChildren(...hits.map((n, i) => {
-    const d = el("div", i === 0 ? "on" : "", "@" + n);
+    const d = el("div", i === 0 ? "on" : "", "@" + n + quotaText(quotaFor(key, n)));
+    d.dataset.name = n;
     d.onmousedown = (e) => { e.preventDefault(); complete(n); };
     return d;
   }));
@@ -5767,7 +6304,7 @@ function wireComposer() {
     const box = $("suggest");
     if (!box.hidden && (e.key === "Tab" || e.key === "Enter")) {
       e.preventDefault();
-      complete(box.querySelector(".on").textContent.slice(1));
+      complete(box.querySelector(".on").dataset.name);
       return;
     }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -5799,6 +6336,13 @@ function connect(key) {
     const n = JSON.parse(ev.data);
     const cur = state.current;
     if (n.kind === "peer") { await loadMachines(); state.machines.forEach((m) => m.key !== "local" && m.online && connect(m.key)); return; }
+    if (n.kind === "quota") {
+      const m = state.machines.find((x) => x.key === key);
+      if (m) await loadQuotas(m);
+      renderSidebar();
+      if (state.meta && state.current && state.current.tid !== "activity") renderThread();
+      return;
+    }
     if (n.room) await loadThreads(key, n.room).catch(() => {});
     if (n.kind === "activity" || n.kind === "thread") {
       const m = state.machines.find((x) => x.key === key);
@@ -5874,7 +6418,7 @@ git commit -m "Add tincan web chat UI"
 
 ---
 
-### Task 13: Documentation and service files
+### Task 14: Documentation and service files
 
 **Files:**
 - Create: `docs/web.md`, `deploy/systemd/tincan-web.service`, `deploy/launchd/net.tincan.web.plist`
@@ -5909,6 +6453,7 @@ WantedBy=default.target
     <string>/Users/USER/.local/bin/tincan</string>
     <string>web</string>
     <string>--public-path</string><string>/tincan</string>
+    <string>--peer</string><string>cachyos=https://cachyos.brill-decibel.ts.net/tincan/</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -5925,7 +6470,8 @@ Content (complete; keep it in this order):
 2. **Threat model** — anyone who can call the API can run agents with your presets' permissions (e.g. `claude --dangerously-skip-permissions`) in registered rooms. `tincan web` listens on a private unix socket (or loopback TCP) and accepts only requests whose `Tailscale-User-Login` equals `--owner`; any process on any of your untagged devices is therefore trusted. Do not tag these machines; do not expose the socket or port any other way.
 3. **Run it** — flags table: `--listen`, `--public-path`, `--owner`, `--origin`, `--peer`, `--scan`, `--chain-budget`, `--idle-stop` with defaults from `tincan web -h`.
 4. **Expose it with Tailscale** — `tailscale serve --bg --set-path /tincan unix:$XDG_RUNTIME_DIR/tincan/web.sock` (Linux); on macOS use `/Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg --set-path /tincan unix:$HOME/.local/state/tincan/web.sock`, or `--listen 127.0.0.1:7788` and `… serve --bg --set-path /tincan http://127.0.0.1:7788` if the app cannot reach the socket.
-5. **Two machines** — start the hub with `--peer macmini=https://macmini.<tailnet>.ts.net/tincan/`; open `https://<hub>.<tailnet>.ts.net/tincan/`.
+5. **Two machines** — start each machine with the other as `--peer` (`cachyos`: `--peer macmini=https://macmini.<tailnet>.ts.net/tincan/`; `macmini`: `--peer cachyos=https://cachyos.<tailnet>.ts.net/tincan/`); either page shows both machines. Peers are not chained.
+5a. **Quota panels** — read-only view of `~/.cache/<provider>-quota[-<profile>].json` written by your own refreshers (conky scripts, a LaunchAgent); both cache formats; stale after 15 minutes; optional `~/.config/tincan/quotas.json` for labels and preset mapping (example with `codex-default` → "Codex gand"). tincan never fetches quotas or reads credentials.
 6. **Services** — systemd user unit (`systemctl --user enable --now tincan-web`, `loginctl enable-linger $USER` so it runs without a login session) and launchd agent (`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/net.tincan.web.plist`), referencing `deploy/`.
 7. **Using threads** — primary agent, `@name` rules (code ignored, `@you`), who can be mentioned (presets on that machine, this thread's listeners, hosted room listeners; not `/listen` participants), full bounded transcript per turn, chain budget and suggestions, Stop and archive semantics, idle stop and resume.
 8. **Limits** — no dispatch to `/listen` participants; CLI `send`/`ask` not shown in Activity; no Tailscale Service hostname (tagging breaks identity); Windows thread listeners need a foreground `tincan serve`.
@@ -5948,7 +6494,7 @@ git commit -m "Document tincan web and add service files"
 
 ---
 
-### Task 14: Deploy to cachyos (hub) and macmini (peer) and verify through real Tailscale
+### Task 15: Deploy to cachyos (hub) and macmini (peer) and verify through real Tailscale
 
 This task changes live machines; confirm with the owner before starting it. Every command below is run by the implementer; nothing needs the owner's password except where noted.
 
@@ -6006,11 +6552,13 @@ A request from a non-owner identity: if a shared-in user or tagged device is ava
 
 Open `https://cachyos.brill-decibel.ts.net/tincan/` in the built-in browser. Check, and record the results:
 1. Both machines listed; `heliobane-amiga` and `tincan` rooms present.
-2. New thread in a Mac room with primary `codex`; post "say hi in one line" → reply appears; live output visible while running.
-3. Post "@claude summarize what codex said, then ask @codex to confirm" → a handoff to codex runs automatically.
-4. Stop during a running turn → turn cancelled, status back to open.
-5. Archive, then Unarchive.
-6. Phone width (375 px): sidebar drawer works.
+2. The Limits panel under each machine matches the conky widget on cachyos and the Mac's quota caches (percent, reset countdown, grey when stale).
+3. New thread in a Mac room with primary `codex`; post "say hi in one line" → reply appears; live output visible while running.
+4. Post "@claude summarize what codex said, then ask @codex to confirm" → a handoff to codex runs automatically.
+5. Stop during a running turn → turn cancelled, status back to open.
+6. Archive, then Unarchive.
+7. Phone width (375 px): sidebar drawer works.
+8. Open `https://macmini.brill-decibel.ts.net/tincan/` too: it also shows both machines (two-way link).
 
 - [ ] **Step 6: Commit any deployment fixes and report**
 
