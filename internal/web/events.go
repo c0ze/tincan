@@ -4,10 +4,12 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -144,43 +146,162 @@ func (s *Server) dispatcher(room rooms.Room) *thread.Dispatcher {
 	}
 	d := thread.New(s.opts(room))
 	if err := d.Acquire(); err != nil {
-		return nil // another process owns this room; retry next tick
+		if !errors.Is(err, thread.ErrNotOwner) {
+			s.logOnceLocked(room.ID, fmt.Sprintf("tincan web: %s: acquire: %v", room.Name, err))
+		}
+		return nil // another process owns this room, or acquiring failed; retry next tick
 	}
 	s.dispatchers[room.ID] = d
 	return d
 }
 
+// dropDispatcher closes and forgets room's cached dispatcher, if any, so
+// that a room later found missing and then recreated at the same path (and
+// so the same room ID) is re-acquired from scratch rather than reusing a
+// dispatcher whose lock file may no longer exist.
+func (s *Server) dropDispatcher(id string) {
+	s.mu.Lock()
+	d, ok := s.dispatchers[id]
+	if ok {
+		delete(s.dispatchers, id)
+	}
+	s.mu.Unlock()
+	if ok {
+		d.Close()
+	}
+}
+
+// logOnce writes msg to stderr unless it is identical to the last message
+// logged under key, so a persistent error condition (a stuck registry file,
+// a room whose dispatcher lock can't be acquired for a reason other than
+// another process owning it) logs once instead of once per tick.
+func (s *Server) logOnce(key, msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logOnceLocked(key, msg)
+}
+
+// logOnceLocked is logOnce for a caller that already holds s.mu.
+func (s *Server) logOnceLocked(key, msg string) {
+	if s.lastLog[key] == msg {
+		return
+	}
+	s.lastLog[key] = msg
+	fmt.Fprintln(os.Stderr, msg)
+}
+
+// runRoomPass is the default reconcileRoom: it acquires (or reuses) the
+// room's dispatcher and runs one Reconcile, plus a Janitor pass when due.
+func (s *Server) runRoomPass(ctx context.Context, room rooms.Room, janitor bool) {
+	d := s.dispatcher(room)
+	if d == nil {
+		return
+	}
+	if err := d.Reconcile(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "tincan web: %s: %v\n", room.Name, err)
+	}
+	if janitor {
+		if err := d.Janitor(ctx, s.cfg.IdleStop); err != nil {
+			fmt.Fprintf(os.Stderr, "tincan web: %s: %v\n", room.Name, err)
+		}
+	}
+}
+
 // tick runs one dispatch-and-notify iteration over all registered rooms.
+// Each room's reconcile-and-janitor pass runs in its own goroutine so that
+// a slow room (host.Up/host.Down each wait up to 10s) cannot delay
+// reconcile or SSE notes for every other room; a room whose previous pass
+// is still running is skipped for this tick rather than re-entered.
+// scan, which only stats files, always runs synchronously so notes keep
+// flowing even while a room's pass is in flight.
 func (s *Server) tick(ctx context.Context) {
 	list, err := s.cfg.Registry.List()
 	if err != nil {
+		s.logOnce("registry.list", fmt.Sprintf("tincan web: registry list: %v", err))
 		return
 	}
 	janitor := time.Since(s.lastJanitor) > time.Minute
+	if janitor {
+		s.lastJanitor = time.Now()
+	}
 	for _, room := range list {
 		if room.Missing {
+			s.dropDispatcher(room.ID)
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(room.Path, ".tincan")); err != nil {
 			continue // never used by tincan: nothing to coordinate
 		}
-		d := s.dispatcher(room)
-		if d == nil {
+		s.mu.Lock()
+		if s.inFlight[room.ID] {
+			s.mu.Unlock()
 			continue
 		}
-		if err := d.Reconcile(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "tincan web: %s: %v\n", room.Name, err)
-		}
-		if janitor {
-			if err := d.Janitor(ctx, s.cfg.IdleStop); err != nil {
-				fmt.Fprintf(os.Stderr, "tincan web: %s: %v\n", room.Name, err)
-			}
-		}
-	}
-	if janitor {
-		s.lastJanitor = time.Now()
+		s.inFlight[room.ID] = true
+		s.mu.Unlock()
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			defer func() {
+				s.mu.Lock()
+				delete(s.inFlight, room.ID)
+				s.mu.Unlock()
+			}()
+			s.reconcileRoom(ctx, room, janitor)
+		}()
 	}
 	s.scan(list)
+}
+
+// shouldTrigger reports whether an fsnotify event is significant enough to
+// arm an early tick. A host's log file is appended continuously while it
+// runs and carries no dispatch-relevant state change, so a plain Write on a
+// ".log" file is filtered out; every other event — including a Write
+// elsewhere, or a Create/Remove/Rename touching a ".log" file — triggers.
+func shouldTrigger(ev fsnotify.Event) bool {
+	if ev.Has(fsnotify.Write) && strings.HasSuffix(ev.Name, ".log") {
+		return false
+	}
+	return true
+}
+
+// debouncer coalesces a burst of triggers into a single delivery on C: arm
+// (re)starts a single pending timer, so a delivery only happens once window
+// has passed since the most recent call to arm. A storm of rapid fsnotify
+// events therefore collapses into at most one early tick, rather than one
+// tick per event or two ticks racing back-to-back.
+type debouncer struct {
+	window time.Duration
+	C      chan struct{}
+
+	mu    sync.Mutex
+	timer *time.Timer
+}
+
+func newDebouncer(window time.Duration) *debouncer {
+	return &debouncer{window: window, C: make(chan struct{}, 1)}
+}
+
+func (b *debouncer) arm() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.timer != nil {
+		b.timer.Stop()
+	}
+	b.timer = time.AfterFunc(b.window, func() {
+		select {
+		case b.C <- struct{}{}:
+		default:
+		}
+	})
+}
+
+func (b *debouncer) stop() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.timer != nil {
+		b.timer.Stop()
+	}
 }
 
 func (s *Server) loop(ctx context.Context) {
@@ -189,10 +310,20 @@ func (s *Server) loop(ctx context.Context) {
 	if err == nil {
 		defer watcher.Close()
 		events = watcher.Events
+		// Errors must be drained continuously: fsnotify's internal
+		// goroutine blocks sending to it, so a single unread error would
+		// otherwise wedge event delivery for the rest of the process.
+		go func() {
+			for e := range watcher.Errors {
+				fmt.Fprintf(os.Stderr, "tincan web: watch: %v\n", e)
+			}
+		}()
 	}
 	watched := map[string]bool{}
 	ticker := time.NewTicker(s.cfg.Tick)
 	defer ticker.Stop()
+	debounce := newDebouncer(500 * time.Millisecond)
+	defer debounce.stop()
 	for {
 		s.tick(ctx)
 		if watcher != nil {
@@ -210,19 +341,25 @@ func (s *Server) loop(ctx context.Context) {
 				}
 			}
 		}
-		select {
-		case <-ctx.Done():
-			s.mu.Lock()
-			for _, d := range s.dispatchers {
-				d.Close()
-			}
-			s.mu.Unlock()
-			return
-		case <-ticker.C:
-		case <-events:
-			time.Sleep(100 * time.Millisecond) // coalesce bursts
-			for len(events) > 0 {
-				<-events
+	waitForTrigger:
+		for {
+			select {
+			case <-ctx.Done():
+				s.wg.Wait() // let in-flight room passes finish before closing their dispatchers
+				s.mu.Lock()
+				for _, d := range s.dispatchers {
+					d.Close()
+				}
+				s.mu.Unlock()
+				return
+			case <-ticker.C:
+				break waitForTrigger
+			case <-debounce.C:
+				break waitForTrigger
+			case ev := <-events:
+				if shouldTrigger(ev) {
+					debounce.arm()
+				}
 			}
 		}
 	}

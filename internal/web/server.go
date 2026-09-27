@@ -65,7 +65,15 @@ type Server struct {
 
 	mu          sync.Mutex
 	dispatchers map[string]*thread.Dispatcher // room ID → owned dispatcher
+	inFlight    map[string]bool               // room ID → a reconcile/janitor pass is running
+	lastLog     map[string]string             // dedup key → last message logged to stderr
 	lastJanitor time.Time                     // touched only by tick
+	wg          sync.WaitGroup                // tracks room passes spawned by tick, for a clean shutdown
+
+	// reconcileRoom runs one room's Reconcile-and-Janitor pass; it defaults
+	// to runRoomPass and is overridden in tests to exercise tick's
+	// concurrency without a real dispatcher.
+	reconcileRoom func(ctx context.Context, room rooms.Room, janitor bool)
 
 	// createMu serializes thread creation across all rooms, closing the
 	// check-then-act race between the client_id dedup lookup and
@@ -103,7 +111,8 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, base: base, mux: http.NewServeMux(), index: idx, hub: newHub(), peers: map[string]*peer{}, dispatchers: map[string]*thread.Dispatcher{}}
+	s := &Server{cfg: cfg, base: base, mux: http.NewServeMux(), index: idx, hub: newHub(), peers: map[string]*peer{}, dispatchers: map[string]*thread.Dispatcher{}, inFlight: map[string]bool{}, lastLog: map[string]string{}}
+	s.reconcileRoom = s.runRoomPass
 	for _, p := range cfg.Peers {
 		pp, err := newPeer(p)
 		if err != nil {
