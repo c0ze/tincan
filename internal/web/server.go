@@ -66,6 +66,13 @@ type Server struct {
 	mu          sync.Mutex
 	dispatchers map[string]*thread.Dispatcher // room ID → owned dispatcher
 	lastJanitor time.Time                     // touched only by tick
+
+	// createMu serializes thread creation across all rooms, closing the
+	// check-then-act race between the client_id dedup lookup and
+	// thread.Create in createThread (thread.Create always makes a fresh
+	// thread directory, so two concurrent requests for the same client_id
+	// would otherwise both see "not found" and both create one).
+	createMu sync.Mutex
 }
 
 func New(cfg Config) (*Server, error) {
@@ -198,12 +205,32 @@ func (s *Server) fail(w http.ResponseWriter, status int, err error) {
 	s.writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
-func readJSON(r *http.Request, v any) error {
-	data, err := io.ReadAll(io.LimitReader(r.Body, thread.MaxPostBytes+16<<10))
+// readJSON decodes the JSON request body into v, capping the body at limit
+// bytes via http.MaxBytesReader rather than truncating it outright: JSON
+// escaping can grow a legal payload well past its decoded size (\n, \t, \",
+// \\ cost 2 bytes each; other control characters cost 6), so a hard byte cap
+// on the raw body must leave headroom for that, and callers size limit
+// accordingly (see postMessage).
+func readJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		return err
 	}
 	return json.Unmarshal(data, v)
+}
+
+// failBody classifies a readJSON error: an oversized body is reported as 413
+// (distinct from a merely malformed one, which is a client bug and stays
+// 400), detected via the *http.MaxBytesError sentinel readJSON's underlying
+// reader produces once the cap is exceeded.
+func (s *Server) failBody(w http.ResponseWriter, err error) {
+	var mbe *http.MaxBytesError
+	if errors.As(err, &mbe) {
+		s.fail(w, http.StatusRequestEntityTooLarge, errors.New("request body too large"))
+		return
+	}
+	s.fail(w, http.StatusBadRequest, err)
 }
 
 // DefaultListen is the platform default listen address.

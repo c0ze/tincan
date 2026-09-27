@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/c0ze/tincan/v2/internal/dispatch"
 	"github.com/c0ze/tincan/v2/internal/fsutil"
@@ -22,6 +24,18 @@ import (
 )
 
 var errNotFound = errors.New("not found")
+
+const (
+	// apiBodyLimit bounds every JSON request body except postMessage's.
+	apiBodyLimit = 64 << 10
+	// postBodyLimit leaves headroom for JSON string-escaping: a legal
+	// 128 KiB (thread.MaxPostBytes) message can encode up to 6x larger when
+	// it is mostly control characters, plus a small margin for the rest of
+	// the envelope (client_id, JSON punctuation).
+	postBodyLimit = 6*thread.MaxPostBytes + 16<<10
+	// logTailBytes is how much of an agent log agentLog returns.
+	logTailBytes = 64 << 10
+)
 
 func (s *Server) apiRoutes() {
 	s.mux.HandleFunc("GET /api/rooms", s.listRooms)
@@ -124,7 +138,11 @@ func (s *Server) addRoom(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Path string `json:"path"`
 	}
-	if err := readJSON(r, &in); err != nil || !filepath.IsAbs(in.Path) {
+	if err := readJSON(w, r, apiBodyLimit, &in); err != nil {
+		s.failBody(w, err)
+		return
+	}
+	if !filepath.IsAbs(in.Path) {
 		s.fail(w, http.StatusBadRequest, errors.New("expected {\"path\": \"/absolute/dir\"}"))
 		return
 	}
@@ -140,8 +158,8 @@ func (s *Server) patchRoom(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Hidden bool `json:"hidden"`
 	}
-	if err := readJSON(r, &in); err != nil {
-		s.fail(w, http.StatusBadRequest, err)
+	if err := readJSON(w, r, apiBodyLimit, &in); err != nil {
+		s.failBody(w, err)
 		return
 	}
 	if err := s.cfg.Registry.SetHidden(r.PathValue("rid"), in.Hidden); err != nil {
@@ -225,18 +243,13 @@ func (s *Server) createThread(w http.ResponseWriter, r *http.Request) {
 		Primary  string `json:"primary"`
 		ClientID string `json:"client_id"`
 	}
-	if err := readJSON(r, &in); err != nil || strings.TrimSpace(in.Title) == "" || in.Primary == "" {
-		s.fail(w, http.StatusBadRequest, errors.New("expected {\"title\", \"primary\"}"))
+	if err := readJSON(w, r, apiBodyLimit, &in); err != nil {
+		s.failBody(w, err)
 		return
 	}
-	if in.ClientID != "" {
-		metas, _ := thread.List(room.Path)
-		for _, m := range metas {
-			if m.ClientID == in.ClientID {
-				s.writeJSON(w, http.StatusCreated, m)
-				return
-			}
-		}
+	if strings.TrimSpace(in.Title) == "" || in.Primary == "" {
+		s.fail(w, http.StatusBadRequest, errors.New("expected {\"title\", \"primary\"}"))
+		return
 	}
 	res, err := s.dispatcherFor(room).Resolver()
 	if err != nil {
@@ -247,12 +260,35 @@ func (s *Server) createThread(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadRequest, fmt.Errorf("agent %q is not available on %s", in.Primary, s.cfg.Machine))
 		return
 	}
+
+	// createMu serializes the dedup lookup and thread.Create below: without
+	// it, two concurrent requests for the same client_id could both find no
+	// existing thread and both create one (thread.Create always makes a
+	// fresh directory; there is no per-client_id lock to arbitrate between
+	// distinct not-yet-created threads the way Dispatcher.Post's per-thread
+	// journal lock arbitrates duplicate messages on an existing thread).
+	s.createMu.Lock()
+	defer s.createMu.Unlock()
+
+	if in.ClientID != "" {
+		metas, _ := thread.List(room.Path)
+		for _, m := range metas {
+			if m.ClientID == in.ClientID {
+				s.writeJSON(w, http.StatusCreated, m)
+				return
+			}
+		}
+	}
 	t, err := thread.Create(room.Path, strings.TrimSpace(in.Title), in.Primary, in.ClientID, s.cfg.ChainBudget)
 	if err != nil {
 		s.fail(w, http.StatusInternalServerError, err)
 		return
 	}
-	snap, _ := t.Snapshot()
+	snap, err := t.Snapshot()
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, err)
+		return
+	}
 	s.hub.publish(note{Kind: "thread", Room: room.ID, Thread: t.ID})
 	s.writeJSON(w, http.StatusCreated, snap.Meta)
 }
@@ -295,8 +331,8 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		Text     string `json:"text"`
 		ClientID string `json:"client_id"`
 	}
-	if err := readJSON(r, &in); err != nil {
-		s.fail(w, http.StatusBadRequest, err)
+	if err := readJSON(w, r, postBodyLimit, &in); err != nil {
+		s.failBody(w, err)
 		return
 	}
 	m, err := s.dispatcherFor(room).Post(r.Context(), t.ID, in.Text, in.ClientID)
@@ -336,8 +372,8 @@ func (s *Server) archiveThread(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Archived bool `json:"archived"`
 	}
-	if err := readJSON(r, &in); err != nil {
-		s.fail(w, http.StatusBadRequest, err)
+	if err := readJSON(w, r, apiBodyLimit, &in); err != nil {
+		s.failBody(w, err)
 		return
 	}
 	if err := s.dispatcherFor(room).SetArchived(r.Context(), t.ID, in.Archived); err != nil {
@@ -345,7 +381,11 @@ func (s *Server) archiveThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.hub.publish(note{Kind: "thread", Room: room.ID, Thread: t.ID})
-	snap, _ := t.Snapshot()
+	snap, err := t.Snapshot()
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, err)
+		return
+	}
 	s.writeJSON(w, http.StatusOK, snap.Meta)
 }
 
@@ -419,7 +459,7 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 			v.From = rec.Envelope.From
 		}
 		if len(v.Result) > 2048 {
-			v.Result = v.Result[:2048] + "…"
+			v.Result = truncateUTF8(v.Result, 2048) + "…"
 		}
 		reqs = append(reqs, v)
 	}
@@ -452,6 +492,23 @@ func (s *Server) progress(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{"events": events, "next_cursor": next})
 }
 
+// truncateUTF8 returns the longest prefix of s that is at most n bytes and
+// does not split a multi-byte rune.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// agentLog streams the tail of a hosted listener's log. Host logs are never
+// rotated and can grow well past logTailBytes, so this seeks to the last
+// logTailBytes instead of fsutil.ReadFile's whole-file read (which would
+// both reject any log over its size ceiling and, for everything under that
+// ceiling, load the entire file just to keep its last chunk).
 func (s *Server) agentLog(w http.ResponseWriter, r *http.Request) {
 	room, ok := s.room(w, r)
 	if !ok {
@@ -462,14 +519,30 @@ func (s *Server) agentLog(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadRequest, err)
 		return
 	}
-	data, err := fsutil.ReadFile(host.LogPath(room.Path, name), 64<<20)
+	f, err := fsutil.OpenFile(host.LogPath(room.Path, name), os.O_RDONLY, 0)
 	if err != nil {
-		s.fail(w, http.StatusNotFound, errors.New("no log for this agent"))
+		if os.IsNotExist(err) {
+			s.fail(w, http.StatusNotFound, errors.New("no log for this agent"))
+			return
+		}
+		s.fail(w, http.StatusInternalServerError, err)
 		return
 	}
-	if len(data) > 64<<10 {
-		data = data[len(data)-64<<10:]
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	size := info.Size()
+	offset := int64(0)
+	if size > logTailBytes {
+		offset = size - logTailBytes
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		s.fail(w, http.StatusInternalServerError, err)
+		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write(data)
+	io.CopyN(w, f, size-offset)
 }
