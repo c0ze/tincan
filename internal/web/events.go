@@ -9,17 +9,19 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/c0ze/tincan/v2/internal/quota"
 	"github.com/c0ze/tincan/v2/internal/rooms"
 	"github.com/c0ze/tincan/v2/internal/thread"
 	"github.com/fsnotify/fsnotify"
 )
 
 type note struct {
-	Kind   string `json:"kind"` // thread | messages | activity | peer
+	Kind   string `json:"kind"` // thread | messages | activity | peer | quota
 	Room   string `json:"room,omitempty"`
 	Thread string `json:"thread,omitempty"`
 	Seq    int64  `json:"seq,omitempty"`
@@ -112,6 +114,13 @@ func (s *Server) scan(list []rooms.Room) {
 			next["t:"+room.ID+":"+m.ID] = statFP(filepath.Join(dir, "events.jsonl")) + statFP(filepath.Join(dir, "thread.json"))
 		}
 	}
+	if files, err := quota.Files(s.cfg.QuotaDir); err == nil {
+		fp := ""
+		for _, id := range sortedKeys(files) {
+			fp += id + "=" + statFP(files[id]) + ";"
+		}
+		next["q:"] = fp
+	}
 	s.hub.mu.Lock()
 	prev := s.hub.fp
 	s.hub.fp = next
@@ -131,11 +140,23 @@ func (s *Server) scan(list []rooms.Room) {
 		case 't':
 			rid, tid := key[2:14], key[15:]
 			notes = append(notes, note{Kind: "messages", Room: rid, Thread: tid})
+		case 'q':
+			notes = append(notes, note{Kind: "quota"})
 		}
 	}
 	for _, n := range notes {
 		s.hub.publish(n)
 	}
+}
+
+// sortedKeys returns m's keys in sorted order, for a stable fingerprint.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (s *Server) dispatcher(room rooms.Room) *thread.Dispatcher {
@@ -251,6 +272,10 @@ func (s *Server) tick(ctx context.Context) {
 		}()
 	}
 	s.scan(list)
+	if time.Since(s.lastQuotaNote) >= time.Minute {
+		s.lastQuotaNote = time.Now()
+		s.hub.publish(note{Kind: "quota"})
+	}
 }
 
 // shouldTrigger reports whether an fsnotify event is significant enough to

@@ -2,12 +2,14 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/c0ze/tincan/v2/internal/dispatch"
 	"github.com/c0ze/tincan/v2/internal/host"
@@ -315,5 +317,24 @@ func TestAgentLogReturnsExactTail(t *testing.T) {
 	want := content[len(content)-logTailBytes:]
 	if rec.Body.String() != want {
 		t.Fatalf("got %d bytes, want %d bytes (exact tail mismatch)", rec.Body.Len(), len(want))
+	}
+}
+
+func TestQuotasEndpoint(t *testing.T) {
+	s, _ := apiServer(t)
+	dir := t.TempDir()
+	s.cfg.QuotaDir = dir
+	s.cfg.QuotaConfig = filepath.Join(dir, "none.json")
+	now := time.Now()
+	os.WriteFile(filepath.Join(dir, "claude-quota.json"), []byte(fmt.Sprintf(`{"percent": 97, "reset_at": %d, "fetched_at": %d}`, now.Add(time.Hour).Unix(), now.Unix())), 0o600)
+	rec := do(t, s.Handler(), "GET", "/api/quotas", "", ownerHdr())
+	var got []struct {
+		ID      string
+		State   string
+		Percent float64
+	}
+	decode(t, rec.Body.String(), &got)
+	if len(got) != 1 || got[0].ID != "claude" || got[0].State != "ok" || got[0].Percent != 97 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 }

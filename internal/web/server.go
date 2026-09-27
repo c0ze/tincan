@@ -24,6 +24,7 @@ import (
 	"github.com/c0ze/tincan/v2/internal/buildinfo"
 	"github.com/c0ze/tincan/v2/internal/dispatch"
 	"github.com/c0ze/tincan/v2/internal/fsutil"
+	"github.com/c0ze/tincan/v2/internal/quota"
 	"github.com/c0ze/tincan/v2/internal/rooms"
 	"github.com/c0ze/tincan/v2/internal/thread"
 )
@@ -53,6 +54,8 @@ type Config struct {
 	Tick        time.Duration
 	Registry    *rooms.Registry
 	Dispatch    dispatch.Options // Executable and Presets; Room is set per room
+	QuotaDir    string           // default quota.DefaultCacheDir()
+	QuotaConfig string           // default quota.DefaultConfigPath()
 }
 
 type Server struct {
@@ -63,12 +66,13 @@ type Server struct {
 	hub   *hub
 	peers map[string]*peer
 
-	mu          sync.Mutex
-	dispatchers map[string]*thread.Dispatcher // room ID → owned dispatcher
-	inFlight    map[string]bool               // room ID → a reconcile/janitor pass is running
-	lastLog     map[string]string             // dedup key → last message logged to stderr
-	lastJanitor time.Time                     // touched only by tick
-	wg          sync.WaitGroup                // tracks room passes spawned by tick, for a clean shutdown
+	mu            sync.Mutex
+	dispatchers   map[string]*thread.Dispatcher // room ID → owned dispatcher
+	inFlight      map[string]bool               // room ID → a reconcile/janitor pass is running
+	lastLog       map[string]string             // dedup key → last message logged to stderr
+	lastJanitor   time.Time                     // touched only by tick
+	lastQuotaNote time.Time                     // touched only by tick
+	wg            sync.WaitGroup                // tracks room passes spawned by tick, for a clean shutdown
 
 	// reconcileRoom runs one room's Reconcile-and-Janitor pass; it defaults
 	// to runRoomPass and is overridden in tests to exercise tick's
@@ -98,6 +102,12 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.IdleStop <= 0 {
 		cfg.IdleStop = 30 * time.Minute
+	}
+	if cfg.QuotaDir == "" {
+		cfg.QuotaDir = quota.DefaultCacheDir()
+	}
+	if cfg.QuotaConfig == "" {
+		cfg.QuotaConfig = quota.DefaultConfigPath()
 	}
 	trimmed := strings.Trim(cfg.PublicPath, "/")
 	if !publicPathRe.MatchString(trimmed) {

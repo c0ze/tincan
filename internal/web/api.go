@@ -17,6 +17,7 @@ import (
 	"github.com/c0ze/tincan/v2/internal/dispatch"
 	"github.com/c0ze/tincan/v2/internal/fsutil"
 	"github.com/c0ze/tincan/v2/internal/host"
+	"github.com/c0ze/tincan/v2/internal/quota"
 	"github.com/c0ze/tincan/v2/internal/request"
 	"github.com/c0ze/tincan/v2/internal/rooms"
 	"github.com/c0ze/tincan/v2/internal/spool"
@@ -52,6 +53,16 @@ func (s *Server) apiRoutes() {
 	s.mux.HandleFunc("GET /api/rooms/{rid}/activity", s.activity)
 	s.mux.HandleFunc("GET /api/rooms/{rid}/requests/{id}/progress", s.progress)
 	s.mux.HandleFunc("GET /api/rooms/{rid}/agents/{name}/log", s.agentLog)
+	s.mux.HandleFunc("GET /api/quotas", s.apiQuotas)
+}
+
+func (s *Server) apiQuotas(w http.ResponseWriter, r *http.Request) {
+	entries, err := quota.Load(s.cfg.QuotaDir, s.cfg.QuotaConfig, time.Now())
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, entries)
 }
 
 func (s *Server) roomByID(id string) (rooms.Room, error) {
