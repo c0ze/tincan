@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -191,21 +192,30 @@ func TestConcurrentClaimsKeepOneOwnerWhileUnacknowledged(t *testing.T) {
 		}
 	}
 	claimed := make(chan *Delivery, count*2)
+	// Claimers stop once every message is claimed. A short per-claim timeout
+	// would race filesystem setup on slow runners before the queue is read.
+	ctx, done := context.WithCancel(context.Background())
+	defer done()
+	var total atomic.Int32
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for {
-				d, err := sp.ClaimContext(context.Background(), "b", 50*time.Millisecond)
-				if errors.Is(err, ErrTimeout) {
+				d, err := sp.ClaimContext(ctx, "b", 10*time.Second)
+				if errors.Is(err, context.Canceled) {
 					return
 				}
 				if err != nil {
 					t.Errorf("Claim: %v", err)
+					done()
 					return
 				}
 				claimed <- d
+				if total.Add(1) == count {
+					done()
+				}
 			}
 		}()
 	}

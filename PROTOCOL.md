@@ -202,9 +202,13 @@ tincan down codex --room "$ROOM"        # down name=codex
   known preset, else `--exec` is required → exit 2), checks the agent binary
   resolves (exit 1 if not) — on `PATH`, then in common per-user bin directories
   (`~/.local/bin`, mise/asdf shims, Homebrew, Volta, Bun, npm-global, Go); an
-  absolute path that no longer exists falls back to its base name — starts `serve … --daemon` detached (own
-  session, stdio on the host log) and waits up to `--wait` seconds for authenticated
-  readiness. A listener can become ready while already processing queued work.
+  absolute path that no longer exists falls back to its base name — then starts
+  `serve … --daemon` detached (own session, stdio on the host log) and waits up
+  to `--wait` seconds for authenticated readiness. A listener can become ready
+  while already processing queued work. Agents never inherit the calling
+  harness's session variables (Claude Code's `CLAUDECODE`, session ID and
+  messaging socket, `GROK_SESSION_ID`, …), so each hosted agent starts its own
+  session; credentials and provider configuration are passed through.
   Failure reports the host log path.
 - `serve` is the loop itself, in the foreground — handy for debugging a
   preset (`Ctrl-C` stops it). `--daemon` is what `up` passes.

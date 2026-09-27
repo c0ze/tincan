@@ -78,6 +78,24 @@ func TestRunCapturesStdoutAndExitZero(t *testing.T) {
 	}
 }
 
+func TestRunDropsParentAgentSessionEnv(t *testing.T) {
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "parent-session")
+	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/parent.sock")
+	t.Setenv("GROK_SESSION_ID", "parent-grok")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "user-config")
+	t.Setenv("TINCAN_KEEP_ME", "yes")
+	res := Run(context.Background(), RunSpec{Argv: fakeExec("env", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID",
+		"CLAUDE_CODE_MESSAGING_SOCKET", "GROK_SESSION_ID", "CLAUDE_CODE_OAUTH_TOKEN", "TINCAN_KEEP_ME"), Dir: t.TempDir()})
+	if res.Err != nil || res.ExitCode != 0 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	if got, want := string(res.Stdout), "CLAUDE_CODE_OAUTH_TOKEN=user-config\nTINCAN_KEEP_ME=yes\n"; got != want {
+		t.Fatalf("agent environment:\n%s\nwant only:\n%s", got, want)
+	}
+}
+
 func TestRunPipesStdinBody(t *testing.T) {
 	t.Setenv("TINCAN_FAKE_AGENT", "1")
 	body := "line1\nline2"

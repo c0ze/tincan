@@ -43,6 +43,7 @@ func canonicalTempDir(t *testing.T) string {
 //	sleep <sec> [pidfile]   write own pid to pidfile, then sleep <sec>
 //	outfile <path> <text…>  write "file: <text>" to path, stdout "noise on stdout"
 //	cwd                     stdout os.Getwd()
+//	env <name…>             stdout "<name>=<value>\n" for each set variable
 func fakeAgent(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "fake agent: no mode")
@@ -97,6 +98,12 @@ func fakeAgent(args []string) int {
 	case "cwd":
 		wd, _ := os.Getwd()
 		fmt.Print(wd)
+	case "env":
+		for _, name := range args[1:] {
+			if v, ok := os.LookupEnv(name); ok {
+				fmt.Printf("%s=%s\n", name, v)
+			}
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "fake agent: unknown mode %q\n", args[0])
 		return 2

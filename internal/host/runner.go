@@ -94,6 +94,7 @@ func Run(ctx context.Context, spec RunSpec) Result {
 	}
 	cmd := exec.Command(path, spec.Argv[1:]...)
 	cmd.Dir = spec.Dir
+	cmd.Env = agentEnv()
 	cmd.SysProcAttr = childAttr()
 	if spec.Stdin != nil {
 		cmd.Stdin = strings.NewReader(*spec.Stdin)
