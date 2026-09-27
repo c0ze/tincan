@@ -400,8 +400,3 @@ func (d *Dispatcher) handoffs(ctx context.Context, t *Thread, m Message) error {
 	}
 	return d.hook("after-handoffs")
 }
-
-// finishStop is completed in Task 7 (Stop/archive); until then it is a no-op
-// so the package compiles and open threads simply do not advance while
-// stopping or archiving.
-func (d *Dispatcher) finishStop(ctx context.Context, t *Thread, snap Snapshot) error { return nil }
