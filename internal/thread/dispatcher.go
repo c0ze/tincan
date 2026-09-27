@@ -71,15 +71,29 @@ func (d *Dispatcher) hook(point string) error {
 	return nil
 }
 
-func (d *Dispatcher) Resolver() Resolver {
-	presets, _ := d.Opts.PresetMap()
+func (d *Dispatcher) Resolver() (Resolver, error) {
+	presets, err := d.Opts.PresetMap()
+	if err != nil {
+		return Resolver{}, err
+	}
 	return Resolver{Room: d.Opts.Room, Presets: presets, Alive: func(name string) (host.State, bool) {
 		return host.Existing(context.Background(), d.Opts.Room, name)
-	}}
+	}}, nil
 }
 
 func (d *Dispatcher) system(tx *Tx, text, chain string) {
 	tx.Append(Event{Kind: KindMessage, Author: "tincan", Role: RoleSystem, Text: text, Chain: chain})
+}
+
+// chainHasSuggestion reports whether chain already has a suggested handoff,
+// so the "budget reached" notice is posted only once per chain.
+func chainHasSuggestion(snap *Snapshot, chain string) bool {
+	for _, m := range snap.Messages {
+		if m.Chain == chain && m.State == StateSuggested {
+			return true
+		}
+	}
+	return false
 }
 
 func unresolvedNote(names []string) string {
@@ -103,7 +117,10 @@ func (d *Dispatcher) Post(ctx context.Context, tid, text, clientID string) (Mess
 	if err != nil {
 		return Message{}, err
 	}
-	res := d.Resolver()
+	res, err := d.Resolver()
+	if err != nil {
+		return Message{}, err
+	}
 	var out Message
 	err = t.Update(ctx, func(tx *Tx) error {
 		if clientID != "" {
@@ -163,7 +180,14 @@ func (d *Dispatcher) planTurn(t *Thread, tx *Tx, tg Target, trigger Message, cha
 		if c != nil && c.Stopped {
 			return "", nil
 		}
-		if c != nil && c.Used >= tx.Meta.Budget {
+		used := 0
+		if c != nil {
+			used = c.Used
+		}
+		if used >= tx.Meta.Budget {
+			if !chainHasSuggestion(tx.Snap, chain) {
+				d.system(tx, fmt.Sprintf("Chain budget of %d reached; further handoffs are suggestions.", tx.Meta.Budget), chain)
+			}
 			ev := tx.Append(Event{Kind: KindMessage, Author: "tincan", Role: RoleSystem, ReplyTo: trigger.ID, Chain: chain,
 				Text: fmt.Sprintf("@%s please pick up the handoff from %s above.", tg.Mention, trigger.Author)})
 			tx.Append(Event{Kind: KindState, Message: ev.ID, State: StateSuggested})
@@ -312,6 +336,9 @@ func (d *Dispatcher) collect(ctx context.Context, t *Thread, m Message) error {
 	r, err := request.Poll(ctx, d.Opts.Room, m.RequestID)
 	if errors.Is(err, os.ErrNotExist) {
 		return t.Update(ctx, func(tx *Tx) error {
+			if cur, _ := tx.Snap.Message(m.ID); cur.State != StateRunning {
+				return nil
+			}
 			tx.Append(Event{Kind: KindState, Message: m.ID, State: StateUncollectable, Text: "result expired: the request record no longer exists"})
 			return nil
 		})
@@ -337,7 +364,10 @@ func (d *Dispatcher) collect(ctx context.Context, t *Thread, m Message) error {
 
 func (d *Dispatcher) handoffs(ctx context.Context, t *Thread, m Message) error {
 	names := ParseMentions(m.Text)
-	res := d.Resolver()
+	res, err := d.Resolver()
+	if err != nil {
+		return err
+	}
 	if err := t.Update(ctx, func(tx *Tx) error {
 		cur, _ := tx.Snap.Message(m.ID)
 		if cur.Handoffs {

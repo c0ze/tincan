@@ -43,10 +43,11 @@ func (s *SessionRun) Reply(spec RunSpec, res Result) (string, error) {
 		return PostProcess(s.record.Provider, ReplyBody(spec, res)), nil
 	}
 	if s.Preset.Session != "persistent" {
-		// An agent that prints nothing on a normal exit is a valid, if terse,
-		// answer (spec review focus: "an agent that prints nothing must
-		// produce a done message with empty text, not a stuck running card").
-		return ReplyBody(spec, res), nil
+		body := ReplyBody(spec, res)
+		if strings.TrimSpace(body) == "" {
+			return "", errors.New("agent returned an empty reply")
+		}
+		return body, nil
 	}
 	if err := s.parser.flush(); err != nil {
 		return "", err
