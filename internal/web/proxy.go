@@ -3,11 +3,15 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -32,6 +36,8 @@ func newPeer(p Peer) (*peer, error) {
 	transport := &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
 		ResponseHeaderTimeout: 30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
 	}
 	pp := &peer{name: p.Name, base: base, client: &http.Client{Transport: transport, Timeout: 5 * time.Second}}
 	pp.proxy = &httputil.ReverseProxy{
@@ -41,14 +47,30 @@ func newPeer(p Peer) (*peer, error) {
 			rest := pr.In.PathValue("rest")
 			pr.Out.URL = base.ResolveReference(&url.URL{Path: "api/" + rest, RawQuery: pr.In.URL.RawQuery})
 			pr.Out.Host = base.Host
-			for _, h := range []string{"Origin", "Cookie", "Referer", "Tailscale-User-Login", "Tailscale-User-Name", "Tailscale-User-Profile-Pic", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto"} {
+			for h := range pr.Out.Header {
+				if strings.HasPrefix(h, "Tailscale-") {
+					pr.Out.Header.Del(h)
+				}
+			}
+			for _, h := range []string{"Origin", "Cookie", "Referer", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Authorization", "X-Real-Ip"} {
 				pr.Out.Header.Del(h)
 			}
 			pr.Out.Header.Set("X-Tincan-Request", "1")
 		},
+		// ErrorHandler never flips the health flag: it fires for every
+		// round-trip error, including a client-cancelled fetch or a slow
+		// endpoint hitting ResponseHeaderTimeout — neither means the peer
+		// is down, and checkPeers is the sole owner of online. It's quiet
+		// on cancellation (the client going away isn't a peer problem)
+		// and otherwise logs to stderr and replies with the API's usual
+		// JSON error shape.
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			pp.online.Store(false)
-			http.Error(w, "peer "+p.Name+" is offline", http.StatusBadGateway)
+			if !errors.Is(err, context.Canceled) && r.Context().Err() == nil {
+				fmt.Fprintf(os.Stderr, "tincan web: peer %s: proxy error: %v\n", p.Name, err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			json.NewEncoder(w).Encode(map[string]string{"error": "peer " + p.Name + " is unreachable"})
 		},
 	}
 	return pp, nil
@@ -61,13 +83,17 @@ func (s *Server) proxyPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rest := r.PathValue("rest")
+	if strings.HasPrefix(rest, "/") || strings.Contains(rest, "//") {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
 	for _, seg := range strings.Split(rest, "/") {
 		if seg == ".." || seg == "." {
 			http.Error(w, "invalid path", http.StatusBadRequest)
 			return
 		}
 	}
-	if strings.HasPrefix(rest, "peers/") {
+	if strings.HasPrefix(strings.TrimLeft(rest, "/"), "peers/") {
 		http.Error(w, "peers are not chained", http.StatusBadRequest)
 		return
 	}
@@ -81,6 +107,7 @@ func (s *Server) checkPeers(ctx context.Context) {
 		resp, err := p.client.Do(req)
 		online := err == nil && resp.StatusCode == http.StatusOK
 		if resp != nil {
+			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 		}
 		cancel()
