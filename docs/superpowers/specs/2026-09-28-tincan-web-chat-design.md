@@ -134,8 +134,9 @@ Files in the room, under `.tincan/threads/<tid>/` (`<tid>`: 8 random hex):
   `--chain-budget`, 6), `listeners` (the per-thread listeners this thread
   created, with preset and session generation; used for janitor, Stop and
   archive — ownership is never inferred from names).
-- `events.jsonl` — the append-only journal. Every line is one event with a
-  strictly increasing `seq`. Event kinds:
+- `events.jsonl` — the append-only journal. Every line is one committed
+  transaction: a JSON array of events, each with a strictly increasing `seq`
+  (§15.3). Event kinds:
   - `message` — creates a message: immutable `id`, `n` (display order, assigned
     at creation), `time`, `author`, `role` (`user|agent|system`), `text`,
     `reply_to` (message id), `chain` id.
@@ -543,19 +544,32 @@ Codex review (2026-09-28) and resolution:
     `short_percent` (reset = `fetched_at + reset_secs`; no short reset time).
   The normalized entry keeps nullable values and records last success
   (`fetched_at`) and last attempt (`attempted_at`, or `fetched_at` when absent)
-  separately, plus `error`. Timestamps outside 2020-01-01 … now + 400 days and
-  percentages outside 0–1000 are treated as missing.
-- **State**, recomputed on every read: `error` when the last attempt failed and
-  is newer than the last success; `stale` when the last success is older than
-  15 minutes or its reset time has passed without a newer success; otherwise
-  `ok`. Bars are red at ≥ 95 %.
+  separately, plus `error`. Observation timestamps (`fetched_at`,
+  `attempted_at`) outside 2020-01-01 … now + 5 minutes, reset timestamps
+  outside 2020-01-01 … now + 400 days, and percentages outside 0–1000 are
+  treated as missing. A short window whose reset time has passed has no
+  current reading (percent and reset cleared); a legacy short percent without a
+  reset time is shown without a countdown.
+- **State**, recomputed on every read, first match wins:
+
+  | State | Condition |
+  |---|---|
+  | `error` | `error` is set and the last attempt is at or after the last success (or there is no success). |
+  | `unknown` | no valid last success or no valid weekly percent. |
+  | `stale` | last success older than 15 minutes, or the weekly reset time has passed and the last success predates it. |
+  | `ok` | otherwise. |
+
+  Bars are red at ≥ 95 %.
 - **Mapping.** Optional `~/.config/tincan/quotas.json`:
   `{"codex-default": {"label": "Codex gand", "presets": ["codex"]}, …}`.
   Without it, `codex-default` maps to preset `codex` and every other entry to
   the preset with the same ID. Phase 2 extends entries with `blocking`.
-- **API.** `GET api/quotas` → `[{id, label, presets, percent, reset_at,
-  short_percent, short_reset_at, fetched_at, attempted_at, error, state}]`,
-  also through the hub for the peer.
+- **API.** `GET api/quotas` → `[{id, label, presets, explicit, blocking,
+  percent, reset_at, short_percent, short_reset_at, fetched_at, attempted_at,
+  error, state}]`, also through the hub for the peer. `explicit` is true when
+  the preset mapping came from `quotas.json`; `blocking` (phase 2) is copied
+  from it. When several entries map to one preset, the UI uses the explicit
+  one.
 - **Updates.** The change scanner fingerprints the cache files; a `quota` note
   is also published every minute so time-based staleness reaches the UI
   without file changes.
@@ -567,8 +581,15 @@ Codex review (2026-09-28) and resolution:
   staleness transitions over time with a fixed clock, mapping defaults, the
   per-minute note.
 
-### 15.3 Dispatcher lock and registry exclusion
+### 15.3 Dispatcher lock, registry exclusion, atomic transactions
 
 - The per-room dispatcher lock is `.tincan/dispatcher.lock` (not under
-  `threads/`), so phase 2 review coordination shares it.
-- `rooms.Touch` ignores paths under `<state dir>/reviews/`.
+  `threads/`), so phase 2 review coordination shares it. `tincan web` takes it
+  for every registered room that has a `.tincan/` directory, whether or not it
+  has threads yet.
+- The registry never inserts paths under `<state dir>/reviews/`; the check sits
+  at the single insertion point used by `Touch`, `Add` and `Import`, and `Add`
+  reports it as an error.
+- Each thread journal line is one committed transaction (a JSON array of the
+  transaction's events), so a torn write drops the whole transaction and never
+  leaves part of one visible (§5).

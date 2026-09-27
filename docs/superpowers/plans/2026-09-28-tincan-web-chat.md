@@ -236,6 +236,13 @@ func TestTouchIgnoresReviewWorkspaces(t *testing.T) {
 	if list, _ := r.List(); len(list) != 0 {
 		t.Fatalf("review workspace registered: %+v", list)
 	}
+	if _, err := r.Add(ws); err == nil {
+		t.Fatal("Add accepted a review workspace")
+	}
+	os.MkdirAll(filepath.Join(state, "reviews", "workspaces", "rv-2-0", ".tincan"), 0o700)
+	if n, _ := r.Import([]string{state}, 5); n != 0 {
+		t.Fatalf("Import registered %d review workspaces", n)
+	}
 }
 
 func TestEmptyPathRegistryIsNoop(t *testing.T) {
@@ -417,7 +424,12 @@ func (r *Registry) update(fn func(*file) error) error {
 	return fsutil.WriteFileAtomic(r.path, append(data, '\n'))
 }
 
+// upsert is the single insertion point, so the exclusion applies to Touch,
+// Add and Import alike.
 func upsert(f *file, path string, used time.Time) {
+	if excluded(path) {
+		return
+	}
 	id := ID(path)
 	for i := range f.Rooms {
 		if f.Rooms[i].ID == id {
@@ -438,9 +450,6 @@ func (r *Registry) Touch(room string) error {
 	if err != nil {
 		return err
 	}
-	if excluded(path) {
-		return nil
-	}
 	return r.update(func(f *file) error { upsert(f, path, time.Now().UTC()); return nil })
 }
 
@@ -458,6 +467,9 @@ func (r *Registry) Add(dir string) (Room, error) {
 	}
 	if TooBroad(path) {
 		return Room{}, fmt.Errorf("%s is the home directory, an ancestor of it, or a filesystem root", path)
+	}
+	if excluded(path) {
+		return Room{}, fmt.Errorf("%s is a review workspace, not a room", path)
 	}
 	if r.path == "" {
 		return Room{}, errors.New("no state directory for the room registry")
@@ -1091,7 +1103,7 @@ func TestTornTailIsIgnoredThenRepaired(t *testing.T) {
 		return nil
 	})
 	f, _ := os.OpenFile(th.eventsPath(), os.O_APPEND|os.O_WRONLY, 0o600)
-	f.WriteString(`{"seq":2,"kind":"mess`)
+	f.WriteString(`[{"seq":2,"kind":"mess`)
 	f.Close()
 	snap, err := th.Snapshot()
 	if err != nil || len(snap.Messages) != 1 {
@@ -1106,6 +1118,28 @@ func TestTornTailIsIgnoredThenRepaired(t *testing.T) {
 	snap, err = th.Snapshot()
 	if err != nil || len(snap.Messages) != 2 || snap.Messages[1].Seq != 2 {
 		t.Fatalf("after repair: %+v %v", snap.Messages, err)
+	}
+}
+
+func TestTransactionIsAtomicUnderTornWrite(t *testing.T) {
+	th, _ := Create(room(t), "t", "claude", "", 6)
+	th.Update(context.Background(), func(tx *Tx) error {
+		tx.Append(Event{Kind: KindMessage, Author: "you", Role: RoleUser, Text: "kept"})
+		return nil
+	})
+	before, _ := os.Stat(th.eventsPath())
+	th.Update(context.Background(), func(tx *Tx) error {
+		id := tx.Append(Event{Kind: KindMessage, Author: "a.t", Role: RoleAgent}).ID
+		tx.Append(Event{Kind: KindIntent, Message: id, Listener: "a.t", RequestID: "x-" + id})
+		tx.Append(Event{Kind: KindState, Message: id, State: StatePending})
+		return nil
+	})
+	after, _ := os.Stat(th.eventsPath())
+	// Simulate a crash that persisted only part of the second transaction.
+	os.Truncate(th.eventsPath(), before.Size()+(after.Size()-before.Size())/2)
+	snap, err := th.Snapshot()
+	if err != nil || len(snap.Messages) != 1 || snap.Messages[0].Text != "kept" {
+		t.Fatalf("partial transaction visible: %+v %v", snap.Messages, err)
 	}
 }
 
@@ -1452,8 +1486,10 @@ func (t *Thread) writeMeta(m Meta) error {
 	return fsutil.WriteFileAtomic(t.metaPath(), append(data, '\n'))
 }
 
-// events reads complete journal lines; an unterminated final line (a torn
-// write) is ignored. It returns the byte length of the complete prefix.
+// readEvents reads complete journal lines. Each line is one committed
+// transaction (a JSON array of events), so a torn final line drops that whole
+// transaction and nothing else. It returns the byte length of the complete
+// prefix.
 func (t *Thread) readEvents() ([]Event, int64, error) {
 	data, err := os.ReadFile(t.eventsPath())
 	if errors.Is(err, fs.ErrNotExist) {
@@ -1468,11 +1504,11 @@ func (t *Thread) readEvents() ([]Event, int64, error) {
 		if len(line) == 0 {
 			continue
 		}
-		var e Event
-		if err := json.Unmarshal(line, &e); err != nil {
+		var batch []Event
+		if err := json.Unmarshal(line, &batch); err != nil {
 			return nil, 0, fmt.Errorf("%s: corrupt journal line: %w", t.eventsPath(), err)
 		}
-		out = append(out, e)
+		out = append(out, batch...)
 	}
 	return out, valid, nil
 }
@@ -1570,14 +1606,12 @@ func (t *Thread) Update(ctx context.Context, fn func(*Tx) error) error {
 
 func (t *Thread) appendEvents(valid int64, evs []Event) error {
 	var buf bytes.Buffer
-	for _, e := range evs {
-		line, err := json.Marshal(e)
-		if err != nil {
-			return err
-		}
-		buf.Write(line)
-		buf.WriteByte('\n')
+	line, err := json.Marshal(evs) // one line = one atomic transaction
+	if err != nil {
+		return err
 	}
+	buf.Write(line)
+	buf.WriteByte('\n')
 	f, err := fsutil.OpenFile(t.eventsPath(), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
@@ -1627,7 +1661,7 @@ Check `fsutil.OpenFile` and `fsutil.ReadFile` signatures before relying on them 
 - [ ] **Step 5: Run tests**
 
 Run: `go test ./internal/thread/ -race -count=1 -v`
-Expected: PASS for all six tests.
+Expected: PASS for all seven tests.
 
 - [ ] **Step 6: Commit**
 
@@ -4933,8 +4967,8 @@ func (s *Server) tick(ctx context.Context) {
 		if room.Missing {
 			continue
 		}
-		if _, err := os.Stat(thread.Root(room.Path)); err != nil {
-			continue // no threads yet: nothing to dispatch
+		if _, err := os.Stat(filepath.Join(room.Path, ".tincan")); err != nil {
+			continue // never used by tincan: nothing to coordinate
 		}
 		d := s.dispatcher(room)
 		if d == nil {
@@ -5349,6 +5383,24 @@ func TestStaleness(t *testing.T) {
 	}
 }
 
+func TestTruthTableEdges(t *testing.T) {
+	// Equal attempt and success timestamps with an error count as a failure.
+	at := ftoa(unix(now.Add(-time.Minute)))
+	if e, _ := Parse("c", []byte(`{"percent": 5, "reset_at": `+ftoa(unix(now.Add(time.Hour)))+`, "fetched_at": `+at+`, "attempted_at": `+at+`, "error": "boom"}`), now); e.State != StateError {
+		t.Fatalf("equal timestamps with error: %s", e.State)
+	}
+	// An observation from the future beyond the skew bound is invalid.
+	future := ftoa(unix(now.Add(time.Hour)))
+	if e, _ := Parse("c", []byte(`{"percent": 5, "fetched_at": `+future+`}`), now); e.FetchedAt != nil || e.State != StateUnknown {
+		t.Fatalf("future fetched_at accepted: %+v", e)
+	}
+	// An ended short window has no current reading.
+	data := `{"percent": 5, "reset_at": ` + ftoa(unix(now.Add(time.Hour))) + `, "short_percent": 90, "short_reset_at": ` + ftoa(unix(now.Add(-time.Minute))) + `, "fetched_at": ` + at + `}`
+	if e, _ := Parse("c", []byte(data), now); e.ShortPercent != nil || e.State != StateOK {
+		t.Fatalf("ended short window kept: %+v", e)
+	}
+}
+
 func TestInvalidValuesBecomeMissing(t *testing.T) {
 	data := []byte(`{"percent": 5000, "reset_at": 12, "fetched_at": ` + ftoa(unix(now.Add(-time.Minute))) + `}`)
 	e, err := Parse("x", data, now)
@@ -5383,7 +5435,7 @@ func TestLoadDiscoversFilesAndAppliesMapping(t *testing.T) {
 	if p := got["codex-default"].Presets; len(p) != 1 || p[0] != "codex" {
 		t.Fatalf("codex-default presets %v", p)
 	}
-	if g := got["codex-gmail"]; g.Label != "Codex gmail" || g.Presets[0] != "codex-gmail" {
+	if g := got["codex-gmail"]; g.Label != "Codex gmail" || g.Presets[0] != "codex-gmail" || !g.Explicit || got["claude"].Explicit {
 		t.Fatalf("mapped entry %+v", g)
 	}
 	if p := got["claude"].Presets; p[0] != "claude" {
@@ -5448,11 +5500,14 @@ type Entry struct {
 	AttemptedAt  *time.Time `json:"attempted_at"`
 	Error        string     `json:"error,omitempty"`
 	State        string     `json:"state"`
+	Explicit     bool       `json:"explicit"`           // mapping came from quotas.json
+	Blocking     string     `json:"blocking,omitempty"` // weekly | short | either (used by phase 2)
 }
 
 type mapping struct {
-	Label   string   `json:"label"`
-	Presets []string `json:"presets"`
+	Label    string   `json:"label"`
+	Presets  []string `json:"presets"`
+	Blocking string   `json:"blocking"`
 }
 
 var fileRE = regexp.MustCompile(`^([a-z0-9]+)-quota(?:-([A-Za-z0-9_-]+))?\.json$`)
@@ -5474,13 +5529,17 @@ func number(raw map[string]any, key string) (float64, bool) {
 	return v, ok
 }
 
-func stamp(raw map[string]any, key string, now time.Time) *time.Time {
+// clockSkew bounds how far in the future an observation (fetched/attempted)
+// may be; reset times may lie up to 400 days ahead.
+const clockSkew = 5 * time.Minute
+
+func stamp(raw map[string]any, key string, now time.Time, maxAhead time.Duration) *time.Time {
 	v, ok := number(raw, key)
 	if !ok {
 		return nil
 	}
 	t := time.Unix(0, int64(v*float64(time.Second))).UTC()
-	if t.Before(minTime) || t.After(now.Add(400*24*time.Hour)) {
+	if t.Before(minTime) || t.After(now.Add(maxAhead)) {
 		return nil
 	}
 	return &t
@@ -5501,21 +5560,24 @@ func Parse(id string, data []byte, now time.Time) (Entry, error) {
 		return Entry{}, err
 	}
 	e := Entry{ID: id, Label: id}
-	e.FetchedAt = stamp(raw, "fetched_at", now)
-	e.AttemptedAt = stamp(raw, "attempted_at", now)
+	e.FetchedAt = stamp(raw, "fetched_at", now, clockSkew)
+	e.AttemptedAt = stamp(raw, "attempted_at", now, clockSkew)
 	if e.AttemptedAt == nil {
 		e.AttemptedAt = e.FetchedAt
 	}
 	e.Percent = pct(raw, "percent")
 	e.ShortPercent = pct(raw, "short_percent")
-	e.ResetAt = stamp(raw, "reset_at", now)
+	e.ResetAt = stamp(raw, "reset_at", now, 400*24*time.Hour)
 	if e.ResetAt == nil && e.FetchedAt != nil {
 		if secs, ok := number(raw, "reset_secs"); ok && secs >= 0 && secs < 400*24*3600 {
 			t := e.FetchedAt.Add(time.Duration(secs * float64(time.Second)))
 			e.ResetAt = &t
 		}
 	}
-	e.ShortResetAt = stamp(raw, "short_reset_at", now)
+	e.ShortResetAt = stamp(raw, "short_reset_at", now, 400*24*time.Hour)
+	if e.ShortResetAt != nil && !e.ShortResetAt.After(now) {
+		e.ShortPercent, e.ShortResetAt = nil, nil // that window has ended; no current reading
+	}
 	if s, ok := raw["error"].(string); ok {
 		e.Error = s
 	}
@@ -5524,7 +5586,8 @@ func Parse(id string, data []byte, now time.Time) (Entry, error) {
 }
 
 func state(e Entry, now time.Time) string {
-	if e.Error != "" && e.AttemptedAt != nil && (e.FetchedAt == nil || e.AttemptedAt.After(*e.FetchedAt)) {
+	// A failure at or after the last success wins (equal timestamps = failed).
+	if e.Error != "" && e.AttemptedAt != nil && (e.FetchedAt == nil || !e.AttemptedAt.Before(*e.FetchedAt)) {
 		return StateError
 	}
 	if e.FetchedAt == nil || e.Percent == nil {
@@ -5599,7 +5662,9 @@ func Load(cacheDir, configPath string, now time.Time) ([]Entry, error) {
 			}
 			if len(m.Presets) > 0 {
 				e.Presets = m.Presets
+				e.Explicit = true
 			}
+			e.Blocking = m.Blocking
 		}
 		out = append(out, e)
 	}
@@ -5945,7 +6010,8 @@ function fmtLeft(iso) {
 }
 
 function quotaFor(key, preset) {
-  return (state.quotas[key] || []).find((q) => (q.presets || []).includes(preset));
+  const hits = (state.quotas[key] || []).filter((q) => (q.presets || []).includes(preset));
+  return hits.find((q) => q.explicit) || hits[0];
 }
 
 function quotaText(q) {
