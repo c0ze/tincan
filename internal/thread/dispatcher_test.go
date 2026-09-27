@@ -1,0 +1,326 @@
+// internal/thread/dispatcher_test.go
+package thread_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/c0ze/tincan/v2/internal/cli"
+	"github.com/c0ze/tincan/v2/internal/dispatch"
+	"github.com/c0ze/tincan/v2/internal/host"
+	"github.com/c0ze/tincan/v2/internal/thread"
+)
+
+// The test binary doubles as the hosted listener ("serve") and as scripted
+// agents ("fixture <name>"): each run appends to <name>.count, stores its
+// stdin in <name>.last, optionally sleeps for <name>.sleep, and prints
+// <name>.reply (default "done by <name>").
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "serve":
+			os.Exit(cli.Run(os.Args[1:], os.Stdout, os.Stderr))
+		case "fixture":
+			os.Exit(fixtureAgent(os.Args[2]))
+		}
+	}
+	state, _ := os.MkdirTemp("", "tincan-state-")
+	os.Setenv("TINCAN_STATE_DIR", state)
+	code := m.Run()
+	os.RemoveAll(state)
+	os.Exit(code)
+}
+
+func fixtureAgent(name string) int {
+	dir := os.Getenv("TINCAN_FIXTURE_DIR")
+	body, _ := io.ReadAll(os.Stdin)
+	f, err := os.OpenFile(filepath.Join(dir, name+".count"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err == nil {
+		f.WriteString("x\n")
+		f.Close()
+	}
+	os.WriteFile(filepath.Join(dir, name+".last"), body, 0o600)
+	if b, err := os.ReadFile(filepath.Join(dir, name+".sleep")); err == nil {
+		d, _ := time.ParseDuration(strings.TrimSpace(string(b)))
+		time.Sleep(d)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, name+".reply")); err == nil {
+		os.Stdout.Write(b)
+		return 0
+	}
+	fmt.Printf("done by %s", name)
+	return 0
+}
+
+type env struct {
+	t       *testing.T
+	room    string
+	fixture string
+	opts    dispatch.Options
+}
+
+func newEnv(t *testing.T, names ...string) *env {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("detached hosts are not supported on Windows")
+	}
+	fixture := t.TempDir()
+	t.Setenv("TINCAN_FIXTURE_DIR", fixture)
+	room, _ := filepath.EvalSymlinks(t.TempDir())
+	return newEnvIn(t, room, fixture, names...)
+}
+
+func newEnvIn(t *testing.T, room, fixture string, names ...string) *env {
+	exe, _ := os.Executable()
+	presets := map[string]host.Preset{}
+	for _, n := range names {
+		presets[n] = host.Preset{Exec: []string{exe, "fixture", n}, Stdin: "body", Reply: "stdout", ExecTimeoutSec: 60}
+	}
+	e := &env{t: t, room: room, fixture: fixture, opts: dispatch.Options{Room: room, Presets: presets}}
+	t.Cleanup(func() {
+		states, _ := host.ListStates(room)
+		for name := range states {
+			host.Down(context.Background(), room, name, 5*time.Second)
+		}
+	})
+	return e
+}
+
+func (e *env) script(name, file, content string) {
+	os.WriteFile(filepath.Join(e.fixture, name+"."+file), []byte(content), 0o600)
+}
+
+func (e *env) count(name string) int {
+	b, _ := os.ReadFile(filepath.Join(e.fixture, name+".count"))
+	return strings.Count(string(b), "x")
+}
+
+func (e *env) dispatcher() *thread.Dispatcher {
+	d := thread.New(e.opts)
+	if err := d.Acquire(); err != nil {
+		e.t.Fatal(err)
+	}
+	e.t.Cleanup(d.Close)
+	return d
+}
+
+// settle reconciles until cond holds for the thread snapshot.
+func (e *env) settle(d *thread.Dispatcher, th *thread.Thread, cond func(thread.Snapshot) bool) thread.Snapshot {
+	e.t.Helper()
+	deadline := time.Now().Add(45 * time.Second)
+	for {
+		if err := d.Reconcile(context.Background()); err != nil {
+			e.t.Fatalf("reconcile: %v", err)
+		}
+		snap, err := th.Snapshot()
+		if err != nil {
+			e.t.Fatal(err)
+		}
+		if cond(snap) {
+			return snap
+		}
+		if time.Now().After(deadline) {
+			e.t.Fatalf("thread did not settle: %+v", snap.Messages)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func quiescent(s thread.Snapshot) bool {
+	for _, m := range s.Messages {
+		if m.Active() || (m.Role == thread.RoleAgent && m.State == thread.StateDone && !m.Handoffs) {
+			return false
+		}
+	}
+	return len(s.Messages) > 0
+}
+
+func agentMessages(s thread.Snapshot, state string) []thread.Message {
+	var out []thread.Message
+	for _, m := range s.Messages {
+		if m.Role == thread.RoleAgent && (state == "" || m.State == state) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func TestRoundTripWithHandoff(t *testing.T) {
+	e := newEnv(t, "a", "b")
+	e.script("a", "reply", "fixed it. @b please review")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d := e.dispatcher()
+	if _, err := d.Post(context.Background(), th.ID, "@a do x", "k1"); err != nil {
+		t.Fatal(err)
+	}
+	snap := e.settle(d, th, quiescent)
+	done := agentMessages(snap, thread.StateDone)
+	if len(done) != 2 || done[0].Listener != "a."+th.ID || done[1].Listener != "b."+th.ID || done[1].Text != "done by b" {
+		t.Fatalf("messages %+v", snap.Messages)
+	}
+	last, _ := os.ReadFile(filepath.Join(e.fixture, "b.last"))
+	if !strings.Contains(string(last), "fixed it. @b please review") {
+		t.Fatalf("b did not see a's reply in its prompt:\n%s", last)
+	}
+	if e.count("a") != 1 || e.count("b") != 1 {
+		t.Fatalf("counts a=%d b=%d", e.count("a"), e.count("b"))
+	}
+}
+
+func TestPostWithoutMentionGoesToPrimaryAndDedupesClientID(t *testing.T) {
+	e := newEnv(t, "a")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d := e.dispatcher()
+	m1, _ := d.Post(context.Background(), th.ID, "hello", "same")
+	m2, _ := d.Post(context.Background(), th.ID, "hello", "same")
+	if m1.ID != m2.ID {
+		t.Fatal("duplicate client_id created a second message")
+	}
+	e.settle(d, th, quiescent)
+	if e.count("a") != 1 {
+		t.Fatalf("a ran %d times", e.count("a"))
+	}
+}
+
+func TestUnresolvedMentionPostsSystemMessage(t *testing.T) {
+	e := newEnv(t, "a")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d := e.dispatcher()
+	d.Post(context.Background(), th.ID, "@nobody hi", "")
+	snap, _ := th.Snapshot()
+	var sys []thread.Message
+	for _, m := range snap.Messages {
+		if m.Role == thread.RoleSystem {
+			sys = append(sys, m)
+		}
+	}
+	if len(sys) != 1 || !strings.Contains(sys[0].Text, "@nobody") || len(agentMessages(snap, "")) != 0 {
+		t.Fatalf("messages %+v", snap.Messages)
+	}
+}
+
+func TestBudgetBoundsBranchingChains(t *testing.T) {
+	e := newEnv(t, "a", "b", "c", "d", "e", "f")
+	e.script("a", "reply", "@b @c @d")
+	for _, n := range []string{"b", "c", "d"} {
+		e.script(n, "reply", "@e @f")
+	}
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d := e.dispatcher()
+	d.Post(context.Background(), th.ID, "@a go", "")
+	snap := e.settle(d, th, quiescent)
+	total := 0
+	for _, n := range []string{"a", "b", "c", "d", "e", "f"} {
+		total += e.count(n)
+	}
+	suggested := 0
+	for _, m := range snap.Messages {
+		if m.State == thread.StateSuggested {
+			suggested++
+		}
+	}
+	if total != 7 || suggested != 3 {
+		t.Fatalf("executions %d (want 1 user + 6 automatic), suggested %d (want 3)", total, suggested)
+	}
+}
+
+func TestSelfMentionIsIgnored(t *testing.T) {
+	e := newEnv(t, "a")
+	e.script("a", "reply", "@a again")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d := e.dispatcher()
+	d.Post(context.Background(), th.ID, "@a go", "")
+	e.settle(d, th, quiescent)
+	if e.count("a") != 1 {
+		t.Fatalf("a ran %d times", e.count("a"))
+	}
+}
+
+func TestEmptyReplyCompletes(t *testing.T) {
+	e := newEnv(t, "a")
+	e.script("a", "reply", "")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d := e.dispatcher()
+	d.Post(context.Background(), th.ID, "@a go", "")
+	snap := e.settle(d, th, quiescent)
+	done := agentMessages(snap, thread.StateDone)
+	if len(done) != 1 || done[0].Text != "" {
+		t.Fatalf("messages %+v", snap.Messages)
+	}
+}
+
+func TestDispatchInRoomWithSpaces(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("detached hosts are not supported on Windows")
+	}
+	fixture := t.TempDir()
+	t.Setenv("TINCAN_FIXTURE_DIR", fixture)
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	room := filepath.Join(base, "Application Support", "scratch-ü 1")
+	os.MkdirAll(room, 0o755)
+	e := newEnvIn(t, room, fixture, "a")
+	th, _ := thread.Create(room, "t", "a", "", 6)
+	d := e.dispatcher()
+	d.Post(context.Background(), th.ID, "@a go", "")
+	snap := e.settle(d, th, quiescent)
+	if len(agentMessages(snap, thread.StateDone)) != 1 {
+		t.Fatalf("messages %+v", snap.Messages)
+	}
+}
+
+func TestOnlyLockHolderDispatches(t *testing.T) {
+	e := newEnv(t, "a")
+	e.dispatcher()
+	d2 := thread.New(e.opts)
+	if err := d2.Acquire(); !errors.Is(err, thread.ErrNotOwner) {
+		t.Fatalf("second Acquire = %v", err)
+	}
+	if err := d2.Reconcile(context.Background()); !errors.Is(err, thread.ErrNotOwner) {
+		t.Fatalf("second Reconcile = %v", err)
+	}
+}
+
+func TestCrashAtEveryBoundaryRunsEachTurnOnce(t *testing.T) {
+	for _, point := range []string{"before-submit", "after-submit", "after-terminal", "after-handoffs"} {
+		t.Run(point, func(t *testing.T) {
+			e := newEnv(t, "a", "b")
+			e.script("a", "reply", "@b check")
+			th, _ := thread.Create(e.room, "t", "a", "", 6)
+			crashed := false
+			d := thread.New(e.opts)
+			if err := d.Acquire(); err != nil {
+				t.Fatal(err)
+			}
+			d.Hook = func(p string) error {
+				if p == point && !crashed {
+					crashed = true
+					return errors.New("simulated crash")
+				}
+				return nil
+			}
+			d.Post(context.Background(), th.ID, "@a go", "")
+			deadline := time.Now().Add(45 * time.Second)
+			for !crashed && time.Now().Before(deadline) {
+				d.Reconcile(context.Background())
+				time.Sleep(100 * time.Millisecond)
+			}
+			if !crashed {
+				t.Fatal("hook never fired")
+			}
+			d.Close()
+			d2 := e.dispatcher()
+			e.settle(d2, th, quiescent)
+			if e.count("a") != 1 || e.count("b") != 1 {
+				t.Fatalf("after crash at %s: a=%d b=%d", point, e.count("a"), e.count("b"))
+			}
+		})
+	}
+}
