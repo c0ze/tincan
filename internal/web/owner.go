@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strconv"
+	"strings"
 )
 
 var tailscaleCLIs = []string{"tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"}
@@ -38,7 +40,12 @@ func DetectOwner(ctx context.Context) (string, error) {
 		}
 		out, err := exec.CommandContext(ctx, path, "status", "--json").Output()
 		if err != nil {
-			return "", err
+			stderr := ""
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				stderr = strings.TrimSpace(string(exitErr.Stderr))
+			}
+			return "", fmt.Errorf("%s status --json: %v: %s; pass --owner <login>", path, err, stderr)
 		}
 		return parseOwner(out)
 	}

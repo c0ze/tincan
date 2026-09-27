@@ -42,7 +42,7 @@ func cmdWeb(args []string, stdout, stderr io.Writer) int {
 		detected, err := web.DetectOwner(ctx)
 		if err != nil {
 			fmt.Fprintf(stderr, "tincan web: %v\n", err)
-			return ExitUsage
+			return ExitError
 		}
 		*owner = detected
 	}

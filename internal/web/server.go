@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -29,6 +30,12 @@ import (
 
 //go:embed ui
 var uiFS embed.FS
+
+// publicPathRe restricts Config.PublicPath (after trimming leading/trailing
+// slashes) to a safe set of URL-path characters — no spaces, backslashes, or
+// other characters that could confuse a proxy or client into treating the
+// path as something other than a plain literal prefix.
+var publicPathRe = regexp.MustCompile(`^[A-Za-z0-9/_.-]*$`)
 
 type Peer struct {
 	Name string
@@ -77,7 +84,11 @@ func New(cfg Config) (*Server, error) {
 	if cfg.IdleStop <= 0 {
 		cfg.IdleStop = 30 * time.Minute
 	}
-	base := "/" + strings.Trim(cfg.PublicPath, "/") + "/"
+	trimmed := strings.Trim(cfg.PublicPath, "/")
+	if !publicPathRe.MatchString(trimmed) {
+		return nil, fmt.Errorf("invalid --public-path %q", cfg.PublicPath)
+	}
+	base := "/" + trimmed + "/"
 	if base == "//" {
 		base = "/"
 	}
@@ -210,17 +221,42 @@ func DefaultListen() string {
 // address. Non-loopback TCP is refused: remote access is via tailscale serve.
 func Listen(spec string) (net.Listener, error) {
 	if path, ok := strings.CutPrefix(spec, "unix:"); ok {
-		if err := fsutil.MkdirPrivate(filepath.Dir(path)); err != nil {
+		if path == "" || !filepath.IsAbs(path) {
+			return nil, fmt.Errorf("refusing unix socket path %q: must be an absolute path", path)
+		}
+		dir := filepath.Dir(path)
+		switch dirInfo, err := os.Lstat(dir); {
+		case os.IsNotExist(err):
+			if err := fsutil.MkdirPrivate(dir); err != nil {
+				return nil, err
+			}
+		case err != nil:
+			return nil, err
+		default:
+			if !dirInfo.IsDir() {
+				return nil, fmt.Errorf("%s is not a directory", dir)
+			}
+			if dirInfo.Mode().Perm()&0o077 != 0 {
+				return nil, fmt.Errorf("refusing unix socket directory %s: mode %o allows group or other access", dir, dirInfo.Mode().Perm())
+			}
+		}
+		switch info, err := os.Lstat(path); {
+		case err == nil:
+			if info.Mode()&os.ModeSocket == 0 {
+				return nil, fmt.Errorf("refusing to remove %s: not a socket", path)
+			}
+			if c, dialErr := net.Dial("unix", path); dialErr == nil {
+				c.Close()
+				return nil, fmt.Errorf("%s is in use by another tincan web", path)
+			}
+			if err := os.Remove(path); err != nil {
+				return nil, fmt.Errorf("removing stale socket %s: %w", path, err)
+			}
+		case os.IsNotExist(err):
+			// Nothing to remove.
+		default:
 			return nil, err
 		}
-		if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
-			return nil, err
-		}
-		if c, err := net.Dial("unix", path); err == nil {
-			c.Close()
-			return nil, fmt.Errorf("%s is in use by another tincan web", path)
-		}
-		os.Remove(path)
 		ln, err := net.Listen("unix", path)
 		if err != nil {
 			return nil, err
