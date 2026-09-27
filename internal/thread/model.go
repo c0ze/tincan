@@ -21,6 +21,7 @@ const (
 	KindHandoffs = "handoffs"
 	KindChain    = "chain"
 	KindThread   = "thread"
+	KindRetry    = "retry"
 
 	RoleUser   = "user"
 	RoleAgent  = "agent"
@@ -92,6 +93,7 @@ type Message struct {
 	Preset    string    `json:"preset,omitempty"`
 	RequestID string    `json:"request_id,omitempty"`
 	Handoffs  bool      `json:"handoffs,omitempty"`
+	Retried   bool      `json:"retried,omitempty"`
 	Updated   time.Time `json:"updated"`
 }
 
@@ -124,7 +126,7 @@ func (s *Snapshot) apply(e Event) {
 		if e.N >= s.NextN {
 			s.NextN = e.N + 1
 		}
-	case KindIntent, KindState, KindHandoffs:
+	case KindIntent, KindState, KindHandoffs, KindRetry:
 		i, ok := s.index[e.Message]
 		if !ok {
 			return
@@ -141,6 +143,8 @@ func (s *Snapshot) apply(e Event) {
 			}
 		case KindHandoffs:
 			m.Handoffs = true
+		case KindRetry:
+			m.Retried = true
 		}
 	case KindThread:
 		// The journal is authoritative for meta: a thread event carrying a

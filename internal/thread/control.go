@@ -10,6 +10,7 @@ import (
 
 	"github.com/c0ze/tincan/v2/internal/host"
 	"github.com/c0ze/tincan/v2/internal/request"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 // barrier stops every chain and moves the thread to status. From this point
@@ -77,16 +78,27 @@ func (d *Dispatcher) finishStop(ctx context.Context, t *Thread, snap Snapshot) e
 		}
 		r, err := request.Cancel(ctx, room, m.RequestID)
 		if errors.Is(err, os.ErrNotExist) {
-			settled = append(settled, result{m.ID, StateCancelled, "cancelled before it started"})
+			settled = append(settled, result{m.ID, StateCancelled, "no request record; treated as cancelled"})
 			continue
 		}
 		if err != nil {
 			return err
 		}
 		if !r.Terminal() {
-			host.Cancel(ctx, room, m.Listener, m.RequestID) // best effort; polling decides
-			pending = true
-			continue
+			if _, alive := host.Existing(ctx, room, m.Listener); !alive {
+				// The hosted listener is gone (crashed or its process was
+				// killed): host.Cancel can never reach it and the request
+				// would never become terminal on its own, stranding the
+				// thread in stopping/archiving forever. Settle it directly.
+				r, err = request.Finish(room, r.Envelope, "ERROR interrupted: hosted listener is not running; stopped by the owner")
+				if err != nil {
+					return err
+				}
+			} else {
+				host.Cancel(ctx, room, m.Listener, m.RequestID) // best effort; polling decides
+				pending = true
+				continue
+			}
 		}
 		state, text := outcome(r)
 		settled = append(settled, result{m.ID, state, text})
@@ -131,8 +143,13 @@ func (d *Dispatcher) finishStop(ctx context.Context, t *Thread, snap Snapshot) e
 	})
 }
 
-// Retry re-runs a failed turn: the same request when it was never saved or
-// never ran, otherwise a fresh turn for the same listener and trigger.
+// Retry re-runs a failed turn: the same request, in place, when it was never
+// saved or never ran and its chain can still submit; otherwise (including
+// when the original chain was stopped by a Stop or Archive barrier, which
+// bars it from ever submitting again) a fresh turn in a brand-new chain, as
+// Post itself uses, for the same listener and trigger. A turn can be
+// retried only once; the KindRetry marker on the original message rejects a
+// second call.
 func (d *Dispatcher) Retry(ctx context.Context, tid, mid string) error {
 	t, err := Open(d.Opts.Room, tid)
 	if err != nil {
@@ -143,42 +160,79 @@ func (d *Dispatcher) Retry(ctx context.Context, tid, mid string) error {
 			return fmt.Errorf("thread is %s", tx.Meta.Status)
 		}
 		m, ok := tx.Snap.Message(mid)
-		if !ok || m.Role != RoleAgent || (m.State != StateError && m.State != StateCancelled) {
+		if !ok || m.Role != RoleAgent {
 			return errors.New("only failed or cancelled agent turns can be retried")
 		}
-		if r, err := request.Get(d.Opts.Room, m.RequestID); errors.Is(err, os.ErrNotExist) || (err == nil && !r.Terminal()) {
+		if m.Retried {
+			return errors.New("already retried")
+		}
+		if m.State != StateError && m.State != StateCancelled {
+			return errors.New("only failed or cancelled agent turns can be retried")
+		}
+		r, err := request.Get(d.Opts.Room, m.RequestID)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		stale := errors.Is(err, os.ErrNotExist) || (err == nil && !r.Terminal())
+		stopped := false
+		if c := tx.Snap.Chains[m.Chain]; c != nil {
+			stopped = c.Stopped
+		}
+		if stale && !stopped {
 			tx.Append(Event{Kind: KindState, Message: m.ID, State: StatePending})
+			tx.Append(Event{Kind: KindRetry, Message: m.ID})
 			return nil
+		}
+		if stale {
+			// The old request is stranded in a chain that will never submit
+			// again; cancel it defensively (it may already be gone) and
+			// retry fresh instead of resetting to a pending state submit()
+			// would refuse forever.
+			if _, cerr := request.Cancel(ctx, d.Opts.Room, m.RequestID); cerr != nil && !errors.Is(cerr, os.ErrNotExist) {
+				return cerr
+			}
 		}
 		trigger, ok := tx.Snap.Message(m.ReplyTo)
 		if !ok {
 			return errors.New("the message this turn answered is gone")
 		}
-		_, existing := tx.Meta.Listeners[m.Listener]
-		_, err := d.planTurn(t, tx, Target{Mention: m.Listener, Listener: m.Listener, Preset: m.Preset, Existing: !existing}, trigger, m.Chain, false)
-		return err
+		_, owned := tx.Meta.Listeners[m.Listener]
+		newID, err := d.planTurn(t, tx, Target{Mention: m.Listener, Listener: m.Listener, Preset: m.Preset, Existing: !owned}, trigger, "c"+randHex(6), false)
+		if err != nil {
+			return err
+		}
+		tx.Append(Event{Kind: KindRetry, Message: m.ID, Produced: []string{newID}})
+		return nil
 	})
 }
 
-// Janitor stops thread-owned listeners with no active turn whose last
-// journal activity is older than idle. Sessions are kept.
+// Janitor stops thread-owned listeners with no active turn anywhere in the
+// room whose last journal activity anywhere in the room is older than idle,
+// and that are not otherwise busy or holding queued work. Sessions are kept.
+// A listener name is room-wide (any thread may address another thread's
+// listener by its full name), so busy/last-activity are computed across
+// every thread before any stop decision is made.
 func (d *Dispatcher) Janitor(ctx context.Context, idle time.Duration) error {
 	metas, err := List(d.Opts.Room)
 	if err != nil {
 		return err
 	}
+	var errs []error
 	cutoff := time.Now().Add(-idle)
+	last := map[string]time.Time{}
+	busy := map[string]bool{}
+	listeners := map[string]bool{}
 	for _, meta := range metas {
 		t, err := Open(d.Opts.Room, meta.ID)
 		if err != nil {
+			errs = append(errs, err)
 			continue
 		}
 		snap, err := t.Snapshot()
 		if err != nil {
+			errs = append(errs, err)
 			continue
 		}
-		last := map[string]time.Time{}
-		busy := map[string]bool{}
 		for _, m := range snap.Messages {
 			if m.Listener == "" {
 				continue
@@ -191,15 +245,33 @@ func (d *Dispatcher) Janitor(ctx context.Context, idle time.Duration) error {
 			}
 		}
 		for name := range snap.Meta.Listeners {
-			if busy[name] || last[name].After(cutoff) {
-				continue
-			}
-			if _, alive := host.Existing(ctx, d.Opts.Room, name); alive {
-				host.Down(ctx, d.Opts.Room, name, 10*time.Second)
+			listeners[name] = true
+		}
+	}
+	queued := map[string]int{}
+	if sp, err := spool.Open(d.Opts.Room); err != nil {
+		errs = append(errs, err)
+	} else if pres, err := sp.ListPresence(); err != nil {
+		errs = append(errs, err)
+	} else {
+		for _, p := range pres {
+			queued[p.Name] = p.Queued
+		}
+	}
+	for name := range listeners {
+		if busy[name] || last[name].After(cutoff) || queued[name] > 0 {
+			continue
+		}
+		if st, ok, _ := host.ReadState(d.Opts.Room, name); ok && st.State == "busy" {
+			continue
+		}
+		if _, alive := host.Existing(ctx, d.Opts.Room, name); alive {
+			if err := host.Down(ctx, d.Opts.Room, name, 10*time.Second); err != nil {
+				errs = append(errs, err)
 			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func WaitStatus(ctx context.Context, t *Thread, notIn ...string) (Meta, error) {
