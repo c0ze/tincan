@@ -49,6 +49,8 @@ Hosted listeners (tincan runs a headless agent CLI for you):
   tincan presets [--format table|json]
   tincan mcp [--room <path>]     native MCP tools over stdin/stdout (room defaults to
                                  the git work tree containing the working directory)
+  tincan web [--listen unix:<path>|127.0.0.1:<port>] [--public-path /tincan] [--peer name=url]...
+                                 chat UI for agents; expose with tailscale serve (see docs/web.md)
   tincan version [--format json]
   tincan gc [--older-than 168h] [--room <path>]
 
@@ -93,6 +95,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdPresets(args[1:], stdout, stderr)
 	case "mcp":
 		return cmdMCP(args[1:], stdout, stderr)
+	case "web":
+		return cmdWeb(args[1:], stdout, stderr)
 	case "version", "--version":
 		return cmdVersion(args[1:], stdout, stderr)
 	case "gc":

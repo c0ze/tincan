@@ -1,0 +1,260 @@
+// Package web serves the tincan chat UI and its JSON API. It trusts only the
+// owner's Tailscale identity as set by `tailscale serve`.
+package web
+
+import (
+	"context"
+	"embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html/template"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/c0ze/tincan/v2/internal/buildinfo"
+	"github.com/c0ze/tincan/v2/internal/dispatch"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
+	"github.com/c0ze/tincan/v2/internal/rooms"
+	"github.com/c0ze/tincan/v2/internal/thread"
+)
+
+//go:embed ui
+var uiFS embed.FS
+
+type Peer struct {
+	Name string
+	URL  string
+}
+
+type Config struct {
+	PublicPath  string // URL prefix the browser sees, e.g. "/tincan"
+	Owner       string // required Tailscale-User-Login
+	Origin      string // optional pinned origin for mutations
+	Machine     string
+	Peers       []Peer
+	ChainBudget int
+	IdleStop    time.Duration
+	Tick        time.Duration
+	Registry    *rooms.Registry
+	Dispatch    dispatch.Options // Executable and Presets; Room is set per room
+}
+
+type Server struct {
+	cfg   Config
+	base  string // public path with trailing slash
+	mux   *http.ServeMux
+	index *template.Template
+	hub   *hub
+	peers map[string]*peer
+
+	mu          sync.Mutex
+	dispatchers map[string]*thread.Dispatcher // room ID → owned dispatcher
+	lastJanitor time.Time                     // touched only by tick
+}
+
+func New(cfg Config) (*Server, error) {
+	if cfg.Owner == "" {
+		return nil, errors.New("owner login is required")
+	}
+	if cfg.Registry == nil {
+		return nil, errors.New("room registry is required")
+	}
+	if cfg.ChainBudget <= 0 {
+		cfg.ChainBudget = 6
+	}
+	if cfg.Tick <= 0 {
+		cfg.Tick = 2 * time.Second
+	}
+	if cfg.IdleStop <= 0 {
+		cfg.IdleStop = 30 * time.Minute
+	}
+	base := "/" + strings.Trim(cfg.PublicPath, "/") + "/"
+	if base == "//" {
+		base = "/"
+	}
+	idx, err := template.ParseFS(uiFS, "ui/index.html")
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{cfg: cfg, base: base, mux: http.NewServeMux(), index: idx, hub: newHub(), peers: map[string]*peer{}, dispatchers: map[string]*thread.Dispatcher{}}
+	for _, p := range cfg.Peers {
+		pp, err := newPeer(p)
+		if err != nil {
+			return nil, err
+		}
+		s.peers[p.Name] = pp
+	}
+	s.routes()
+	return s, nil
+}
+
+func (s *Server) routes() {
+	s.mux.HandleFunc("GET /{$}", s.serveIndex)
+	s.mux.HandleFunc("GET /app.js", s.serveAsset("ui/app.js", "text/javascript; charset=utf-8"))
+	s.mux.HandleFunc("GET /app.css", s.serveAsset("ui/app.css", "text/css; charset=utf-8"))
+	s.mux.HandleFunc("GET /api/self", s.apiSelf)
+	s.apiRoutes()                                                // Task 9
+	s.mux.HandleFunc("GET /api/events", s.apiEvents)             // Task 10
+	s.mux.HandleFunc("/api/peers/{peer}/{rest...}", s.proxyPeer) // Task 11
+}
+
+func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	s.index.Execute(w, map[string]string{"Base": s.base})
+}
+
+func (s *Server) serveAsset(name, ctype string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		data, err := uiFS.ReadFile(name)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", ctype)
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Write(data)
+	}
+}
+
+func (s *Server) apiSelf(w http.ResponseWriter, r *http.Request) {
+	type peerView struct {
+		Name   string `json:"name"`
+		Online bool   `json:"online"`
+	}
+	peers := []peerView{}
+	for name, p := range s.peers {
+		peers = append(peers, peerView{Name: name, Online: p.online.Load()})
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"machine": s.cfg.Machine, "version": buildinfo.Current().Version, "peers": peers})
+}
+
+// Handler wraps every route with security headers and the owner/CSRF checks.
+func (s *Server) Handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", "default-src 'self'")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		if r.Header.Get("Tailscale-User-Login") != s.cfg.Owner {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if r.Header.Get("X-Tincan-Request") != "1" {
+				http.Error(w, "missing X-Tincan-Request", http.StatusForbidden)
+				return
+			}
+			if o := r.Header.Get("Origin"); o != "" && !s.originOK(o, r) {
+				http.Error(w, "cross-origin request refused", http.StatusForbidden)
+				return
+			}
+		}
+		s.mux.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) originOK(origin string, r *http.Request) bool {
+	if s.cfg.Origin != "" {
+		return strings.EqualFold(strings.TrimRight(origin, "/"), strings.TrimRight(s.cfg.Origin, "/"))
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	return strings.EqualFold(u.Host, host)
+}
+
+func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+func (s *Server) fail(w http.ResponseWriter, status int, err error) {
+	s.writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+func readJSON(r *http.Request, v any) error {
+	data, err := io.ReadAll(io.LimitReader(r.Body, thread.MaxPostBytes+16<<10))
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, v)
+}
+
+// DefaultListen is the platform default listen address.
+func DefaultListen() string {
+	if runtime.GOOS == "windows" {
+		return "127.0.0.1:7788"
+	}
+	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
+		return "unix:" + filepath.Join(d, "tincan", "web.sock")
+	}
+	return "unix:" + filepath.Join(rooms.StateDir(), "web.sock")
+}
+
+// Listen opens a private unix socket ("unix:<path>") or a loopback TCP
+// address. Non-loopback TCP is refused: remote access is via tailscale serve.
+func Listen(spec string) (net.Listener, error) {
+	if path, ok := strings.CutPrefix(spec, "unix:"); ok {
+		if err := fsutil.MkdirPrivate(filepath.Dir(path)); err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
+			return nil, err
+		}
+		if c, err := net.Dial("unix", path); err == nil {
+			c.Close()
+			return nil, fmt.Errorf("%s is in use by another tincan web", path)
+		}
+		os.Remove(path)
+		ln, err := net.Listen("unix", path)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			ln.Close()
+			return nil, err
+		}
+		return ln, nil
+	}
+	host, _, err := net.SplitHostPort(spec)
+	if err != nil {
+		return nil, err
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return nil, fmt.Errorf("refusing to listen on %s: use a unix socket or a loopback address with tailscale serve", spec)
+	}
+	return net.Listen("tcp", spec)
+}
+
+// Run serves until ctx is done, running the dispatch loop and peer checks.
+func (s *Server) Run(ctx context.Context, ln net.Listener) error {
+	go s.loop(ctx)       // Task 10
+	go s.watchPeers(ctx) // Task 11
+	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(shutdown)
+	}()
+	err := srv.Serve(ln)
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
