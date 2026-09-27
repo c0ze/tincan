@@ -1,8 +1,9 @@
 # tincan web — chat interface for agents — Design Spec
 
 Status: design approved section by section by the owner on 2026-09-28
-(brainstorming in a Claude Code session). This document awaits the owner's
-review before an implementation plan is written.
+(brainstorming in a Claude Code session), then revised after a Codex review
+(gpt-6-astra, xhigh) whose 14 findings are addressed below (§14). Awaits the
+owner's review before an implementation plan is written.
 
 ## 1. Problem
 
@@ -22,35 +23,46 @@ Goals
   the owner's tailnet.
 - Threads: group conversations in one project room, where the owner addresses
   agents with @mentions and agents can hand work to each other with @mentions.
-- Visibility of all tincan activity in a room, including work started outside
-  the web page (MCP, CLI, `/listen`), with live output.
+- Visibility of the room's journaled tincan requests (everything sent through
+  MCP, the web chat or hosted listeners) with live output, plus which listeners
+  are present, including `/listen` participants.
 - One page covering both machines: a hub instance proxies a peer instance.
+- Dispatch that is crash-safe: a web-server crash or restart never loses,
+  duplicates or orphans agent work.
 - No change in behaviour for the existing CLI, MCP server or skills.
-- No new runtime dependencies beyond the Go standard library and the existing
+- No new runtime dependencies beyond the Go standard library and existing
   modules; the UI is static HTML/CSS/JS embedded in the binary, no build step.
 
 Non-goals (v1)
 - Mirroring interactive harness sessions (Claude Code, Codex TUI, …) that do
   not go through tincan.
+- Dispatching thread work to interactive `/listen` participants. They are shown
+  as present but cannot be mentioned: their replies are only collected by
+  polling and their execution cannot be cancelled, which breaks Stop (§6.5).
+- A complete activity history of CLI `send`/`ask` traffic, which is published
+  straight to the spool without a request record. Recording it is a separate
+  protocol change.
+- Transcript deltas for session-capable agents; every agent receives the full
+  bounded transcript (§6.4).
+- A Tailscale Service hostname (`tincan.<tailnet>.ts.net`): Service hosts must
+  be tagged, and tagged devices carry no user identity, which breaks the owner
+  check for hub-to-peer calls (§9).
 - File or image uploads, search, editing or deleting messages, push
-  notifications.
-- Multiple human users; accounts or auth beyond Tailscale identity.
-- Codex persistent sessions (the thread transcript substitutes; see §6.3).
-- More than one peer in the UI (the code accepts several; only two machines are
-  tested).
+  notifications, multiple human users, Codex persistent sessions.
+- More than one peer in the UI (the code accepts several; two machines tested).
 - A central store; each machine's `.tincan/` stays the only source of truth.
 
 ## 3. Decisions taken during design
 
 | Question | Decision |
 |---|---|
-| Which agents | tincan agents only (hosted listeners and `/listen` participants). |
+| Which agents | tincan agents; thread dispatch to hosted listeners only. |
 | Reach | Both machines on one page (hub + peer). |
-| Thread model | Shared thread; agents can call each other, with a chain budget and Stop. |
-| Agent memory | Fresh agent session per thread. |
+| Thread model | Shared thread; agents can call each other, with a chain-wide budget and Stop. |
+| Agent memory | Fresh agent session per thread; full bounded transcript every turn. |
 | Topology | A: `tincan web` on each machine; one hub proxies the peer. |
 | Layout | B: sidebar + thread; running agents as header chips; per-room Activity tab. |
-| URL | Path-based by default; optional Tailscale Service hostname. |
+| URL | Path-based (`https://cachyos.brill-decibel.ts.net/tincan/`). |
 
 ## 4. Architecture
 
@@ -58,318 +70,435 @@ Non-goals (v1)
  browser (Mac, iPad, …)
     │ HTTPS, tailnet only
     ▼
- tailscale serve (cachyos)  ──►  tincan web (127.0.0.1:7788, hub)
-                                   ├─ local rooms on cachyos
-                                   └─ /api/peers/macmini/* ──► HTTPS over tailnet
-                                                               tailscale serve (macmini)
-                                                                 ──► tincan web (127.0.0.1:7788)
-                                                                       └─ local rooms on macmini
+ tailscale serve (cachyos) /tincan ──► unix socket ──► tincan web (hub)
+                                                         ├─ local rooms on cachyos
+                                                         └─ peer calls over HTTPS
+                                                              tailscale serve (macmini) /tincan
+                                                                ──► tincan web (peer)
+                                                                      └─ local rooms on macmini
 ```
 
 Every instance serves the same UI and API for its own machine. A hub is an
 instance started with `--peer`; it forwards `/api/peers/<name>/…` to that peer.
-Agents always run on the machine that owns the room, where the project files
-are.
+Agents always run on the machine that owns the room.
 
 ### 4.1 Units
-
-Each unit has one purpose and is testable on its own.
 
 1. **Room registry** — `internal/rooms`. File
    `$XDG_STATE_HOME/tincan/rooms.json` (default `~/.local/state/tincan/`;
    `%LocalAppData%\tincan\` on Windows). Entries: canonical path, display name
    (base name, disambiguated), `id` (first 12 hex of SHA-256 of the canonical
    path), `hidden`, `last_used`. Written under a file lock with atomic replace.
-   - `Touch(room)` is called by `mcp` (at startup), `up`, `send`, `ask` and
-     `serve`. A registry write failure is logged to stderr and never fails the
-     command.
-   - First run of `tincan web` imports existing `.tincan/` directories found
-     at depth ≤ 3 under `~/projects` (configurable `--scan <dir>`, repeatable).
-   - The UI can add a room by absolute path (it must exist and be a
-     directory; home and filesystem roots are refused, matching `tincan mcp`)
+   - `Touch(room)` is called by `mcp` (at startup), `up`, `serve`, `send`,
+     `ask` and `recv`. A registry failure is logged to stderr and never fails
+     the command.
+   - First run of `tincan web` imports existing `.tincan/` directories at
+     depth ≤ 3 under each `--scan` directory (default `~/projects`).
+   - The UI can add a room by absolute path (it must exist and be a directory;
+     home, its ancestors and filesystem roots are refused, as in `tincan mcp`)
      and hide a room.
-2. **Thread store** — `internal/thread`, files in the room:
-   - `.tincan/threads/<tid>/thread.json`: `id`, `title`, `primary` (agent
-     name), `created`, `archived`, `budget` (default 6).
-   - `.tincan/threads/<tid>/messages.jsonl`: append-only messages (§5).
-   - Appends take `.tincan/threads/<tid>/lock` and assign a monotonically
-     increasing `seq`. Readers tolerate a torn final line by ignoring it.
-   - `<tid>` is 8 random hex characters.
-3. **Dispatcher** — `internal/thread`. Parses mentions, resolves targets,
-   builds agent context, submits requests, collects results, enforces chain
-   rules, and reconciles after restart (§6).
-4. **Shared send path** — extract the MCP server's "submit a request and
-   launch the listener if needed" logic (`sendTool`/`launch` in
-   `internal/mcpserver/server.go`) into an exported function (package
-   `internal/dispatch`) used by both the MCP server and the dispatcher, so
-   routing, interactive-listener detection and idempotency stay identical.
-   The MCP tool behaviour does not change.
-5. **Activity reader** — lists a room's listeners (host states + presence, as
-   `tincan_status` does) and recent request records with their progress
-   events. Read-only; no new on-disk format.
-6. **HTTP API + live events** — `internal/web`. JSON endpoints (§7) and one
-   Server-Sent Events stream. Change detection uses the existing fsnotify
-   dependency on each registered room's `.tincan/threads` and
-   `.tincan/requests`, with a 2 s polling fallback where watching fails.
+2. **Thread store** — `internal/thread` (§5).
+3. **Dispatcher** — `internal/thread`: intents, submission, collection, chain
+   rules, Stop/archive barriers, restart recovery (§6).
+4. **Shared send path** — package `internal/dispatch`, extracted from the MCP
+   server's `sendTool`/`launch` (`internal/mcpserver/server.go`). Its contract
+   takes the listener name and the preset **separately** (a fresh `codex.<tid>`
+   is not itself a preset), keeps `request.LockRoute` around the
+   route/submit/launch sequence, and keeps a saved request retrievable when
+   launch fails. The MCP tools call it with `preset` = name, so their
+   behaviour is unchanged.
+5. **Activity reader** — lists a room's listeners (hosted states and `/listen`
+   presence, as `tincan_status` does) and recent request records with progress.
+   Read-only.
+6. **HTTP API + live events** — `internal/web` (§7).
 7. **UI** — `internal/web/ui/` (`index.html`, `app.js`, `app.css`), embedded
-   with `go:embed`. Plain JS, no framework, no build. Markdown in messages is
-   rendered by a small in-repo renderer (paragraphs, code blocks, inline code,
-   lists, links); raw HTML is never rendered.
-8. **Peer proxy** — `internal/web`. Reverse proxy for
-   `/api/peers/<name>/*` to the configured base URL, with a 5 s connect
-   timeout, SSE pass-through, and a background health check every 15 s that
-   marks the peer online/offline.
+   with `go:embed`. Plain JS. Messages are rendered by a small in-repo Markdown
+   subset renderer (paragraphs, fenced and inline code, lists, links); raw HTML
+   is never rendered.
+8. **Peer proxy** — `internal/web` (§7.3).
 
-## 5. Data model
+## 5. Thread store
 
-Message (one JSON object per line in `messages.jsonl`; comments are
-annotations only):
+Files in the room, under `.tincan/threads/<tid>/` (`<tid>`: 8 random hex):
 
-```jsonc
-{
-  "seq": 12,
-  "id": "m-4f1c…",
-  "time": "2026-09-28T10:03:11Z",
-  "author": "codex.t7f2a9c1",
-  "role": "agent",                // "user" | "agent" | "system"
-  "text": "…",
-  "mentions": ["claude"],         // resolved targets, in order
-  "request_id": "…",              // the tincan request that produced/carries this
-  "reply_to": 11,                 // seq of the message that triggered it
-  "chain": {"id": "c-…", "hop": 2, "budget": 6},
-  "state": "pending|running|done|error|cancelled|suggested"
-}
-```
+- `thread.json` — `id`, `title`, `primary`, `created`, `status`
+  (`open|stopping|archiving|archived`), `budget` (default from
+  `--chain-budget`, 6), `listeners` (the per-thread listeners this thread
+  created, with preset and session generation; used for janitor, Stop and
+  archive — ownership is never inferred from names).
+- `events.jsonl` — the append-only journal. Every line is one event with a
+  strictly increasing `seq`. Event kinds:
+  - `message` — creates a message: immutable `id`, `n` (display order, assigned
+    at creation), `time`, `author`, `role` (`user|agent|system`), `text`,
+    `reply_to` (message id), `chain` id.
+  - `intent` — a planned agent turn (§6.2): `id`, `message` (the agent
+    message it fills), `listener`, `preset`, `request_id`, `prompt_sha256`.
+    The exact prompt is stored beside the journal as `prompts/<request_id>.txt`
+    before the intent line is written.
+  - `state` — a message's state change: `message` id, `state`
+    (`pending|running|done|error|cancelled|suggested|uncollectable`), `text`
+    (final reply for `done`/`error`).
+  - `handoffs` — marks that an agent message's mentions have been processed,
+    listing the intents or suggestions it produced (exactly-once continuation).
+  - `chain` — chain budget reservations and `stopped` markers.
+  - `thread` — title/status/budget changes.
+- `lock` — the thread's file lock (persistent on disk, as tincan's other locks).
 
-- A user message has `role:"user"`, `author:"you"`, and one `pending` agent
-  message is appended per dispatched target, carrying its `request_id`. The
-  dispatcher later appends a state change for that message (same `id`, new
-  `seq`, updated `state`/`text`); readers fold by `id`, last write wins. This
-  keeps the log append-only.
-- `system` messages report non-agent events (unknown preset, chain budget
-  reached, Stop pressed, agent unavailable on this machine).
-- `state:"suggested"` marks a mention that was not dispatched because the chain
-  budget was exhausted; the UI offers a Send button that posts it as a user
-  message.
+Rules:
+- Every append takes the thread lock, **repairs an incomplete final line**
+  (truncates to the last newline) before writing, writes the full line, and
+  syncs the file. A torn tail can therefore only exist after a crash and is
+  removed by the next writer; readers ignore it until then.
+- Readers fold events into messages by message `id`: creation fields come from
+  `message`, the latest `state` wins. Display order is `n`; `reply_to` refers to
+  ids. The API cursor is the highest `seq` the client has seen.
+- Browser posts carry a client-generated `client_id`; a repeated post with the
+  same `client_id` returns the existing message instead of creating another.
 
 ## 6. Dispatch behaviour
 
-### 6.1 Mentions
+### 6.1 Mentions and targets
 
-- Syntax: `@name` where `name` matches `[A-Za-z0-9][A-Za-z0-9._-]*`, preceded by
-  start of text or whitespace/punctuation. Mentions inside fenced code blocks
-  and inline code are ignored. Trailing `.`, `,`, `:` and `)` are not part of
-  the name.
-- A thread has a `primary` agent. A user message with no mentions is sent to
-  the primary. A message with mentions is sent to each distinct mentioned
-  target in parallel, in order of first appearance.
-- Target resolution, first match wins:
-  1. A preset name available on this machine (`claude`, `codex`, `grok`,
-     `agy`, `kimi`, `gemini`, user presets such as `mimo`, `muse`). The
-     target listener is `<preset>.<tid>` (e.g. `codex.t7f2a9c1`), launched
-     with that preset and the preset's default session mode.
-  2. A listener currently known in the room (hosted state or `/listen`
-     presence), e.g. `@codex-audit`. It is addressed directly and keeps its own
-     conversation, which is shared with whoever else uses it.
-  3. Otherwise the mention stays plain text and a `system` message says the
-     agent is unknown or unavailable on this machine (e.g. a preset whose
-     binary does not resolve).
+- Syntax: `@name`, where `name` is `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` and the
+  `@` is at the start of text or preceded by whitespace or `(`, `[`, `,`.
+  Mentions inside fenced code blocks and inline code are ignored. Trailing
+  `.`, `,`, `:`, `;`, `)` and `]` are not part of the name. `@you` is reserved
+  for the owner and never dispatches.
+- Resolution (canonicalization), first match wins:
+  1. A preset available on this machine (built-in or user presets such as
+     `mimo`, `muse`). It canonicalizes to the thread listener
+     `<preset>.<tid>`; the generated name must pass
+     `envelope.ValidComponent`.
+  2. The exact name of a thread listener of this thread (`codex.t7f2a9c1`).
+  3. A **hosted** listener currently alive in the room (e.g. `codex-audit`),
+     addressed directly with its existing preset and conversation.
+  4. Anything else (unknown names, `/listen` participants, presets whose binary
+     does not resolve) stays plain text and produces one `system` message
+     naming the unresolved mentions.
+- All deduplication and self-checks use the canonical listener name, so
+  `@claude` written by `claude.<tid>` is a self-mention.
+- A user message with no resolved mentions goes to the thread's primary; a user
+  message whose only mentions are unresolved produces the `system` message and
+  no dispatch.
 
-### 6.2 Agents calling agents
+### 6.2 Intents and submission (crash safety)
 
-- After an agent message completes, its text is parsed with the same rules.
-  Each resolved target other than the author is dispatched automatically as
-  the next hop of the same chain.
-- Each user message starts a new chain with the thread's `budget` (default 6)
-  automatic hops. A hop that would exceed the budget is recorded as
-  `suggested` instead of dispatched, and one `system` message notes that the
-  budget was reached.
-- An agent never dispatches to itself. If a target already has a running or
-  pending request in this chain, the new mention queues behind it (the
-  listener is serial) rather than creating a parallel request.
-- A failed, timed-out or cancelled agent turn ends its branch of the chain:
-  nothing is parsed from an error reply.
-- **Stop** (per thread) cancels every non-terminal request in the thread with
-  `request.Cancel` + `host.Cancel` (as `tincan_cancel` does), marks the active
-  chains stopped, and appends a `system` message. Completed work, including
-  file edits, is not undone.
+A turn is dispatched in this order; every step is idempotent:
 
-### 6.3 Context sent to an agent
+1. Under the thread lock: append the agent `message` (state `pending`) and an
+   `intent` with a fresh `request_id` (`<tid>-<message id>`), after writing the
+   exact prompt file.
+2. Outside the lock: call the shared send path with that `request_id`, the
+   exact stored prompt, listener and preset. Because tincan's idempotency
+   requires the same ID **and identical body**, a retry after a crash
+   re-submits the stored prompt and can never create a second execution.
+3. On success append `state: running`. On a launch failure the request is
+   still saved; the message shows the error with Retry, which re-runs step 2
+   with the same ID.
 
-The request body for a turn is:
+One dispatcher per room owns steps 2 onwards: `tincan web` holds
+`.tincan/threads/dispatcher.lock` for each room it serves, so two web
+processes (or a restarted one racing its predecessor) never collect or hand off
+concurrently. A second instance serves reads and forwards writes' dispatch
+work to the lock holder by leaving intents in the journal, which the holder
+picks up on its next reconcile.
 
-1. **Header**: "You are `<name>` in tincan thread '`<title>`' (room
-   `<path>`). Participants: … . All participants share this working tree; use
-   `git status`/`git diff` to see changes others made. Mention another
-   participant with `@name` to hand them work; the owner is `@you`. Reply with
-   your answer for the thread."
-2. **Transcript**:
-   - Session-capable listeners (`host.SupportsSessions`: claude, grok, agy,
-     kimi) receive messages with `seq` greater than the last message this
-     listener already received in this thread.
-   - Stateless listeners (codex, gemini, custom presets) receive the whole
-     thread, newest last, truncated from the oldest end to fit 64 KiB, with a
-     line "[N earlier messages omitted]".
-   - Existing room listeners addressed by name (§6.1.2) are treated as
-     stateless.
-   - Each transcript line is `author: text`; agent error cards are included
-     as `author: [error] …`.
-3. **The triggering message**, repeated at the end, with its author.
+### 6.3 Collection, handoffs and the chain budget
 
-The body must stay below `request.MaxBodyBytes`; the 64 KiB transcript cap
-keeps it well under.
+- The dispatcher collects results with `request.Poll` for every `running`
+  message (polling, not only file watching: some terminal transitions happen
+  only inside `Poll`). A terminal record appends `state` `done` (reply text) or
+  `error` (tincan `ERROR …` reply, cancellation, timeout). A request record that
+  no longer exists (garbage-collected) becomes `uncollectable`.
+- After `done`, the reply's mentions are resolved (§6.1) and, in one locked
+  append, the dispatcher reserves budget and writes the new messages, intents
+  and a `handoffs` marker for the source message. Restart recovery treats a
+  `done` agent message without a `handoffs` marker as unprocessed, so each
+  reply's handoffs happen exactly once.
+- **Budget.** Each user message starts a chain. The chain has a single
+  counter of automatic agent executions, shared by all branches; the user's
+  own initial targets do not count. Reserving an execution appends a `chain`
+  event under the thread lock and fails once the counter reaches the thread's
+  `budget` (default 6). Mentions that cannot reserve become `suggested`
+  messages with a Send button (which posts them as a new user message, a new
+  chain), and one `system` message reports the budget was reached. Fan-out can
+  therefore never exceed the budget in total.
+- Error replies produce no handoffs.
+- A listener runs one request at a time across **all** chains and threads:
+  intents for a busy listener are submitted normally and queue in its inbox.
+  The prompt for a queued turn is built when the intent is created, from the
+  journal at that moment.
 
-### 6.4 Collection and restart
+### 6.4 Context sent to an agent
 
-- The dispatcher watches request records for every `pending`/`running`
-  message in open threads. On a terminal record it appends the final message
-  state with the reply text (tincan's `ERROR …` replies become `error`), then
-  runs §6.2 on success.
-- Progress events (`request.Progress`) are streamed to the UI as the
-  "working…" block; they are not copied into `messages.jsonl`.
-- On `tincan web` start, every non-terminal agent message in non-archived
-  threads is re-attached by its `request_id`; results that completed while the
-  server was down are posted then, and chains continue.
-- Agent-to-agent continuation happens only while `tincan web` is running;
-  requests themselves complete regardless.
+The prompt for a turn is, in order, with a hard total limit of 256 KiB of
+UTF-8 (well under `request.MaxBodyBytes`):
 
-### 6.5 Thread listener lifecycle
+1. **Header** (≤ 2 KiB): "You are `<listener>` in tincan thread '`<title>`'
+   (room `<path>`). Participants: … . All participants work in this same
+   directory; use `git status`/`git diff` to see changes others made. Mention
+   another participant with `@name` to hand them work; the owner is `@you`.
+   Your reply is posted to the thread."
+2. **Transcript**: the folded thread, oldest first, as `author: text` lines
+   (errors as `author: [error] text`), excluding the triggering message.
+   Truncated from the oldest end at message boundaries to fit, with a line
+   `[N earlier messages omitted]`. Every agent, persistent-session or not,
+   receives the transcript; persistent sessions additionally remember their own
+   tool use.
+3. **Triggering message** with its author. If it alone exceeds 128 KiB it is
+   cut at a UTF-8 boundary with `[… truncated, full text in thread <tid>
+   message <id>]`.
 
-- Thread listeners are launched on first dispatch via the shared send path.
-- A janitor in `tincan web` stops (`host.Down`) thread listeners (names ending
-  in `.<tid>`) that have been idle for 30 minutes. Their session pointers
-  remain, so the next mention resumes the same conversation.
-- Archiving a thread stops its listeners and clears their sessions
-  (`host.ClearSession`), then sets `archived`. Archived threads are read-only
-  in the UI and can be unarchived (new sessions start fresh).
-- Listeners addressed by existing name (§6.1.2) are never stopped by the
-  janitor or by archiving.
+### 6.5 Stop and archive barriers
+
+**Stop** (per thread):
+1. Under the thread lock, append `chain stopped` for every active chain and set
+   `status: stopping`. From here no intent is created or submitted: the
+   dispatcher checks chain and thread status under the lock before steps 1 and
+   2 of §6.2.
+2. Mark every intent not yet submitted as `cancelled`.
+3. Cancel every non-terminal request of the thread (`request.Cancel`, then
+   `host.Cancel` for running ones) and keep polling until each is terminal.
+4. Set `status: open` again. Completed work, including file edits, stays.
+
+**Archive**: Stop steps 1–3 with `status: archiving`, then for each thread
+listener in `thread.json`: `host.Down` (which waits for the host to exit), then
+`host.ClearSession` (which requires a stopped host), then drain its inbox of
+this thread's queued requests (already cancelled in step 3, so they cannot run
+later). Finally `status: archived`. Unarchiving sets `status: open` and bumps
+each listener's session generation; the next mention starts a fresh session.
+
+**Janitor**: every minute, under the thread lock, for listeners in
+`thread.json` idle for `--idle-stop` (default 30 min) with no pending or
+running intent: `host.Down`. Session pointers remain, so the next mention
+resumes. Listeners addressed by existing name (§6.1.3) are never stopped.
+
+### 6.6 Restart recovery
+
+On start, for each registered room (after taking its dispatcher lock) and each
+non-archived thread:
+- `stopping`/`archiving` status: finish that procedure.
+- Intents without `running`/terminal state: re-run §6.2 step 2 (idempotent).
+- `running` messages: resume collection.
+- `done` agent messages without `handoffs`: process handoffs.
 
 ## 7. HTTP API
 
-All paths are relative to the instance base path (the UI never assumes `/`).
-Room IDs are registry IDs; the server maps them to paths and never accepts a
-filesystem path in a URL. Peer routes are the same paths under
-`/api/peers/<peer>/`.
+### 7.1 Endpoints
+
+All paths are relative to the instance's base; room IDs are registry IDs and
+no URL ever carries a filesystem path. Peer routes repeat the same paths under
+`api/peers/<peer>/`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/self` | Machine name, version, peers with online state. |
-| GET | `/api/rooms` | Registered rooms (id, name, path, hidden, running agent count). |
-| POST | `/api/rooms` | Add a room `{path}`. |
-| PATCH | `/api/rooms/{rid}` | `{hidden}`. |
-| GET | `/api/rooms/{rid}/threads` | Threads with title, primary, last activity, running count. |
-| POST | `/api/rooms/{rid}/threads` | Create `{title, primary}`. |
-| GET | `/api/rooms/{rid}/threads/{tid}/messages?after=<seq>` | Folded messages after `seq`. |
-| POST | `/api/rooms/{rid}/threads/{tid}/messages` | Post `{text}` as the owner. |
-| POST | `/api/rooms/{rid}/threads/{tid}/stop` | Stop (§6.2). |
-| POST | `/api/rooms/{rid}/threads/{tid}/archive` | `{archived: bool}`. |
-| POST | `/api/rooms/{rid}/messages/{mid}/retry` | Re-dispatch a failed agent message as a new request. |
-| GET | `/api/rooms/{rid}/activity` | Listeners and recent requests (last 50) with status. |
-| GET | `/api/rooms/{rid}/requests/{id}/progress?cursor=` | Progress events. |
-| GET | `/api/rooms/{rid}/agents/{name}/log?tail=` | Last 64 KiB of the host log. |
-| GET | `/api/events` | SSE: `thread`, `message`, `progress`, `activity`, `peer` events with IDs for resume via `Last-Event-ID`. |
+| GET | `api/self` | Machine name, version, peers with online state. |
+| GET | `api/rooms` | Registered rooms (id, name, path, hidden, running count). |
+| POST | `api/rooms` | Add a room `{path}`. |
+| PATCH | `api/rooms/{rid}` | `{hidden}`. |
+| GET | `api/rooms/{rid}/threads` | Threads with title, primary, status, last activity, running count. |
+| POST | `api/rooms/{rid}/threads` | Create `{title, primary, client_id}`. |
+| GET | `api/rooms/{rid}/threads/{tid}/messages?after=<seq>` | Folded messages changed after `seq`, plus the new high-water `seq`. |
+| POST | `api/rooms/{rid}/threads/{tid}/messages` | Post `{text, client_id}` as the owner (text ≤ 128 KiB). |
+| POST | `api/rooms/{rid}/threads/{tid}/stop` | Stop (§6.5). |
+| POST | `api/rooms/{rid}/threads/{tid}/archive` | `{archived: bool}`. |
+| POST | `api/rooms/{rid}/threads/{tid}/messages/{mid}/retry` | Re-run §6.2 step 2 for a failed submission, or re-dispatch a failed turn as a new intent. |
+| GET | `api/rooms/{rid}/activity` | Listeners (hosted + presence) and the last 50 request records. |
+| GET | `api/rooms/{rid}/requests/{id}/progress?cursor=` | Progress events. |
+| GET | `api/rooms/{rid}/agents/{name}/log` | Last 64 KiB of a hosted listener's log. |
+| GET | `api/events` | SSE change notifications (§7.2). |
 
-Request and response bodies are JSON; errors are `{"error": "…"}` with 4xx/5xx.
-Message text is limited to 256 KiB.
+Errors are `{"error": "…"}` with a 4xx/5xx status.
+
+### 7.2 Live updates
+
+- The server watches each relevant directory individually (fsnotify is not
+  recursive): every open thread directory, each room's `.tincan/requests`,
+  `.tincan/hosts` and `.tincan/present`. It **also reconciles every 2 s**
+  regardless of watch success, as the spool does.
+- SSE events are notifications only — `{"kind": "thread"|"messages"|
+  "activity"|"peer", "room": …, "thread": …, "seq": …}` — never the data
+  itself. The client refetches with its cursor. On any reconnect (including
+  after a server restart or a peer coming back), the client refetches
+  everything it displays; there is no event replay to get wrong.
+
+### 7.3 Peer proxy, base path and CSRF
+
+- **Base path.** `tailscale serve --set-path /tincan` strips the prefix before
+  forwarding, so the server cannot tell `/tincan` from `/tincan/`. The server
+  therefore takes `--public-path` (default `/`; `/tincan` in deployment) and
+  renders `index.html` with absolute URLs under it (`/tincan/app.js`,
+  `/tincan/api/…`); `app.js` reads the base from a `<meta>` tag and builds every
+  URL from it. Routing inside the server ignores the public path. Peer data is
+  always fetched through the hub's `api/peers/<name>/…`, so a peer's own
+  public path never reaches the browser.
+- **Proxy.** `--peer macmini=https://macmini.brill-decibel.ts.net/tincan/`.
+  The hub joins `api/peers/macmini/<rest>` to the peer base exactly once
+  (`<base>api/<rest>`), streams SSE through, uses a 5 s connect timeout and a
+  health check every 15 s.
+- **CSRF.** Mutating requests (POST/PATCH) require `X-Tincan-Request: 1` and,
+  when `Origin` is present, an Origin equal to the scheme+host of the request
+  as seen by the client. The **hub** performs this check before proxying. The
+  hub's outbound peer request carries its own `X-Tincan-Request: 1`, no
+  browser `Origin`, and the peer's host as `Host`; browser cookies and identity
+  headers are never forwarded.
 
 ## 8. UI (layout B)
 
 - **Sidebar**: machines (with online dot), their rooms, each room's threads
-  plus an "Activity (n running)" entry, and "+ new thread" (title, primary
-  agent picker listing available presets). Hidden rooms are behind a toggle.
-- **Thread view**: header with title, a chip per participant showing
-  idle/busy/elapsed, and Stop. Messages in order; agent messages show
-  "working… (handoff h/budget)" with a collapsible live-output block while
-  running; errors are red cards with Retry and Open log; `suggested` mentions
-  show a Send button.
-- **Composer**: multiline, Enter sends, Shift+Enter newline, `@` opens an
-  autocomplete of presets and room listeners.
-- **Activity tab**: running and recent requests in the room from any source,
-  with sender, agent, status, elapsed, live output, and "Message this agent"
-  which opens a new thread whose primary is that listener.
-- **Responsive**: below 768 px the sidebar becomes a drawer; the layout works
-  on iPad and phone widths. Light and dark themes follow the system.
+  plus "Activity (n running)", and "+ new thread" (title, primary agent picker
+  listing available presets). Hidden rooms are behind a toggle.
+- **Thread view**: header with title, one chip per participant
+  (idle/busy/elapsed) and Stop. Messages in `n` order; running agent messages
+  show "working… (k/budget used)" with a collapsible live-output block; errors
+  are red cards with Retry and Open log; `suggested` handoffs show Send;
+  `uncollectable` shows "result expired".
+- **Composer**: multiline, Enter sends, Shift+Enter newline, `@` autocompletes
+  presets, this thread's listeners and hosted room listeners.
+- **Activity tab**: listeners (hosted and `/listen` presence) and journaled
+  requests from any source with sender, agent, status, elapsed, live output;
+  "Message this agent" (hosted listeners only) opens a new thread with that
+  listener as primary.
+- **Responsive**: below 768 px the sidebar is a drawer; works on iPad and
+  phone widths. Light and dark themes follow the system.
 
 ## 9. Security
 
-- `tincan web` binds `127.0.0.1` only (flag `--listen`, which refuses non-
-  loopback addresses unless `--insecure-listen` is also given). Remote access
-  is only through `tailscale serve`.
-- Every request must carry `Tailscale-User-Login` equal to the owner
-  (`--owner`, default: the node owner's login from `tailscale status --json`
-  at startup, using `tailscale` on `PATH` or, on macOS,
-  `/Applications/Tailscale.app/Contents/MacOS/Tailscale`; startup fails with a
-  clear message if neither `--owner` nor the CLI is available). Requests without the header or with another identity get 403.
-  This excludes other tailnet users, shared-in users and tagged devices.
-- State-changing requests (POST/PATCH) additionally require the header
-  `X-Tincan-Request: 1` and, when present, an `Origin` matching the request's
-  host, so other websites cannot trigger actions through the browser.
-- The hub calls the peer through the peer's `tailscale serve` URL; Tailscale
-  sets the identity header for the calling device's owner, so the peer's owner
-  check passes without shared secrets. The hub never forwards the browser's
-  identity header.
-- Anyone passing these checks can run agents with the local presets'
-  permissions (e.g. `claude --dangerously-skip-permissions`) in registered
-  rooms; the docs state this plainly.
-- Responses set `Content-Security-Policy: default-src 'self'`,
+Threat model: anyone who can call the API can run agents with the local
+presets' permissions (e.g. `claude --dangerously-skip-permissions`) in
+registered rooms, which is equivalent to a shell as the owner. The design
+therefore trusts exactly the owner's own devices and processes and nothing
+else, and the docs say so.
+
+- **Listener.** Default `--listen unix:$XDG_RUNTIME_DIR/tincan/web.sock`
+  (fallback `~/.local/state/tincan/web.sock`), in a `0700` directory with the
+  socket `0600`, so other OS users cannot connect. `tailscale serve` forwards to
+  the socket (`tailscale serve --set-path /tincan unix:<path>`, supported on
+  Linux/macOS). `--listen 127.0.0.1:<port>` exists for platforms where serve
+  cannot reach the socket (e.g. a sandboxed macOS Tailscale app — verified per
+  machine at deployment); with TCP, any local process of any OS user can reach
+  the server, which the docs call out. There is no non-loopback TCP option.
+- **Owner check.** Every request must carry `Tailscale-User-Login` equal to
+  `--owner` (default: this node's owner login from `tailscale status --json`,
+  via `tailscale` on `PATH` or `/Applications/Tailscale.app/Contents/MacOS/Tailscale`;
+  startup fails clearly if neither is available). Serve replaces any
+  client-supplied identity headers. For node-to-node calls the header names
+  the calling device's owner, so calls from **any process on any of the
+  owner's untagged devices** pass: this is accepted (such processes could
+  already run agents locally) and documented. Other users, shared-in users and
+  tagged devices are refused with 403.
+- **CSRF** as in §7.3.
+- **Headers**: `Content-Security-Policy: default-src 'self'`,
   `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
+- **Tagging**: neither machine may be tagged; a tagged hub would lose the
+  identity header on peer calls. This is why a Tailscale Service hostname is
+  out of scope for v1.
 
 ## 10. Deployment
 
-- `tincan web --listen 127.0.0.1:7788 [--peer macmini=https://macmini.brill-decibel.ts.net/tincan] [--owner …] [--scan ~/projects]`.
-- cachyos (hub): systemd user unit `tincan-web.service`;
-  `tailscale serve --bg --set-path /tincan http://127.0.0.1:7788`, giving
+- `tincan web [--listen unix:<path>|127.0.0.1:<port>] [--peer name=<url>]
+  [--public-path /tincan] [--owner <login>] [--scan <dir>] [--chain-budget 6]
+  [--idle-stop 30m]`.
+- cachyos (hub): systemd user unit `tincan-web.service` running
+  `tincan web --peer macmini=https://macmini.brill-decibel.ts.net/tincan/`;
+  `tailscale serve --bg --set-path /tincan unix:<socket>`, giving
   `https://cachyos.brill-decibel.ts.net/tincan/` beside the existing `/` and
   `/comics` routes.
-- macmini (peer): launchd agent `net.tincan.web.plist` running
-  `tincan web`; the same `tailscale serve` path via the Tailscale app's CLI.
-- Optional dedicated name: a Tailscale Service `svc:tincan` for
-  `https://tincan.brill-decibel.ts.net`, which needs the owner's approval in the
-  admin console; the base-path handling makes this a configuration change only.
-- `docs/web.md` documents flags, both service files and the serve commands.
-  Service files are not installed by `install.sh` in v1.
+- macmini (peer): launchd agent `net.tincan.web.plist`; the same serve route
+  via the Tailscale app's CLI, using the socket if the app can reach it and
+  loopback TCP otherwise.
+- `docs/web.md` documents flags, both service files, the serve commands and
+  the threat model. `install.sh` does not install services in v1.
 
 ## 11. Error handling
 
 | Situation | Behaviour |
 |---|---|
-| Agent turn fails / times out / cancelled | Message becomes an `error` card with the `ERROR …` text; Retry and Open log; chain branch ends. |
-| Preset missing on this machine | `system` message; no dispatch. |
-| Unknown mention | Plain text + `system` message. |
-| Browser disconnects | SSE reconnects with `Last-Event-ID`; client refetches `messages?after=`. |
-| Concurrent posts | Serialized by the thread lock; ordered by `seq`. |
-| Peer unreachable | Peer rooms greyed "offline"; hub keeps serving local rooms; health check retries. |
-| `tincan web` restarts mid-request | §6.4 re-attach. |
-| Registry unreadable | Web starts with an empty registry and a banner; commands never fail on it. |
-| Room path removed | Room shown as missing; hidden on request. |
+| Agent turn fails / times out / cancelled | `error` card with the `ERROR …` text; Retry and Open log; no handoffs. |
+| Launch fails after the request is saved | `error` card; Retry re-submits the same request ID and prompt. |
+| Preset missing on this machine | One `system` message; no dispatch. |
+| Unknown or `/listen` mention | Plain text + one `system` message. |
+| Request record garbage-collected | `uncollectable` ("result expired"). |
+| Browser disconnects | SSE reconnects; client refetches with its cursor. |
+| Duplicate browser post | Same `client_id` returns the existing message. |
+| Concurrent writers | Thread lock + one dispatcher per room (§6.2). |
+| Peer unreachable | Peer rooms greyed "offline"; hub keeps serving; health check retries. |
+| `tincan web` crash at any point | §6.6 recovery; no lost, duplicated or orphaned turns. |
+| Registry unreadable | Web starts empty with a banner; commands never fail on it. |
+| Room path removed | Room shown missing; can be hidden. |
 
 ## 12. Testing
 
-- Unit: mention parsing (code spans, punctuation, self, unknown), target
-  resolution order, context building (persistent vs stateless, 64 KiB cap,
-  omitted-count line), chain budget and queueing, message folding, thread log
-  ordering under concurrent appends, torn-line tolerance, registry
-  touch/import/hide, owner and CSRF checks (missing, wrong, correct), base-path
-  handling.
-- Integration (Go tests with the existing fake agent as presets `fake`,
-  `fake2`): post "@fake do x" → fake replies "@fake2 check" → fake2 dispatched
-  → both replies in the thread; budget exhaustion yields `suggested`; Stop
-  mid-chain cancels the running request; server restart mid-request
-  re-attaches and posts the result; peer proxy against a second in-process
-  server, including the peer going offline and returning.
-- MCP regression: existing `internal/mcpserver` tests pass unchanged after
-  the shared send path extraction.
-- UI smoke (manual, in a real browser): create thread, post, live progress,
-  handoff, Stop, archive, phone-width drawer.
-- CI: existing Linux/macOS/Windows matrix. On Windows, thread listeners need a
-  foreground `tincan serve` as today; tests that launch detached listeners
-  skip there, as existing ones do.
+Unit
+- Mention parsing (code spans, punctuation, `@you`, length and
+  `ValidComponent` limits) and canonical resolution order, including
+  `@claude` from `claude.<tid>` counting as a self-mention.
+- Journal: concurrent appends from several processes keep `seq` strict; an
+  append after an injected torn tail repairs it; folding by id with display
+  order `n`; `client_id` deduplication.
+- Prompt building: header, transcript truncation with the omitted count, the
+  256 KiB total cap, UTF-8-safe cut of an oversized trigger.
+- Budget: a branching chain (one reply mentioning three agents, each
+  mentioning two more) never exceeds the budget in total executions; overflow
+  becomes `suggested`.
+- Owner/CSRF middleware: missing, wrong and correct identity; mutation without
+  `X-Tincan-Request`; mismatched Origin at the hub.
+
+Integration (Go tests using the existing fake agent as presets `fake` and
+`fake2`)
+- Round trip: "@fake do x" → fake replies "@fake2 check" → fake2 runs → both
+  replies in the thread.
+- **Crash boundaries**: kill the dispatcher (a test hook that exits the
+  process) after the intent append, after submission, after the terminal state,
+  and after writing handoffs; restart; assert each fake agent executed exactly
+  once per turn (execution counter file) and every handoff happened once.
+- Stop racing a completion that would hand off: no new execution starts after
+  Stop returns; archive leaves no queued request that runs after unarchive.
+- Two `tincan web` processes on one room: only the lock holder dispatches.
+- Memory: a session-capable adapter test (in the style of
+  `internal/host/session_test.go`) checks that the second turn of a thread
+  listener resumes the saved session ID.
+- Peer proxy against a second in-process server: path joining, SSE
+  pass-through, mutation forwarding with the hub's headers, peer going offline
+  and back.
+- MCP regression: existing `internal/mcpserver` tests pass unchanged after the
+  shared send path extraction.
+
+Deployment verification (manual, recorded in the plan): through real
+`tailscale serve` on both machines, check the identity header is present and
+correct from a browser and from the hub, a request from another identity is
+refused, the mounted path loads assets and API, and a proxied POST to the peer
+succeeds. Then a UI smoke test in a real browser: create a thread, post, live
+progress, a handoff, Stop, archive, phone-width drawer.
+
+CI: existing Linux/macOS/Windows matrix; tests that launch detached listeners
+skip on Windows, as existing ones do.
 
 ## 13. Configuration defaults
 
-- `--idle-stop 30m`: janitor threshold for thread listeners (§6.5).
-- `--chain-budget 6`: default budget for new threads (§6.2); each thread can
-  override it in `thread.json`.
-- `recv` also calls the registry `Touch`, so rooms used only by interactive
-  `/listen` participants appear in the UI.
+- `--chain-budget 6`, per-thread override in `thread.json`.
+- `--idle-stop 30m`.
+- `--scan ~/projects`.
+- `--listen unix:$XDG_RUNTIME_DIR/tincan/web.sock`.
+- `--public-path /`.
+
+## 14. Review record
+
+Codex review (2026-09-28) and resolution:
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | Local processes could forge identity on a loopback port | Unix socket default (§9); remaining trust in the owner's devices stated. |
+| 2 | Dispatch not crash-safe | Durable intents with stored prompts, deterministic request IDs, `handoffs` markers, one dispatcher per room, `client_id` (§6.2, §6.3, §6.6). |
+| 3 | Stop/archive lacked a dispatch barrier | Status barrier under the lock before cancelling; archive order Down → ClearSession; listener membership persisted (§6.5). |
+| 4 | Interactive listeners break collection/Stop | Out of scope for dispatch in v1 (§2, §6.1). |
+| 5 | Session capability ≠ delivery checkpoint | Full bounded transcript for every agent (§6.4). |
+| 6 | Budget allowed exponential fan-out and alias self-dispatch | Chain-wide execution counter reserved atomically; canonical names (§6.1, §6.3). |
+| 7 | Activity cannot show all traffic | Scoped to journaled requests + presence (§2, §8). |
+| 8 | Shared sender needed name and preset separately | §4.1 item 4; `ValidComponent` and `@you` in §6.1. |
+| 9 | Append/folding semantics incomplete | Immutable ids, display order `n`, `seq` cursor, tail repair + sync (§5). |
+| 10 | 64 KiB cap did not bound the body | 256 KiB total prompt budget, trigger cap (§6.4). |
+| 11 | Non-recursive watching could miss updates | Per-directory watches + 2 s reconcile; SSE as notifications only (§7.2). |
+| 12 | Proxy CSRF and base path underspecified | `--public-path`, hub-side Origin check, outbound header rules, path join (§7.3). |
+| 13 | Service hostname conflicts with peer auth | Deferred (§2, §9). |
+| 14 | Tests could pass without proving behaviour | Crash-boundary, race, branching-budget, torn-tail, session-resume and real-Serve checks (§12). |
