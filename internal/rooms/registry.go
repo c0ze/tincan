@@ -135,15 +135,16 @@ func TooBroad(dir string) bool {
 }
 
 // excluded reports paths never registered: phase 2 review workspaces under
-// <state dir>/reviews/.
+// <state dir>/reviews/. The state dir is resolved the same way Open resolves
+// its registry path (longest existing prefix through EvalSymlinks), so a
+// state dir that does not exist yet under a symlinked ancestor still compares
+// canonically against the already-canonical paths Touch/Add/Import produce.
 func excluded(path string) bool {
 	d := StateDir()
 	if d == "" {
 		return false
 	}
-	if c, err := Canonical(d); err == nil {
-		d = c
-	}
+	d = resolveAncestor(d)
 	rel, err := filepath.Rel(filepath.Join(d, "reviews"), path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
@@ -172,6 +173,9 @@ func (r *Registry) read() (file, error) {
 }
 
 func (r *Registry) update(fn func(*file) error) error {
+	if r.path == "" {
+		return nil
+	}
 	if err := fsutil.MkdirPrivate(filepath.Dir(r.path)); err != nil {
 		return err
 	}

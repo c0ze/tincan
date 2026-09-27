@@ -160,3 +160,90 @@ func TestEmptyPathRegistryIsNoop(t *testing.T) {
 		t.Fatalf("Touch without state dir: %v", err)
 	}
 }
+
+// TestExcludedResolvesStateDirThroughSymlinkedAncestor is a focused,
+// whitebox reproduction of the excluded() bug: StateDir() can return a
+// non-canonical path (an ancestor is a symlink) that does not exist yet, and
+// naively calling Canonical on it then fails and leaves it raw, so comparing
+// it against the already-canonical paths Touch/Add/Import produce silently
+// fails to exclude a review workspace that really is nested under it. This
+// is verified by toggling the fix locally and observing excluded flip from
+// false to true for the same inputs; it is included here as the regression
+// check since Touch/Add/Import cannot exercise the divergence directly (see
+// TestTouchIgnoresReviewWorkspaceUnderSymlinkedStateDir below).
+func TestExcludedResolvesStateDirThroughSymlinkedAncestor(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	// Non-canonical and not yet existing: neither "link/state" nor
+	// "real/state" has been created.
+	t.Setenv("TINCAN_STATE_DIR", filepath.Join(link, "state"))
+
+	// The canonical form a review workspace under that (not yet created)
+	// state dir would have.
+	ws := filepath.Join(real, "state", "reviews", "workspaces", "rv-1-0")
+	if !excluded(ws) {
+		t.Fatalf("excluded(%q) = false, want true", ws)
+	}
+}
+
+// TestTouchIgnoresReviewWorkspaceUnderSymlinkedStateDir is the integration
+// version of the scenario above, going through the public Touch API with a
+// review workspace that physically exists under a non-canonical
+// TINCAN_STATE_DIR reached through a symlinked ancestor.
+func TestTouchIgnoresReviewWorkspaceUnderSymlinkedStateDir(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	t.Setenv("TINCAN_STATE_DIR", filepath.Join(link, "state")) // non-canonical
+
+	ws := filepath.Join(real, "state", "reviews", "workspaces", "rv-1-0")
+	if err := os.MkdirAll(ws, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	r := tempRegistry(t)
+	if err := r.Touch(ws); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := r.List(); len(list) != 0 {
+		t.Fatalf("review workspace registered under symlinked state dir: %+v", list)
+	}
+}
+
+// TestSetHiddenIsNoopWhenRegistryDisabled guards Open("")'s documented
+// contract ("every method is then a no-op") for SetHidden specifically:
+// before the fix it called update() unconditionally, which acquired a file
+// lock at "<cwd>/.lock" and left that file behind.
+func TestSetHiddenIsNoopWhenRegistryDisabled(t *testing.T) {
+	t.Chdir(t.TempDir())
+	r := Open("")
+	if err := r.SetHidden("000000000000", true); err != nil {
+		t.Fatalf("SetHidden on disabled registry: %v", err)
+	}
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("SetHidden left files in the working directory: %+v", entries)
+	}
+}
