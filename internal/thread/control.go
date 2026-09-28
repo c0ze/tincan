@@ -10,6 +10,8 @@ import (
 
 	"github.com/c0ze/tincan/v2/internal/host"
 	"github.com/c0ze/tincan/v2/internal/request"
+	"github.com/c0ze/tincan/v2/internal/review"
+	"github.com/c0ze/tincan/v2/internal/rooms"
 	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
@@ -69,6 +71,21 @@ func (d *Dispatcher) SetArchived(ctx context.Context, tid string, archived bool)
 // await submitted ones, then reopen or finish archiving.
 func (d *Dispatcher) finishStop(ctx context.Context, t *Thread, snap Snapshot) error {
 	room := d.Opts.Room
+	// Committee reviews started from this thread are cancelled first,
+	// outside any thread transaction (review → thread is the only lock
+	// nesting); cancelling does not wait for peers (committees §6.10).
+	if canonical, err := rooms.Canonical(room); err == nil {
+		for _, m := range snap.Messages {
+			if m.Role != RoleCommittee || m.Review == "" {
+				continue
+			}
+			if st, err := review.ReadState(canonical, m.Review); err == nil && !st.Settled && !st.CancelRequested {
+				if _, err := review.RequestCancel(ctx, canonical, m.Review); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	type result struct{ id, state, text string }
 	var settled []result
 	pending := false
@@ -115,6 +132,11 @@ func (d *Dispatcher) finishStop(ctx context.Context, t *Thread, snap Snapshot) e
 		for _, s := range settled {
 			if cur, _ := tx.Snap.Message(s.id); cur.Active() {
 				tx.Append(Event{Kind: KindState, Message: s.id, State: s.state, Text: s.text})
+			}
+		}
+		for _, m := range tx.Snap.Messages {
+			if m.Role == RoleCommittee && (m.State == StatePending || m.State == StateRunning) {
+				tx.Append(Event{Kind: KindState, Message: m.ID, State: StateCancelled, Text: "Cancelled: the thread was stopped."})
 			}
 		}
 		// Completed turns never hand off after a Stop.

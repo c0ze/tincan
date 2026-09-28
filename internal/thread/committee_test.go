@@ -127,7 +127,6 @@ func TestBuildPublishesFromTheSnapshotAndRuns(t *testing.T) {
 }
 
 func TestStopBeforeBuildNeverPublishes(t *testing.T) {
-	t.Skip("Task 6")
 	e, d, _ := committeeEnv(t, "x@box")
 	th, _ := thread.Create(e.room, "t", "a", "", 6)
 	d.Post(context.Background(), th.ID, "@reviewers check", "")
@@ -288,7 +287,6 @@ func TestAgentMentionGetsOneSynthesisTurn(t *testing.T) {
 }
 
 func TestResultsAreNotPostedToAnArchivedThread(t *testing.T) {
-	t.Skip("Task 6")
 	e, d, _ := committeeEnv(t, "x@box")
 	th, _ := thread.Create(e.room, "t", "a", "", 6)
 	_, in := running(t, e, d, th, "@reviewers check")
@@ -313,4 +311,18 @@ func TestResultsAreNotPostedToAnArchivedThread(t *testing.T) {
 func readLast(e *env, name string) string {
 	b, _ := os.ReadFile(filepath.Join(e.fixture, name+".last"))
 	return string(b)
+}
+func TestStopWhileRunningCancelsTheReview(t *testing.T) {
+	e, d, _ := committeeEnv(t, "x@box")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	cm, in := running(t, e, d, th, "@reviewers check")
+	d.RequestStop(context.Background(), th.ID)
+	snap := e.settle(d, th, func(s thread.Snapshot) bool { return s.Meta.Status == thread.StatusOpen })
+	if got, _ := snap.Message(cm.ID); got.State != thread.StateCancelled {
+		t.Fatalf("committee message after stop: %+v", got)
+	}
+	st, _ := review.ReadState(e.room, in.ReviewID)
+	if !st.CancelRequested {
+		t.Fatalf("review not cancelled: %+v", st)
+	}
 }
