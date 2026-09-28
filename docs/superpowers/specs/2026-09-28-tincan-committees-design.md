@@ -255,8 +255,11 @@ are removed by the coordinator.
 **Placement.** Reviews reconcile inside phase 1's room pass, on the
 `thread.Dispatcher` that already owns the room's `dispatcher.lock` — the same
 per-room serialization and cross-room concurrency as threads — after the
-room's threads, for every review that is not `settled`. Lock order: thread
-lock → review lock → job lock.
+room's threads, for every review that is not `settled`. Lock nesting has one
+direction only: review lock → thread lock (the coordinator posting results
+and completing committee messages) → job lock. The thread side never takes a
+review lock while holding a thread lock: it publishes and requests
+cancellation between its transactions.
 
 **Delivery guarantee.** Every step is idempotent in the normal case; a crash
 between an external call and recording its outcome may repeat that call
@@ -590,6 +593,11 @@ before hosted listeners, in owner messages and agent handoffs.
   build time — then, in a second transaction, marks the message `running` if
   it is still `pending`, or else sets `cancel_requested` on the review it just
   published. Build errors (refused scope, unknown member) mark it `error`.
+- *Coordinator interface.* The coordinator reaches threads through a small
+  sink the room's dispatcher implements (post a member result; complete the
+  committee message), passed per room pass, so the review package never
+  depends on threads. Thread reviews are published from the frozen snapshot
+  in the intent, not by looking the committee up again.
 - *Results.* When a member result is recorded, append its `review` message
   (skipped if that `Review` reference exists), then set `posted`. When the
   review closes or is cancelled, the committee message follows (`done` with
