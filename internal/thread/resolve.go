@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"github.com/c0ze/tincan/v2/internal/committee"
 	"github.com/c0ze/tincan/v2/internal/envelope"
 	"github.com/c0ze/tincan/v2/internal/host"
 )
@@ -10,6 +11,8 @@ type Target struct {
 	Listener string // canonical listener name
 	Preset   string
 	Existing bool // an existing room listener, not owned by the thread
+	// Committee is set when the mention names a committee (phase 2b-4).
+	Committee *committee.Committee
 }
 
 type Resolver struct {
@@ -17,6 +20,8 @@ type Resolver struct {
 	Presets map[string]host.Preset
 	// Alive reports a live listener; hosted listeners have a non-empty Owner.
 	Alive func(name string) (host.State, bool)
+	// Committees this machine knows, by name; nil disables @committee.
+	Committees map[string]committee.Committee
 }
 
 func (r Resolver) available(name string) bool {
@@ -50,6 +55,9 @@ func (r Resolver) Resolve(meta Meta, names []string) ([]Target, []string) {
 				continue
 			}
 			add(Target{Mention: name, Listener: listener, Preset: name})
+		case r.Committees[name].Name != "":
+			c := r.Committees[name]
+			add(Target{Mention: name, Listener: "committee:" + name, Committee: &c})
 		case meta.Listeners[name] != "":
 			add(Target{Mention: name, Listener: name, Preset: meta.Listeners[name]})
 		default:

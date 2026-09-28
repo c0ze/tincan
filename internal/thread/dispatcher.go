@@ -13,11 +13,13 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/c0ze/tincan/v2/internal/committee"
 	"github.com/c0ze/tincan/v2/internal/dispatch"
 	"github.com/c0ze/tincan/v2/internal/filelock"
 	"github.com/c0ze/tincan/v2/internal/fsutil"
 	"github.com/c0ze/tincan/v2/internal/host"
 	"github.com/c0ze/tincan/v2/internal/request"
+	"github.com/c0ze/tincan/v2/internal/rooms"
 )
 
 var ErrNotOwner = errors.New("another tincan web process dispatches this room")
@@ -28,6 +30,12 @@ type Dispatcher struct {
 	// Hook, when set, is called at named points and aborts the pass when it
 	// returns an error; tests use it to simulate crashes.
 	Hook func(point string) error
+
+	// Committees (phase 2b-4): set by tincan web; empty disables @committee.
+	Machine        string
+	StateDir       string
+	CommitteesFrom string
+	Registry       *rooms.Registry
 
 	mu   sync.Mutex
 	lock *filelock.Lock
@@ -76,7 +84,18 @@ func (d *Dispatcher) Resolver() (Resolver, error) {
 	if err != nil {
 		return Resolver{}, err
 	}
-	return Resolver{Room: d.Opts.Room, Presets: presets, Alive: func(name string) (host.State, bool) {
+	var committees map[string]committee.Committee
+	if d.StateDir != "" && d.Machine != "" {
+		list, err := committee.List(d.StateDir, d.CommitteesFrom != "")
+		if err != nil {
+			return Resolver{}, err
+		}
+		committees = map[string]committee.Committee{}
+		for _, c := range list {
+			committees[c.Name] = c
+		}
+	}
+	return Resolver{Room: d.Opts.Room, Presets: presets, Committees: committees, Alive: func(name string) (host.State, bool) {
 		return host.Existing(context.Background(), d.Opts.Room, name)
 	}}, nil
 }
@@ -144,7 +163,13 @@ func (d *Dispatcher) Post(ctx context.Context, tid, text, clientID string) (Mess
 			d.system(tx, unresolvedNote(unresolved), chain)
 		}
 		for _, tg := range targets {
-			if _, err := d.planTurn(t, tx, tg, out, chain, false); err != nil {
+			var err error
+			if tg.Committee != nil {
+				_, err = d.planCommittee(t, tx, tg, out, chain, false)
+			} else {
+				_, err = d.planTurn(t, tx, tg, out, chain, false)
+			}
+			if err != nil {
 				return err
 			}
 		}
@@ -408,7 +433,13 @@ func (d *Dispatcher) handoffs(ctx context.Context, t *Thread, m Message) error {
 				if tg.Listener == cur.Listener {
 					continue
 				}
-				id, err := d.planTurn(t, tx, tg, cur, cur.Chain, true)
+				var id string
+				var err error
+				if tg.Committee != nil {
+					id, err = d.planCommittee(t, tx, tg, cur, cur.Chain, true)
+				} else {
+					id, err = d.planTurn(t, tx, tg, cur, cur.Chain, true)
+				}
 				if err != nil {
 					return err
 				}
