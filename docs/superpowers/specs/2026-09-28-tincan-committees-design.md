@@ -201,7 +201,7 @@ Storage and sync:
   staging/<review_id>.<nonce>/   one publisher's attempt; never read by the coordinator
   <review_id>/
     input.json               immutable: identity, committee snapshot, question, scope, origin, created, deadline
-    packet/                  immutable: manifest.json, diff.patch, files/…, question.md
+    packet.json              immutable: the packet (§6.5) exactly as sent to members
     prompts/<n>.txt          immutable: coordinator prompt for member n
     review.json              mutable state, rewritten atomically under ./lock
     results/<n>.md           member results
@@ -229,7 +229,7 @@ Storage and sync:
 ### 6.3 Publication
 
 1. **Coordinator present.** `tincan web` writes `<state>/web.json`
-   (`pid`, `machine`, `started`, `updated`) at least every 10 s and removes it
+   (`pid`, `machine`, `committees_from`, `started`, `updated`) at least every 10 s and removes it
    on a clean shutdown. MCP and CLI entry points refuse
    with "tincan web is not running on this machine; start it (see
    docs/web.md)" unless `updated` is under 30 s old. They register the room
@@ -556,8 +556,8 @@ in the room's Activity and review list.
 - `tincan_review_cancel {review_id}`.
 
 **CLI**: `tincan review --committee X (--question <text> | --question-file
-<f>) [--scope …] [--request-id id] [--wait]`; `tincan review --wait <id>`
-reattaches; `tincan review --cancel <id>`. `--wait` exits 3 when the review
+<f>) [--scope …] [--request-id id] [--room dir] [--wait]`; `tincan review
+--wait <id>` reattaches; `tincan review --cancel <id>`. `--wait` exits 3 when the review
 closed with late or unreachable members.
 
 **Thread reviews: `@committee`.** `@<committee>` is resolved after presets and
@@ -647,9 +647,10 @@ in threads; reviews in Activity.
 ## 8. Quotas and skipping
 
 - Display: the member picker and review cards show each member's quota.
-- `skip_exhausted` defaults to **false**. When true, the requester asks the
+- `skip_exhausted` defaults to **false**. When true, the coordinator asks the
   member's machine `GET api/presets/{preset}/quota-status` (local call for
-  local members) at publication. That machine decides, and answers
+  local members) just before submitting that member; entry points cannot
+  reach peers, so the decision is the coordinator's. That machine decides, and answers
   `{exhausted: true, reset_at, window}` only if: exactly one `quotas.json`
   entry explicitly maps the preset — counted over the whole configuration,
   including entries whose cache file is absent (phase 1's `Load` enumerates
