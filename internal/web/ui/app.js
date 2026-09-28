@@ -19,6 +19,7 @@ const state = {
   meta: null,
   chains: {},
   seq: 0,
+  msgGen: 0,           // bumped per refreshMessages call; drops stale in-flight responses
   agents: { presets: [], listeners: [] },
   progress: new Map(), // request id -> {cursor, text}
   sources: {},
@@ -82,8 +83,12 @@ async function api(key, path, opts = {}) {
 function clientId() { return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/[^a-z0-9-]/gi, ""); }
 
 function parseHash() {
-  const [key, rid, tid] = location.hash.replace(/^#\//, "").split("/").map(decodeURIComponent);
-  return key && rid ? { key, rid, tid: tid || "activity" } : null;
+  try {
+    const [key, rid, tid] = location.hash.replace(/^#\//, "").split("/").map(decodeURIComponent);
+    return key && rid ? { key, rid, tid: tid || "activity" } : null;
+  } catch (e) {
+    return null; // malformed percent-encoding in location.hash
+  }
 }
 
 function go(key, rid, tid) {
@@ -109,7 +114,7 @@ async function loadRooms(m) {
 }
 
 async function loadThreads(key, rid) {
-  state.threads[key + "/" + rid] = await api(key, `rooms/${rid}/threads`);
+  state.threads[key + "/" + rid] = await api(key, `rooms/${encodeURIComponent(rid)}/threads`);
 }
 
 function renderSidebar() {
@@ -150,7 +155,7 @@ function renderSidebar() {
 
 // ---------- new thread ----------
 async function newThread(key, rid) {
-  const agents = await api(key, `rooms/${rid}/agents`);
+  const agents = await api(key, `rooms/${encodeURIComponent(rid)}/agents`);
   const sel = $("nt-primary");
   sel.replaceChildren(...[...agents.presets, ...agents.listeners].map((a) => el("option", "", a)));
   $("nt-title").value = "";
@@ -160,7 +165,7 @@ async function newThread(key, rid) {
   dlg.onclose = async () => {
     if (dlg.returnValue !== "ok") return;
     try {
-      const t = await api(key, `rooms/${rid}/threads`, { method: "POST",
+      const t = await api(key, `rooms/${encodeURIComponent(rid)}/threads`, { method: "POST",
         body: { title: $("nt-title").value, primary: sel.value, client_id: clientId() } });
       await loadThreads(key, rid);
       go(key, rid, t.id);
@@ -183,18 +188,28 @@ async function openCurrent() {
   $("chips").replaceChildren();
   if (!cur) { $("title").textContent = "Pick a room"; return; }
   if (cur.tid === "activity") return showActivity();
-  state.agents = await api(cur.key, `rooms/${cur.rid}/agents`).catch(() => ({ presets: [], listeners: [] }));
+  state.agents = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/agents`).catch(() => ({ presets: [], listeners: [] }));
   await refreshMessages();
 }
 
+// refreshMessages can be called again (composer submit, SSE note, poll)
+// before an earlier call's fetch resolves. A generation counter drops any
+// response that isn't from the most recently issued call, and a view-change
+// check (key/rid/tid) drops a response that arrives after navigation moved
+// on to a different thread; state.seq itself is never allowed to move
+// backwards, though messages are always merged by id regardless.
 async function refreshMessages() {
   const cur = state.current;
   if (!cur || cur.tid === "activity") return;
-  const page = await api(cur.key, `rooms/${cur.rid}/threads/${cur.tid}/messages?after=${state.seq}`);
+  const gen = ++state.msgGen;
+  const page = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/threads/${encodeURIComponent(cur.tid)}/messages?after=${state.seq}`);
+  if (gen !== state.msgGen) return; // a newer call superseded this one
+  const now = state.current;
+  if (!now || now.key !== cur.key || now.rid !== cur.rid || now.tid !== cur.tid) return; // view changed
   state.meta = page.meta;
   state.chains = page.chains || {};
-  state.seq = page.seq;
   for (const m of page.messages) state.messages.set(m.id, m);
+  if (page.seq >= state.seq) state.seq = page.seq;
   renderThread();
 }
 
@@ -282,7 +297,7 @@ async function pollProgress() {
     if (m.state !== "running" || !m.request_id) continue;
     const p = state.progress.get(m.request_id) || { cursor: 0, text: "" };
     try {
-      const r = await api(cur.key, `rooms/${cur.rid}/requests/${m.request_id}/progress?cursor=${p.cursor}`);
+      const r = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/requests/${m.request_id}/progress?cursor=${p.cursor}`);
       if (r.events && r.events.length) {
         p.text = (p.text + r.events.map((e) => e.text).join("")).slice(-20000);
         changed = true;
@@ -297,7 +312,7 @@ async function pollProgress() {
 async function act(path, body) {
   const cur = state.current;
   try {
-    await api(cur.key, `rooms/${cur.rid}/threads/${cur.tid}/${path}`, { method: "POST", body });
+    await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/threads/${encodeURIComponent(cur.tid)}/${path}`, { method: "POST", body });
     await refreshMessages();
   } catch (e) { alert(e.message); }
 }
@@ -306,7 +321,7 @@ async function post(text) {
   const cur = state.current;
   if (!text.trim()) return;
   try {
-    await api(cur.key, `rooms/${cur.rid}/threads/${cur.tid}/messages`, { method: "POST", body: { text, client_id: clientId() } });
+    await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/threads/${encodeURIComponent(cur.tid)}/messages`, { method: "POST", body: { text, client_id: clientId() } });
     await refreshMessages();
   } catch (e) { alert(e.message); }
 }
@@ -314,7 +329,7 @@ async function post(text) {
 async function openLog(name) {
   const cur = state.current;
   try {
-    const text = await api(cur.key, `rooms/${cur.rid}/agents/${encodeURIComponent(name)}/log`);
+    const text = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/agents/${encodeURIComponent(name)}/log`);
     const w = window.open("", "_blank");
     if (w) { const pre = w.document.createElement("pre"); pre.textContent = text; w.document.body.append(pre); }
   } catch (e) { alert(e.message); }
@@ -325,7 +340,9 @@ async function showActivity() {
   const cur = state.current;
   const room = (state.rooms[cur.key] || []).find((r) => r.id === cur.rid);
   $("title").textContent = (room ? room.name : "") + " · Activity";
-  const data = await api(cur.key, `rooms/${cur.rid}/activity`);
+  const data = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/activity`);
+  const now = state.current;
+  if (!now || now.key !== cur.key || now.rid !== cur.rid || now.tid !== "activity") return; // view changed while awaiting
   const view = $("view");
   const lt = el("table", "activity");
   lt.append(row("th", ["Listener", "Mode", "State", ""]));
@@ -334,7 +351,7 @@ async function showActivity() {
     if (l.mode === "hosted" && !l.name.includes(".")) {
       const b = el("button", "", "Message this agent");
       b.onclick = async () => {
-        const t = await api(cur.key, `rooms/${cur.rid}/threads`, { method: "POST", body: { title: `with ${l.name}`, primary: l.name, client_id: clientId() } });
+        const t = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/threads`, { method: "POST", body: { title: `with ${l.name}`, primary: l.name, client_id: clientId() } });
         await loadThreads(cur.key, cur.rid);
         go(cur.key, cur.rid, t.id);
       };
@@ -423,11 +440,37 @@ function connect(key) {
   if (state.sources[key]) state.sources[key].close();
   const src = new EventSource(BASE + prefix(key) + "events");
   state.sources[key] = src;
-  src.onopen = () => { if (key === "local") loadMachines().then(openCurrent); };
+  src.onopen = () => {
+    if (key === "local") { loadMachines().then(openCurrent); return; }
+    const m = state.machines.find((x) => x.key === key);
+    if (!m) return;
+    Promise.all([loadRooms(m), loadQuotas(m)]).then(() => {
+      renderSidebar();
+      if (state.current && state.current.key === key) openCurrent();
+    });
+  };
   src.onmessage = async (ev) => {
     const n = JSON.parse(ev.data);
     const cur = state.current;
-    if (n.kind === "peer") { await loadMachines(); state.machines.forEach((m) => m.key !== "local" && m.online && connect(m.key)); return; }
+    if (n.kind === "peer") {
+      // Only the local stream's own hub knows about peer up/down; a "peer"
+      // note relayed through a peer's proxied stream describes that peer's
+      // own peers, not ours, and must be ignored here.
+      if (key !== "local") return;
+      const wasOnline = {};
+      for (const m of state.machines) wasOnline[m.key] = m.online;
+      await loadMachines();
+      for (const m of state.machines) {
+        if (m.key === "local") continue;
+        if (m.online && !wasOnline[m.key]) {
+          connect(m.key);
+        } else if (!m.online && wasOnline[m.key] && state.sources[m.key]) {
+          state.sources[m.key].close();
+          delete state.sources[m.key];
+        }
+      }
+      return;
+    }
     if (n.kind === "quota") {
       const m = state.machines.find((x) => x.key === key);
       if (m) await loadQuotas(m);

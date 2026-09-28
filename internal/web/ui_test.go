@@ -15,7 +15,7 @@ func TestUIContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(js)
-	for _, want := range []string{`meta[name="tincan-base"]`, `"X-Tincan-Request"`, "new EventSource(", "client_id", "api/peers/", `"quotas"`, "renderLimits"} {
+	for _, want := range []string{`meta[name="tincan-base"]`, `"X-Tincan-Request"`, "new EventSource(", "client_id", "api/peers/", `"quotas"`, "renderLimits", "msgGen", `key === "local"`} {
 		if !strings.Contains(src, want) {
 			t.Errorf("app.js missing %q", want)
 		}
