@@ -112,3 +112,11 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; }
 .members .unavailable { color: var(--muted); }
 .warning { color: var(--busy); font-size: 12px; }
 .committees .notice { border-left: 3px solid var(--busy); padding: 4px 10px; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover { background: var(--accent-bg); }
+.review { max-width: 900px; }
+.review .member { border-top: 1px solid var(--line); padding: 6px 0; }
+.review .member h4 { margin: 4px 0; }
+.review pre.result { white-space: pre-wrap; background: var(--code); padding: 8px; border-radius: 6px; max-height: 480px; overflow: auto; }
+.review-form { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; max-width: 640px; margin-top: 12px; }
+.review-form textarea { width: 100%; }

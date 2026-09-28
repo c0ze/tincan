@@ -43,6 +43,11 @@ func TestUIContract(t *testing.T) {
 		// re-renders over an open editor.
 		"state.committeeNotice",
 		"!state.editingCommittee",
+		// Reviews (committees spec §6.10, 2b-3).
+		"showReview(",
+		"Start a review",
+		`n.kind === "reviews"`,
+		`/reviews/${encodeURIComponent(`,
 		// A list refresh that finishes after the editor opened must not
 		// replace it; members that no longer resolve stay removable.
 		`state.current.view !== "committees" || state.editingCommittee`,

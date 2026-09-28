@@ -27,6 +27,7 @@ const state = {
   showArchived: {},    // key/rid -> true when the room lists its archived threads
   committeeNotice: "", // outcome of the last committee save/delete, shown above the list
   editingCommittee: false, // the committee editor is open: notes must not re-render over it
+  reviewOpen: null,    // {key, rid, id} while a review's detail is shown
 };
 
 function fmtLeft(iso) {
@@ -222,6 +223,7 @@ async function newThread(key, rid) {
 
 // ---------- thread view ----------
 async function openCurrent() {
+  state.reviewOpen = null;
   const cur = parseHash();
   state.current = cur;
   state.messages = new Map();
@@ -396,6 +398,7 @@ async function openLog(name) {
 
 // ---------- activity ----------
 async function showActivity() {
+  state.reviewOpen = null;
   const cur = state.current;
   const room = (state.rooms[cur.key] || []).find((r) => r.id === cur.rid);
   $("title").textContent = (room ? room.name : "") + " · Activity";
@@ -425,6 +428,67 @@ async function showActivity() {
   }
   view.replaceChildren(el("h3", "", "Listeners"), data.listeners.length ? lt : el("p", "muted", "No listeners."),
     el("h3", "", "Recent requests"), data.requests.length ? rt : el("p", "muted", "No journaled requests."));
+  const reviews = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/reviews`).catch(() => []);
+  const after = state.current;
+  if (!after || after.key !== cur.key || after.rid !== cur.rid || after.tid !== "activity" || state.reviewOpen) return; // view changed while awaiting
+  const vt = el("table", "activity");
+  vt.append(row("th", ["Review", "Committee", "Status", "Members", "Created"]));
+  for (const r of reviews) {
+    const tr = row("td", [r.review_id, r.committee, r.status + (r.settled ? "" : " …"),
+      r.members.map((m) => `${m.member}: ${m.state}${m.late ? " (late)" : ""}`).join(", "), new Date(r.created).toLocaleString()]);
+    tr.classList.add("clickable");
+    tr.onclick = () => showReview(cur.key, cur.rid, r.review_id);
+    vt.append(tr);
+  }
+  view.append(el("h3", "", "Reviews"), reviews.length ? vt : el("p", "muted", "No reviews."), reviewForm(cur.key, cur.rid));
+}
+
+function reviewForm(key, rid) {
+  const form = el("form", "review-form");
+  const committee = el("select");
+  api(key, "committees").then((d) => {
+    for (const c of d.committees) committee.append(Object.assign(el("option", "", c.name), { value: c.name }));
+  }).catch(() => {});
+  const scope = el("select");
+  for (const s of ["uncommitted", "branch", "none"]) scope.append(Object.assign(el("option", "", s), { value: s }));
+  const question = el("textarea");
+  question.rows = 3;
+  question.placeholder = "What should the committee check?";
+  const status = el("p", "muted");
+  const go = el("button", "", "Request review");
+  go.type = "button";
+  go.onclick = async () => {
+    try {
+      const r = await api(key, `rooms/${encodeURIComponent(rid)}/reviews`, { method: "POST", body: { committee: committee.value, scope: scope.value, question: question.value, request_id: clientId() } });
+      showReview(key, rid, r.review_id);
+    } catch (e) { status.textContent = e.message; }
+  };
+  const label = (t, i) => { const l = el("label", "", t + " "); l.append(i); return l; };
+  form.append(el("h3", "", "Start a review"), label("Committee", committee), label("Scope", scope), question, go, status);
+  return form;
+}
+
+async function showReview(key, rid, id) {
+  const d = await api(key, `rooms/${encodeURIComponent(rid)}/reviews/${encodeURIComponent(id)}`);
+  const view = $("view");
+  const box = el("div", "review");
+  box.append(el("h3", "", `${d.committee} · ${d.status}${d.settled ? "" : " …"}`), el("p", "muted", d.question));
+  for (const [i, m] of d.members.entries()) {
+    const sec = el("section", "member");
+    sec.append(el("h4", "", `${m.member} — ${m.state}${m.late ? " (late)" : ""}${m.note ? ": " + m.note : ""}`));
+    if (d.results[i]) sec.append(el("pre", "result", d.results[i]));
+    box.append(sec);
+  }
+  if (d.status === "running" || (d.status === "closed" && !d.settled)) {
+    const cancel = el("button", "danger", "Cancel review");
+    cancel.onclick = async () => { await api(key, `rooms/${encodeURIComponent(rid)}/reviews/${encodeURIComponent(id)}/cancel`, { method: "POST" }); showReview(key, rid, id); };
+    box.append(cancel);
+  }
+  const back = el("button", "secondary", "Back to activity");
+  back.onclick = showActivity;
+  box.append(back);
+  state.reviewOpen = { key, rid, id };
+  view.replaceChildren(box);
 }
 
 function row(cell, values) {
@@ -676,6 +740,12 @@ function connect(key) {
       if (m) await loadQuotas(m);
       renderSidebar();
       if (state.meta && state.current && state.current.tid !== "activity") renderThread();
+      return;
+    }
+    if (n.kind === "reviews") {
+      const cur = state.current;
+      if (state.reviewOpen && state.reviewOpen.key === key && state.reviewOpen.rid === n.room) showReview(key, n.room, state.reviewOpen.id);
+      else if (cur && cur.key === key && cur.rid === n.room && cur.tid === "activity") showActivity();
       return;
     }
     if (n.kind === "committees") {

@@ -256,6 +256,34 @@ availability, warnings and quota, but never env values. `tincan web` writes
 `<state>/web.json` every 10 s so the CLI and MCP can tell that a coordinator
 is running.
 
+## Reviews
+
+Ask a committee to review a room's change, in any of three ways:
+
+- **Web UI:** the room's **Activity** page ("Start a review").
+- **Terminal:** `tincan review --committee reviewers --question "…" --wait`.
+- **An agent:** the MCP tool `tincan_review`, then `tincan_review_wait`.
+
+`tincan web` on the requesting machine coordinates the review:
+
+- It captures the change as a packet: uncommitted work by default, or
+  `--scope branch`, `commit:<rev>`, `range:<a>..<b>` or `none` for a
+  question with no code.
+- It sends each member a job on that member's machine, and records results
+  as they arrive.
+- It closes the review when every member has finished, or at the
+  committee's deadline. Members still running then are marked *late*: their
+  results are kept but not added to the bundle.
+
+The bundle (`.tincan/reviews/<id>/bundle.md`) collects every member's review;
+whoever asked synthesizes it. Cancelling stops members that are still running.
+
+Unreachable machines are retried until the deadline, and an unanswered
+member ends as `unreachable` or `expired`, so a review always finishes. With
+`skip_exhausted` set on the committee, a member whose `quotas.json` entry
+declares `blocking` and whose quota is at 100% is skipped with a note naming
+the window and reset time.
+
 ## Services
 
 Two starting points live under [`deploy/`](../deploy/); edit the peer URL,

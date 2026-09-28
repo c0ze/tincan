@@ -77,7 +77,15 @@ tincan version [--format json]
 tincan mcp [--room <absolute-path>]
 tincan web [flags]
 tincan gc [--older-than 168h] [--room <path>]
+tincan review --committee <name> (--question <s> | --question-file <f>) [--scope <s>]
+              [--request-id <id>] [--wait] [--timeout <sec=3600>] [--room <path>]
+tincan review --wait <id> | --cancel <id> [--room <path>]
 ```
+
+`tincan review` asks a committee (docs/web.md "Committees") to review the
+room's change and prints the review ID; `--wait` then prints the bundle of
+every member's review and exits 4 if members were late or unreachable.
+`tincan web` must be running on this machine to coordinate it.
 
 `tincan web` serves a tailnet-only chat UI over the rooms registered on this
 machine (and, with `--peer`, a linked machine's rooms too). See
@@ -432,6 +440,9 @@ Tools expose structured inputs/results:
 | `tincan_cancel` | `request_id` | Requests cancellation of hosted work; earlier changes remain. |
 | `tincan_reset` | `name` | Stops the listener, interrupts active work and clears its pointer. |
 | `tincan_stop` | `name` | Stops the listener and interrupts active work; keeps its pointer. |
+| `tincan_review` | `committee`, `question`, optional `scope`, `request_id` | Publishes a committee review of the change; returns `review_id` and member states. Needs `tincan web` on this machine. |
+| `tincan_review_wait` | `review_id`, optional `timeout_seconds` (0–30) | Status, member states, and once closed the `bundle` (inline up to 256 KiB, else `bundle_path`). The caller synthesizes it. |
+| `tincan_review_cancel` | `review_id` | Cancels the review; members still running are stopped. |
 
 The MCP interface accepts configured presets, without an arbitrary execution
 template. Preset configuration is a local trust decision: a configured worker
