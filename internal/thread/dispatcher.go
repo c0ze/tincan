@@ -287,16 +287,18 @@ func (d *Dispatcher) reconcileThread(ctx context.Context, tid string) error {
 		return d.finishStop(ctx, t, snap)
 	}
 	for _, m := range snap.Messages {
-		if m.Role != RoleAgent {
+		if m.Role != RoleAgent && m.Role != RoleCommittee {
 			continue
 		}
 		var err error
 		switch {
-		case m.State == StatePending && m.RequestID != "":
+		case m.Role == RoleCommittee && m.State == StatePending:
+			err = d.buildReview(ctx, t, m)
+		case m.Role == RoleAgent && m.State == StatePending && m.RequestID != "":
 			err = d.submit(ctx, t, m)
-		case m.State == StateRunning:
+		case m.Role == RoleAgent && m.State == StateRunning:
 			err = d.collect(ctx, t, m)
-		case m.State == StateDone && !m.Handoffs:
+		case m.Role == RoleAgent && m.State == StateDone && !m.Handoffs:
 			err = d.handoffs(ctx, t, m)
 		}
 		if err != nil {

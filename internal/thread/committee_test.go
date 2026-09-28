@@ -2,11 +2,14 @@ package thread_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/c0ze/tincan/v2/internal/committee"
+	"github.com/c0ze/tincan/v2/internal/review"
 	"github.com/c0ze/tincan/v2/internal/rooms"
 	"github.com/c0ze/tincan/v2/internal/thread"
 )
@@ -95,5 +98,85 @@ func TestAgentHandoffReservesPerMemberOrSuggests(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no committee suggestion: %+v", snap2.Messages)
+	}
+}
+func TestBuildPublishesFromTheSnapshotAndRuns(t *testing.T) {
+	e, d, state := committeeEnv(t, "x@box")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d.Post(context.Background(), th.ID, "earlier context", "")
+	e.settle(d, th, quiescent)
+	d.Post(context.Background(), th.ID, "@reviewers is it safe?", "")
+	committee.NewStore(state).Put(context.Background(), committee.Committee{Name: "reviewers", Members: []string{"x@box", "y@box", "z@box"}})
+	snap := e.settle(d, th, func(s thread.Snapshot) bool {
+		cms := committeeMessages(s)
+		return len(cms) == 1 && cms[0].State == thread.StateRunning
+	})
+	cm := committeeMessages(snap)[0]
+	in, err := review.ReadInput(e.room, cm.Review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(in.Committee.Members) != 1 || in.Origin != "thread:"+th.ID+":"+cm.ID || !strings.Contains(in.Question, "is it safe?") || !strings.Contains(in.Question, "earlier context") {
+		t.Fatalf("published input: %+v", in)
+	}
+	// A second pass adopts the existing review instead of rebuilding.
+	d.Reconcile(context.Background())
+	if ids, _ := review.List(e.room); len(ids) != 1 {
+		t.Fatalf("reviews: %v", ids)
+	}
+}
+
+func TestStopBeforeBuildNeverPublishes(t *testing.T) {
+	t.Skip("Task 6")
+	e, d, _ := committeeEnv(t, "x@box")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d.Post(context.Background(), th.ID, "@reviewers check", "")
+	d.RequestStop(context.Background(), th.ID)
+	snap := e.settle(d, th, func(s thread.Snapshot) bool { return s.Meta.Status == thread.StatusOpen })
+	if cm := committeeMessages(snap)[0]; cm.State != thread.StateCancelled {
+		t.Fatalf("committee message after stop: %+v", cm)
+	}
+	if ids, _ := review.List(e.room); len(ids) != 0 {
+		t.Fatalf("a stopped committee was published: %v", ids)
+	}
+}
+
+func TestBuildErrorMarksTheMessage(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs an unwritable directory")
+	}
+	e, d, _ := committeeEnv(t, "x@box")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d.Post(context.Background(), th.ID, "@reviewers check", "")
+	// A registry that cannot be written makes publication fail.
+	locked := t.TempDir()
+	os.Chmod(locked, 0o500)
+	t.Cleanup(func() { os.Chmod(locked, 0o700) })
+	d.Registry = rooms.Open(filepath.Join(locked, "sub", "rooms.json"))
+	snap := e.settle(d, th, func(s thread.Snapshot) bool {
+		cms := committeeMessages(s)
+		return len(cms) == 1 && cms[0].State == thread.StateError
+	})
+	if cm := committeeMessages(snap)[0]; !strings.Contains(cm.Text, "review") {
+		t.Fatalf("error text: %q", cm.Text)
+	}
+}
+
+// A running committee message is the coordinator's to finish: the agent
+// paths (collect, handoffs) must never touch it.
+func TestRunningCommitteeMessageIsLeftToTheCoordinator(t *testing.T) {
+	e, d, _ := committeeEnv(t, "x@box")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d.Post(context.Background(), th.ID, "@reviewers check", "")
+	e.settle(d, th, func(s thread.Snapshot) bool {
+		cms := committeeMessages(s)
+		return len(cms) == 1 && cms[0].State == thread.StateRunning
+	})
+	for i := 0; i < 3; i++ {
+		d.Reconcile(context.Background())
+	}
+	snap, _ := th.Snapshot()
+	if cm := committeeMessages(snap)[0]; cm.State != thread.StateRunning {
+		t.Fatalf("agent paths touched the committee message: %+v", cm)
 	}
 }
