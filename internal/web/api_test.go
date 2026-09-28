@@ -28,7 +28,7 @@ func apiServer(t *testing.T) (*Server, string) {
 		"missing": {Exec: []string{filepath.Join(t.TempDir(), "absent")}},
 	}
 	qdir := t.TempDir()
-	s, err := New(Config{Owner: owner, Machine: "box", Registry: reg, ChainBudget: 6, Dispatch: dispatch.Options{Presets: presets}, QuotaDir: qdir, QuotaConfig: filepath.Join(qdir, "quotas.json")})
+	s, err := New(Config{Owner: owner, AllowedHosts: testHosts, Machine: "box", Registry: reg, ChainBudget: 6, Dispatch: dispatch.Options{Presets: presets}, QuotaDir: qdir, QuotaConfig: filepath.Join(qdir, "quotas.json")})
 	if err != nil {
 		t.Fatal(err)
 	}

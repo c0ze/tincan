@@ -44,23 +44,28 @@ type Peer struct {
 }
 
 type Config struct {
-	PublicPath  string // URL prefix the browser sees, e.g. "/tincan"
-	Owner       string // required Tailscale-User-Login
-	Origin      string // optional pinned origin for mutations
-	Machine     string
-	Peers       []Peer
-	ChainBudget int
-	IdleStop    time.Duration
-	Tick        time.Duration
-	Registry    *rooms.Registry
-	Dispatch    dispatch.Options // Executable and Presets; Room is set per room
-	QuotaDir    string           // default quota.DefaultCacheDir()
-	QuotaConfig string           // default quota.DefaultConfigPath()
+	PublicPath string // URL prefix the browser sees, e.g. "/tincan"
+	Owner      string // required Tailscale-User-Login
+	Origin     string // optional pinned origin for mutations; its host is also allowed as Host
+	// AllowedHosts lists the Host values accepted besides loopback and the
+	// Origin host: this node's Tailscale DNS name and any extra hosts. An
+	// entry without a port matches any port; "host:port" matches exactly.
+	AllowedHosts []string
+	Machine      string
+	Peers        []Peer
+	ChainBudget  int
+	IdleStop     time.Duration
+	Tick         time.Duration
+	Registry     *rooms.Registry
+	Dispatch     dispatch.Options // Executable and Presets; Room is set per room
+	QuotaDir     string           // default quota.DefaultCacheDir()
+	QuotaConfig  string           // default quota.DefaultConfigPath()
 }
 
 type Server struct {
 	cfg   Config
-	base  string // public path with trailing slash
+	hosts []hostRule // Host allowlist besides loopback
+	base  string     // public path with trailing slash
 	mux   *http.ServeMux
 	index *template.Template
 	hub   *hub
@@ -117,11 +122,28 @@ func New(cfg Config) (*Server, error) {
 	if base == "//" {
 		base = "/"
 	}
+	var hosts []hostRule
+	if cfg.Origin != "" {
+		u, err := url.Parse(cfg.Origin)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			return nil, fmt.Errorf("invalid --origin %q: want scheme://host[:port]", cfg.Origin)
+		}
+		r := parseHostRule(u.Host)
+		if (u.Scheme == "https" && r.port == "443") || (u.Scheme == "http" && r.port == "80") {
+			r.port = "" // browsers omit the default port from Host
+		}
+		hosts = append(hosts, r)
+	}
+	for _, h := range cfg.AllowedHosts {
+		if r := parseHostRule(h); r.name != "" {
+			hosts = append(hosts, r)
+		}
+	}
 	idx, err := template.ParseFS(uiFS, "ui/index.html")
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, base: base, mux: http.NewServeMux(), index: idx, hub: newHub(), peers: map[string]*peer{}, dispatchers: map[string]*thread.Dispatcher{}, inFlight: map[string]bool{}, lastLog: map[string]string{}}
+	s := &Server{cfg: cfg, hosts: hosts, base: base, mux: http.NewServeMux(), index: idx, hub: newHub(), peers: map[string]*peer{}, dispatchers: map[string]*thread.Dispatcher{}, inFlight: map[string]bool{}, lastLog: map[string]string{}}
 	s.reconcileRoom = s.runRoomPass
 	for _, p := range cfg.Peers {
 		pp, err := newPeer(p)
@@ -174,24 +196,83 @@ func (s *Server) apiSelf(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{"machine": s.cfg.Machine, "version": buildinfo.Current().Version, "peers": peers})
 }
 
-// Handler wraps every route with security headers and the owner/CSRF checks.
+// hostRule is one allowed Host value, lowercased with any trailing dot
+// removed. An empty port matches any port.
+type hostRule struct{ name, port string }
+
+func parseHostRule(h string) hostRule {
+	h = strings.ToLower(strings.TrimSpace(h))
+	var r hostRule
+	if name, port, err := net.SplitHostPort(h); err == nil {
+		r = hostRule{name, port}
+	} else {
+		r.name = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
+	}
+	r.name = strings.TrimSuffix(r.name, ".")
+	return r
+}
+
+// hostAllowed reports whether a Host (or X-Forwarded-Host) value names this
+// server: a loopback literal on any port, or an allowlisted host. It is the
+// DNS-rebinding defence: a rebound page's requests carry its own hostname.
+func (s *Server) hostAllowed(host string) bool {
+	h := parseHostRule(host)
+	switch h.name {
+	case "":
+		return false
+	case "127.0.0.1", "::1", "localhost":
+		return true
+	}
+	for _, r := range s.hosts {
+		if r.name == h.name && (r.port == "" || r.port == h.port) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) hostsOK(r *http.Request) bool {
+	if !s.hostAllowed(r.Host) {
+		return false
+	}
+	for _, v := range r.Header.Values("X-Forwarded-Host") {
+		for _, h := range strings.Split(v, ",") {
+			if !s.hostAllowed(h) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Handler wraps every route with security headers and the Funnel, Host,
+// owner and CSRF checks, in that order.
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy", "default-src 'self'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
+		refuse := func(msg string) { s.fail(w, http.StatusForbidden, errors.New(msg)) }
+		if _, funnel := r.Header["Tailscale-Funnel-Request"]; funnel {
+			refuse("funnel requests are refused")
+			return
+		}
+		if !s.hostsOK(r) {
+			refuse("host not allowed")
+			return
+		}
 		if r.Header.Get("Tailscale-User-Login") != s.cfg.Owner {
-			http.Error(w, "forbidden", http.StatusForbidden)
+			refuse("forbidden")
 			return
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			if r.Header.Get("X-Tincan-Request") != "1" {
-				http.Error(w, "missing X-Tincan-Request", http.StatusForbidden)
+				refuse("missing X-Tincan-Request")
 				return
 			}
 			if o := r.Header.Get("Origin"); o != "" && !s.originOK(o, r) {
-				http.Error(w, "cross-origin request refused", http.StatusForbidden)
+				refuse("cross-origin request refused")
 				return
 			}
 		}
@@ -199,6 +280,9 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
+// originOK compares a mutation's Origin with the pinned --origin or, when
+// none is set, with the request's host as the client saw it; Handler has
+// already checked that host (and X-Forwarded-Host) against the allowlist.
 func (s *Server) originOK(origin string, r *http.Request) bool {
 	if s.cfg.Origin != "" {
 		return strings.EqualFold(strings.TrimRight(origin, "/"), strings.TrimRight(s.cfg.Origin, "/"))

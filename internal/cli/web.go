@@ -38,14 +38,12 @@ func cmdWeb(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if *owner == "" {
-		detected, err := web.DetectOwner(ctx)
-		if err != nil {
-			fmt.Fprintf(stderr, "tincan web: %v\n", err)
-			return ExitError
-		}
-		*owner = detected
+	who, hosts, err := webIdentity(ctx, *owner, *origin, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan web: %v\n", err)
+		return ExitError
 	}
+	*owner = who
 	var peerList []web.Peer
 	for _, p := range peers {
 		name, u, ok := strings.Cut(p, "=")
@@ -68,7 +66,8 @@ func cmdWeb(args []string, stdout, stderr io.Writer) int {
 	}
 	machine, _ := os.Hostname()
 	machine, _, _ = strings.Cut(machine, ".")
-	srv, err := web.New(web.Config{PublicPath: *public, Owner: *owner, Origin: *origin, Machine: machine, Peers: peerList,
+	// The --origin host joins the Host allowlist inside web.New.
+	srv, err := web.New(web.Config{PublicPath: *public, Owner: *owner, Origin: *origin, AllowedHosts: hosts, Machine: machine, Peers: peerList,
 		ChainBudget: *budget, IdleStop: *idle, Registry: reg, Dispatch: dispatch.Options{}})
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan web: %v\n", err)
@@ -85,4 +84,28 @@ func cmdWeb(args []string, stdout, stderr io.Writer) int {
 		return ExitError
 	}
 	return ExitOK
+}
+
+// webIdentity returns the owner login and the extra Host allowlist (this
+// node's Tailscale DNS name) from one `tailscale status --json` call. Without
+// --owner a detection failure is fatal; with it, detection only supplies the
+// DNS name, and a failure leaves loopback and --origin as the only hosts.
+func webIdentity(ctx context.Context, owner, origin string, stderr io.Writer) (string, []string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	detected, dnsName, err := web.DetectNode(ctx)
+	if owner == "" {
+		if err != nil {
+			return "", nil, err
+		}
+		owner = detected
+	}
+	var hosts []string
+	if err == nil && dnsName != "" {
+		hosts = append(hosts, dnsName)
+	}
+	if len(hosts) == 0 && origin == "" {
+		fmt.Fprintln(stderr, "tincan web: this node's Tailscale DNS name is unknown, so only loopback hosts are allowed; remote access needs --origin https://<host>")
+	}
+	return owner, hosts, nil
 }

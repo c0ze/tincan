@@ -40,7 +40,7 @@ func peerPair(t *testing.T) (*Server, *http.Request, *httptest.Server) {
 	peerHTTP := httptest.NewServer(servedLike(record, owner))
 	t.Cleanup(peerHTTP.Close)
 	hubQdir := t.TempDir()
-	hubServer, err := New(Config{Owner: owner, Machine: "cachyos", Registry: rooms.Open(filepath.Join(t.TempDir(), "rooms.json")),
+	hubServer, err := New(Config{Owner: owner, AllowedHosts: testHosts, Machine: "cachyos", Registry: rooms.Open(filepath.Join(t.TempDir(), "rooms.json")),
 		Peers: []Peer{{Name: "macmini", URL: peerHTTP.URL + "/tincan/"}}, QuotaDir: hubQdir, QuotaConfig: filepath.Join(hubQdir, "quotas.json")})
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +148,7 @@ func TestProxyCancellationDoesNotMarkPeerOffline(t *testing.T) {
 	defer close(release)
 
 	qdir := t.TempDir()
-	hub, err := New(Config{Owner: owner, Machine: "cachyos", Registry: rooms.Open(filepath.Join(t.TempDir(), "rooms.json")),
+	hub, err := New(Config{Owner: owner, AllowedHosts: testHosts, Machine: "cachyos", Registry: rooms.Open(filepath.Join(t.TempDir(), "rooms.json")),
 		Peers: []Peer{{Name: "macmini", URL: blocking.URL + "/"}}, QuotaDir: qdir, QuotaConfig: filepath.Join(qdir, "quotas.json")})
 	if err != nil {
 		t.Fatal(err)

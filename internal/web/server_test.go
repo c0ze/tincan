@@ -18,11 +18,14 @@ import (
 
 const owner = "owner@example.com"
 
+// testHosts allows httptest.NewRequest's default Host, example.com.
+var testHosts = []string{"example.com"}
+
 func testServer(t *testing.T) *Server {
 	t.Helper()
 	reg := rooms.Open(filepath.Join(t.TempDir(), "rooms.json"))
 	qdir := t.TempDir()
-	s, err := New(Config{Owner: owner, PublicPath: "/tincan", Machine: "testbox", Registry: reg, ChainBudget: 6, Dispatch: dispatch.Options{}, QuotaDir: qdir, QuotaConfig: filepath.Join(qdir, "quotas.json")})
+	s, err := New(Config{Owner: owner, AllowedHosts: testHosts, PublicPath: "/tincan", Machine: "testbox", Registry: reg, ChainBudget: 6, Dispatch: dispatch.Options{}, QuotaDir: qdir, QuotaConfig: filepath.Join(qdir, "quotas.json")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,5 +254,146 @@ func TestParseOwnerFromStatusJSON(t *testing.T) {
 	}
 	if _, err := parseOwner([]byte(`{"Self":{"UserID":1},"User":{}}`)); err == nil {
 		t.Fatal("missing user accepted")
+	}
+}
+
+func doHost(t *testing.T, h http.Handler, method, path, host string, hdr map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(`{"path":"/nope"}`))
+	req.Host = host
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func hostServer(t *testing.T, origin string, allowed ...string) http.Handler {
+	t.Helper()
+	reg := rooms.Open(filepath.Join(t.TempDir(), "rooms.json"))
+	qdir := t.TempDir()
+	s, err := New(Config{Owner: owner, Machine: "testbox", Registry: reg, Origin: origin, AllowedHosts: allowed, QuotaDir: qdir, QuotaConfig: filepath.Join(qdir, "quotas.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s.Handler()
+}
+
+func wantForbiddenJSON(t *testing.T, rec *httptest.ResponseRecorder, msg, what string) {
+	t.Helper()
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("%s: got %d %s, want 403", what, rec.Code, rec.Body)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("%s: content-type %q, want application/json", what, ct)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	decode(t, rec.Body.String(), &body)
+	if body.Error != msg {
+		t.Fatalf("%s: error %q, want %q", what, body.Error, msg)
+	}
+}
+
+// A DNS-rebinding page on attacker.example resolves to 127.0.0.1 and sends
+// same-origin requests with forged identity and CSRF headers; only the Host
+// header gives it away, so every method must be refused on it.
+func TestHostAllowlistRefusesRebindingHosts(t *testing.T) {
+	h := hostServer(t, "", "node.tailnet.ts.net")
+	evil := mut()
+	evil["Origin"] = "http://attacker.example:7788"
+	wantForbiddenJSON(t, doHost(t, h, "GET", "/api/self", "attacker.example:7788", ownerHdr()), "host not allowed", "GET foreign host")
+	wantForbiddenJSON(t, doHost(t, h, "POST", "/api/rooms", "attacker.example:7788", evil), "host not allowed", "POST foreign host")
+	wantForbiddenJSON(t, doHost(t, h, "GET", "/api/self", "node.tailnet.ts.net.evil.example", ownerHdr()), "host not allowed", "suffix trick")
+	wantForbiddenJSON(t, doHost(t, h, "GET", "/api/self", "", ownerHdr()), "host not allowed", "empty host")
+
+	fwd := ownerHdr()
+	fwd["X-Forwarded-Host"] = "evil.example"
+	wantForbiddenJSON(t, doHost(t, h, "GET", "/api/self", "127.0.0.1:7788", fwd), "host not allowed", "foreign X-Forwarded-Host")
+
+	for _, host := range []string{"127.0.0.1:7788", "127.0.0.1", "localhost:7788", "LOCALHOST", "[::1]:7788", "node.tailnet.ts.net", "Node.Tailnet.ts.net:443", "node.tailnet.ts.net."} {
+		if rec := doHost(t, h, "GET", "/api/self", host, ownerHdr()); rec.Code != 200 {
+			t.Errorf("host %q refused: %d %s", host, rec.Code, rec.Body)
+		}
+	}
+	fwd["X-Forwarded-Host"] = "node.tailnet.ts.net"
+	if rec := doHost(t, h, "GET", "/api/self", "127.0.0.1:7788", fwd); rec.Code != 200 {
+		t.Fatalf("allowed X-Forwarded-Host refused: %d %s", rec.Code, rec.Body)
+	}
+	// A loopback-hosted mutation with a matching Origin still works.
+	ok := mut()
+	ok["Origin"] = "http://127.0.0.1:7788"
+	if rec := doHost(t, h, "POST", "/api/rooms", "127.0.0.1:7788", ok); rec.Code == 403 {
+		t.Fatalf("loopback mutation refused: %s", rec.Body)
+	}
+}
+
+func TestHostAllowlistIncludesPinnedOrigin(t *testing.T) {
+	h := hostServer(t, "https://tincan.example:8443")
+	if rec := doHost(t, h, "GET", "/api/self", "tincan.example:8443", ownerHdr()); rec.Code != 200 {
+		t.Fatalf("origin host refused: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doHost(t, h, "GET", "/api/self", "TINCAN.example:8443", ownerHdr()); rec.Code != 200 {
+		t.Fatalf("origin host (case) refused: %d %s", rec.Code, rec.Body)
+	}
+	wantForbiddenJSON(t, doHost(t, h, "GET", "/api/self", "tincan.example:9999", ownerHdr()), "host not allowed", "origin host, other port")
+	wantForbiddenJSON(t, doHost(t, h, "GET", "/api/self", "node.tailnet.ts.net", ownerHdr()), "host not allowed", "undetected DNS name")
+}
+
+func TestOriginValidatedAndDefaultPortDropped(t *testing.T) {
+	reg := rooms.Open(filepath.Join(t.TempDir(), "rooms.json"))
+	for _, bad := range []string{"tincan.example", "ftp://tincan.example", "https://"} {
+		if _, err := New(Config{Owner: owner, Registry: reg, Origin: bad}); err == nil {
+			t.Errorf("origin %q accepted", bad)
+		}
+	}
+	h := hostServer(t, "https://tincan.example:443")
+	if rec := doHost(t, h, "GET", "/api/self", "tincan.example", ownerHdr()); rec.Code != 200 {
+		t.Fatalf("default-port origin host refused: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestFunnelRequestsRefused(t *testing.T) {
+	h := hostServer(t, "", "node.tailnet.ts.net")
+	hdr := ownerHdr()
+	hdr["Tailscale-Funnel-Request"] = "?1"
+	wantForbiddenJSON(t, doHost(t, h, "GET", "/api/self", "node.tailnet.ts.net", hdr), "funnel requests are refused", "funnel")
+}
+
+func TestRefusalsAreJSON(t *testing.T) {
+	h := testServer(t).Handler()
+	wantForbiddenJSON(t, do(t, h, "GET", "/api/self", "", nil), "forbidden", "no identity")
+	wantForbiddenJSON(t, do(t, h, "POST", "/api/rooms", `{}`, ownerHdr()), "missing X-Tincan-Request", "no CSRF header")
+	hdr := mut()
+	hdr["Origin"] = "https://evil.example"
+	wantForbiddenJSON(t, do(t, h, "POST", "/api/rooms", `{}`, hdr), "cross-origin request refused", "foreign origin")
+}
+
+func TestParseNodeFromStatusJSON(t *testing.T) {
+	login, dns, err := parseNode([]byte(`{"Self":{"UserID":42,"DNSName":"cachyos.brill-decibel.ts.net."},"User":{"42":{"LoginName":"me@example.com"}}}`))
+	if err != nil || login != "me@example.com" || dns != "cachyos.brill-decibel.ts.net" {
+		t.Fatalf("%q %q %v", login, dns, err)
+	}
+}
+
+func TestDetectNodeReadsDNSName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix shebang script")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "tailscale")
+	status := `{"Self":{"UserID":7,"DNSName":"box.tailnet.ts.net."},"User":{"7":{"LoginName":"me@example.com"}}}`
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '"+status+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	login, dns, err := DetectNode(context.Background())
+	if err != nil || login != "me@example.com" || dns != "box.tailnet.ts.net" {
+		t.Fatalf("%q %q %v", login, dns, err)
+	}
+	if got, err := DetectOwner(context.Background()); err != nil || got != "me@example.com" {
+		t.Fatalf("DetectOwner %q %v", got, err)
 	}
 }
