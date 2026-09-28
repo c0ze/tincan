@@ -14,6 +14,7 @@ import (
 	"github.com/c0ze/tincan/v2/internal/dispatch"
 	"github.com/c0ze/tincan/v2/internal/host"
 	"github.com/c0ze/tincan/v2/internal/request"
+	"github.com/c0ze/tincan/v2/internal/rooms"
 	"github.com/c0ze/tincan/v2/internal/spool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -22,6 +23,7 @@ type Options struct {
 	Room       string
 	Executable string
 	Presets    map[string]host.Preset // nil loads the normal local configuration
+	StateDir   string                 // tincan state directory; "" = rooms.StateDir()
 }
 
 type service struct{ Options }
@@ -45,9 +47,12 @@ func New(o Options) (*mcp.Server, error) {
 		return nil, fmt.Errorf("MCP room must be a directory")
 	}
 	o.Room = room
+	if o.StateDir == "" {
+		o.StateDir = rooms.StateDir()
+	}
 	s := &service{Options: o}
 	server := mcp.NewServer(&mcp.Implementation{Name: "tincan", Version: buildinfo.Current().Version}, &mcp.ServerOptions{
-		Instructions: "Coordinate local coding agents in room " + room + ". Send starts a configured agent automatically and returns a durable request_id. Use wait with that same ID until terminal; a timeout is not a reason to resubmit. Explicit request_id makes submissions idempotent. Conversation sessions survive calls and reconnects for supported presets. Cancel stops one request; stop ends a listener; reset stops it and clears its conversation. Hosts continue after the MCP connection closes. Agent tasks may read or modify files and use the network under the local preset's permissions.",
+		Instructions: "Coordinate local coding agents in room " + room + ". Send starts a configured agent automatically and returns a durable request_id. Use wait with that same ID until terminal; a timeout is not a reason to resubmit. Explicit request_id makes submissions idempotent. Conversation sessions survive calls and reconnects for supported presets. Cancel stops one request; stop ends a listener; reset stops it and clears its conversation. Hosts continue after the MCP connection closes. Agent tasks may read or modify files and use the network under the local preset's permissions. tincan_review asks a committee of agents on this and other machines to review the change; wait for its bundle and synthesize it.",
 	})
 	add(server, "tincan_presets", "List configured agent presets, executable availability, and conversation support.", true, true, false, s.presetsTool)
 	add(server, "tincan_launch", "Launch or reconnect to a named agent listener in this room. Only locally configured presets are accepted.", false, true, true, s.launchTool)
@@ -56,6 +61,9 @@ func New(o Options) (*mcp.Server, error) {
 	add(server, "tincan_status", "Read listener status or inspect one durable request without waiting. Owner credentials and command arguments are never exposed.", true, true, false, s.statusTool)
 	add(server, "tincan_cancel", "Cancel one queued or running request. Earlier file or external changes are not undone. Wait on the same request_id for acknowledgement.", false, true, false, s.cancelTool)
 	add(server, "tincan_stop", "Stop a listener and interrupt its current request. Queued requests remain available for a future launch.", false, true, false, s.stopTool)
+	add(server, "tincan_review", "Ask a committee (a named group of agents on this and other machines) to review the current change, or answer a question. Returns a review_id immediately; members run in parallel. Needs tincan web running on this machine.", false, true, true, s.reviewTool)
+	add(server, "tincan_review_wait", "Wait up to 30 seconds for a committee review; returns member states and, once it closes, the bundle of every member's review. Keep waiting while it is running; synthesize the bundle yourself.", true, true, false, s.reviewWaitTool)
+	add(server, "tincan_review_cancel", "Cancel a committee review; members still running are stopped.", false, true, false, s.reviewCancelTool)
 	add(server, "tincan_reset", "Stop a listener, interrupt any running request, and clear its saved conversation. Its next launch starts a new conversation.", false, true, false, s.resetTool)
 	return server, nil
 }
