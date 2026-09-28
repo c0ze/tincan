@@ -27,6 +27,7 @@ type peer struct {
 	online atomic.Bool
 	proxy  *httputil.ReverseProxy
 	client *http.Client
+	rpc    *http.Client // machine-link calls; per-call deadlines
 }
 
 func newPeer(p Peer) (*peer, error) {
@@ -43,7 +44,7 @@ func newPeer(p Peer) (*peer, error) {
 		TLSHandshakeTimeout:   10 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 	}
-	pp := &peer{name: p.Name, base: base, client: &http.Client{Transport: transport, Timeout: 5 * time.Second}}
+	pp := &peer{name: p.Name, base: base, client: &http.Client{Transport: transport, Timeout: 5 * time.Second}, rpc: &http.Client{Transport: transport}}
 	pp.proxy = &httputil.ReverseProxy{
 		Transport:     transport,
 		FlushInterval: -1, // stream SSE

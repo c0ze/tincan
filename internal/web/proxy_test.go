@@ -23,7 +23,7 @@ func servedLike(h http.Handler, login string) http.Handler {
 	}))
 }
 
-func peerPair(t *testing.T) (*Server, *http.Request, *httptest.Server) {
+func peerPair(t *testing.T) (*Server, *http.Request, *httptest.Server, *Server) {
 	t.Helper()
 	peerReg := rooms.Open(filepath.Join(t.TempDir(), "rooms.json"))
 	peerReg.Add(t.TempDir())
@@ -45,11 +45,11 @@ func peerPair(t *testing.T) (*Server, *http.Request, *httptest.Server) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return hubServer, last, peerHTTP
+	return hubServer, last, peerHTTP, peerServer
 }
 
 func TestProxyForwardsReadsWithPathJoinedOnce(t *testing.T) {
-	hub, seen, _ := peerPair(t)
+	hub, seen, _, _ := peerPair(t)
 	rec := do(t, hub.Handler(), "GET", "/api/peers/macmini/rooms", "", ownerHdr())
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"id"`) {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
@@ -60,7 +60,7 @@ func TestProxyForwardsReadsWithPathJoinedOnce(t *testing.T) {
 }
 
 func TestProxyMutationUsesHubHeaders(t *testing.T) {
-	hub, seen, _ := peerPair(t)
+	hub, seen, _, _ := peerPair(t)
 	hdr := mut()
 	hdr["Origin"] = "http://example.com"
 	hdr["Cookie"] = "secret=1"
@@ -80,7 +80,7 @@ func TestProxyMutationUsesHubHeaders(t *testing.T) {
 }
 
 func TestProxyRejectsTraversalAndUnknownPeer(t *testing.T) {
-	hub, _, _ := peerPair(t)
+	hub, _, _, _ := peerPair(t)
 	// Go's ServeMux path-cleans "../.." segments itself before our handler
 	// ever runs, redirecting away from the peers route entirely; on wildcard
 	// patterns it does so with 307 (not 301 as on the old fixed-pattern
@@ -106,7 +106,7 @@ func TestProxyRejectsTraversalAndUnknownPeer(t *testing.T) {
 }
 
 func TestPeerHealthTracksOffline(t *testing.T) {
-	hub, _, peerSrv := peerPair(t)
+	hub, _, peerSrv, _ := peerPair(t)
 	hub.checkPeers(context.Background())
 	if !hub.peers["macmini"].online.Load() {
 		t.Fatal("peer not online")
