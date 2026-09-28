@@ -91,6 +91,9 @@ func transcriptOf(s *Snapshot, excludeID string) []Message {
 		if m.Role == RoleAgent && m.State != StateDone && m.State != StateError {
 			continue
 		}
+		if m.Role == RoleCommittee && (m.State == StatePending || m.State == StateRunning) {
+			continue
+		}
 		out = append(out, m)
 	}
 	return out
