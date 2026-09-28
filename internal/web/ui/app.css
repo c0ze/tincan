@@ -111,3 +111,4 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; }
 .members .member { display: block; }
 .members .unavailable { color: var(--muted); }
 .warning { color: var(--busy); font-size: 12px; }
+.committees .notice { border-left: 3px solid var(--busy); padding: 4px 10px; }

@@ -39,6 +39,10 @@ func TestUIContract(t *testing.T) {
 		`method: "DELETE"`,
 		`"presets"`,
 		`n.kind === "committees"`,
+		// Save warnings survive the note-driven refresh; a note never
+		// re-renders over an open editor.
+		"state.committeeNotice",
+		"!state.editingCommittee",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("app.js missing %q", want)

@@ -25,6 +25,8 @@ const state = {
   sources: {},
   quotas: {},          // key -> [quota entry]
   showArchived: {},    // key/rid -> true when the room lists its archived threads
+  committeeNotice: "", // outcome of the last committee save/delete, shown above the list
+  editingCommittee: false, // the committee editor is open: notes must not re-render over it
 };
 
 function fmtLeft(iso) {
@@ -232,7 +234,7 @@ async function openCurrent() {
   $("stop").hidden = $("archive").hidden = true;
   $("chips").replaceChildren();
   if (!cur) { $("title").textContent = "Pick a room"; return; }
-  if (cur.view === "committees") return showCommittees();
+  if (cur.view === "committees") { state.committeeNotice = ""; return showCommittees(); }
   if (cur.tid === "activity") return showActivity();
   state.agents = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/agents`).catch(() => ({ presets: [], listeners: [] }));
   await refreshMessages();
@@ -433,6 +435,7 @@ function row(cell, values) {
 
 // ---------- committees ----------
 async function showCommittees() {
+  state.editingCommittee = false;
   $("title").textContent = "Committees";
   const view = $("view");
   view.replaceChildren(el("p", "muted", "Loading…"));
@@ -445,6 +448,7 @@ async function showCommittees() {
   }));
   if (!state.current || state.current.view !== "committees") return; // navigated away
   const box = el("div", "committees");
+  if (state.committeeNotice) box.append(el("p", "notice", state.committeeNotice));
   if (data.role === "peer") {
     const age = data.fetched_at ? fmtAgo(data.fetched_at) : "never";
     box.append(el("p", "muted", `Definitions are kept on ${data.from}; this copy was fetched ${age}.` + (data.error ? ` Last refresh failed: ${data.error}` : "")));
@@ -471,6 +475,8 @@ function fmtAgo(iso) {
 }
 
 function editCommittee(hubKey, catalogues, c) {
+  state.editingCommittee = true;
+  state.committeeNotice = "";
   const view = $("view");
   const form = el("form", "committee-edit");
   const name = el("input");
@@ -514,13 +520,18 @@ function editCommittee(hubKey, catalogues, c) {
     try {
       const res = await api(hubKey, `committees/${encodeURIComponent(name.value)}`, { method: "PUT", body: {
         members: [...chosen], deadline_minutes: Number(deadline.value), instructions: instructions.value, skip_exhausted: skip.checked } });
-      status.textContent = (res.warnings || []).length ? "Saved with warnings: " + res.warnings.join("; ") : "Saved.";
-      if (!(res.warnings || []).length) showCommittees();
+      const warnings = res.warnings || [];
+      state.committeeNotice = `Saved ${res.committee.name} (v${res.committee.version})` + (warnings.length ? ". Warnings: " + warnings.join("; ") : ".");
+      showCommittees();
     } catch (e) { status.textContent = e.message; }
   };
   del.onclick = async () => {
     if (!c || !confirm(`Delete committee ${c.name}?`)) return;
-    try { await api(hubKey, `committees/${encodeURIComponent(c.name)}`, { method: "DELETE" }); showCommittees(); }
+    try {
+      await api(hubKey, `committees/${encodeURIComponent(c.name)}`, { method: "DELETE" });
+      state.committeeNotice = `Deleted ${c.name}.`;
+      showCommittees();
+    }
     catch (e) { status.textContent = e.message; }
   };
   const cancel = el("button", "secondary", "Cancel");
@@ -650,7 +661,7 @@ function connect(key) {
       return;
     }
     if (n.kind === "committees") {
-      if (state.current && state.current.view === "committees") showCommittees();
+      if (state.current && state.current.view === "committees" && !state.editingCommittee) showCommittees();
       return;
     }
     if (n.room) await loadThreads(key, n.room).catch(() => {});
