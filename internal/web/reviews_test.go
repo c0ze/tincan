@@ -13,6 +13,7 @@ import (
 	"github.com/c0ze/tincan/v2/internal/host"
 	"github.com/c0ze/tincan/v2/internal/review"
 	"github.com/c0ze/tincan/v2/internal/rooms"
+	"github.com/c0ze/tincan/v2/internal/thread"
 )
 
 func TestReviewAcrossTwoMachines(t *testing.T) {
@@ -133,4 +134,61 @@ func TestReviewAPI(t *testing.T) {
 	if rec := do(t, h, "GET", "/api/rooms/"+rid+"/reviews/rv-../../x", "", ownerHdr()); rec.Code == 200 {
 		t.Fatal("traversal accepted")
 	}
+}
+func TestCommitteeMentionEndToEnd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("detached hosts")
+	}
+	s, rid := apiServer(t)
+	state, _ := filepath.EvalSymlinks(t.TempDir())
+	t.Setenv("TINCAN_STATE_DIR", state)
+	s.cfg.StateDir = state
+	script := filepath.Join(t.TempDir(), "reviewer")
+	os.WriteFile(script, []byte("#!/bin/sh\necho LGTM from the committee\n"), 0o755)
+	s.cfg.Dispatch.Presets["reviewer"] = host.Preset{Exec: []string{script, "{body}"}, Stdin: "none", Reply: "stdout", ExecTimeoutSec: 60}
+	s.cfg.Dispatch.Executable = buildTincan(t)
+	s.initJobs()
+	committee.NewStore(state).Put(context.Background(), committee.Committee{Name: "solo", Members: []string{"reviewer@box"}})
+	h := s.Handler()
+	rec := do(t, h, "POST", "/api/rooms/"+rid+"/threads", `{"title":"t","primary":"claude"}`, mut())
+	var th struct {
+		ID string `json:"id"`
+	}
+	decode(t, rec.Body.String(), &th)
+	do(t, h, "POST", "/api/rooms/"+rid+"/threads/"+th.ID+"/messages", `{"text":"@solo please check"}`, mut())
+	room, _, _ := s.cfg.Registry.Get(rid)
+	t.Cleanup(func() {
+		s.jobs.Wait()
+		ws, _ := os.ReadDir(filepath.Join(state, "reviews", "ws"))
+		for _, j := range ws {
+			host.Down(context.Background(), filepath.Join(state, "reviews", "ws", j.Name()), "reviewer", 5*time.Second)
+		}
+	})
+	deadline := time.Now().Add(40 * time.Second)
+	for time.Now().Before(deadline) {
+		s.runRoomPass(context.Background(), room, false)
+		tt, _ := thread.Open(room.Path, th.ID)
+		snap, _ := tt.Snapshot()
+		var cm, rv *thread.Message
+		for i := range snap.Messages {
+			switch snap.Messages[i].Role {
+			case thread.RoleCommittee:
+				cm = &snap.Messages[i]
+			case thread.RoleReview:
+				rv = &snap.Messages[i]
+			}
+		}
+		if cm != nil && cm.State == thread.StateDone && rv != nil {
+			if !strings.Contains(rv.Text, "LGTM from the committee") {
+				t.Fatalf("review message: %+v", rv)
+			}
+			st, _ := review.ReadState(room.Path, cm.Review)
+			if !st.ThreadDone {
+				t.Fatalf("thread_done not set: %+v", st)
+			}
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	t.Fatal("committee mention did not complete")
 }

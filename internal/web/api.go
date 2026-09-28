@@ -104,7 +104,15 @@ func (s *Server) opts(room rooms.Room) dispatch.Options {
 
 // dispatcherFor returns a non-owning dispatcher for journal writes (post,
 // stop, archive, retry); submission is left to the room's lock holder.
-func (s *Server) dispatcherFor(room rooms.Room) *thread.Dispatcher { return thread.New(s.opts(room)) }
+func (s *Server) dispatcherFor(room rooms.Room) *thread.Dispatcher { return s.newDispatcher(room) }
+
+// newDispatcher builds a room's dispatcher with the committee settings, so
+// both posting (any process) and the owned room pass resolve @committee.
+func (s *Server) newDispatcher(room rooms.Room) *thread.Dispatcher {
+	d := thread.New(s.opts(room))
+	d.Machine, d.StateDir, d.CommitteesFrom, d.Registry = s.cfg.Machine, s.cfg.StateDir, s.cfg.CommitteesFrom, s.cfg.Registry
+	return d
+}
 
 func (s *Server) room(w http.ResponseWriter, r *http.Request) (rooms.Room, bool) {
 	room, err := s.roomByID(r.PathValue("rid"))
