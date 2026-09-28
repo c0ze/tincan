@@ -2,6 +2,7 @@ package reviewjob
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,4 +60,32 @@ func TestJanitorResumesAdoptsAndCleans(t *testing.T) {
 func countRuns(t *testing.T, ws, _ string) int {
 	data, _ := os.ReadFile(filepath.Join(ws, "runs.log"))
 	return strings.Count(string(data), "\n")
+}
+
+// A cleanup that could not stop the listener is retried on the next pass,
+// not recorded as done.
+func TestJanitorRetriesFailedCleanup(t *testing.T) {
+	s := testService(t, "echo")
+	ctx := context.Background()
+	req := jobRequest("rv-0000000000000000-e", "p", time.Now().Add(time.Hour).UTC().Truncate(time.Second))
+	s.Create(ctx, req)
+	s.Wait()
+	done := waitTerminal(t, s, req.JobID)
+	s.Ack(ctx, req.JobID)
+	s.down = func(context.Context, string, string, time.Duration) error { return errors.New("host busy") }
+	s.Janitor(ctx)
+	if j, _, _ := s.store().Get(req.JobID); j.Cleaned {
+		t.Fatal("failed cleanup recorded as done")
+	}
+	if _, err := os.Stat(done.Workspace); err != nil {
+		t.Fatalf("workspace removed although the listener was not stopped: %v", err)
+	}
+	s.down = nil
+	s.Janitor(ctx)
+	if j, _, _ := s.store().Get(req.JobID); !j.Cleaned {
+		t.Fatal("cleanup not retried")
+	}
+	if _, err := os.Stat(done.Workspace); !os.IsNotExist(err) {
+		t.Fatalf("workspace kept: %v", err)
+	}
 }

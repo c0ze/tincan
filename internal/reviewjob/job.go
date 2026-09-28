@@ -116,6 +116,9 @@ func (s Store) Get(id string) (Job, bool, error) {
 	if err := json.Unmarshal(data, &j); err != nil {
 		return j, false, fmt.Errorf("%s: %w", s.Path(id), err)
 	}
+	if j.ID != id {
+		return Job{}, false, fmt.Errorf("%s holds job %q", s.Path(id), j.ID)
+	}
 	return j, true, nil
 }
 

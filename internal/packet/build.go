@@ -210,7 +210,11 @@ func Build(ctx context.Context, dir, scope, question string) (*Packet, error) {
 	if p.Manifest.IncludedTree, err = ig.Out(ctx, "write-tree"); err != nil {
 		return nil, err
 	}
-	patch, err := g.Run(ctx, nil, "diff", "--binary", "--full-index", "--find-renames", r.BaseTree, p.Manifest.IncludedTree)
+	// Plumbing with every presentation knob pinned, so user configuration
+	// (noprefix, colour, external diff, textconv) cannot reshape the patch.
+	patch, err := g.Run(ctx, nil, "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "diff-tree", "-p", "-r",
+		"--binary", "--full-index", "--find-renames", "--no-color", "--no-ext-diff", "--no-textconv",
+		"--src-prefix=a/", "--dst-prefix=b/", r.BaseTree, p.Manifest.IncludedTree)
 	if err != nil {
 		return nil, err
 	}

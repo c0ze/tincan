@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -106,5 +107,35 @@ func TestCheckoutFallsBack(t *testing.T) {
 		unset := exec.Command("git", "config", "--unset-all", "remote.origin.promisor")
 		unset.Dir = member
 		unset.Run() // absent key exits non-zero; best effort
+	}
+}
+
+// Workspace git ignores the user's global and system configuration: global
+// hooks, attribute files and smudge filters (git-lfs installs one) never run.
+func TestCheckoutIgnoresGlobalGitConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hooks")
+	}
+	p, reg, _ := checkoutFixture(t)
+	tmp := stateDir(t)
+	marker := filepath.Join(tmp, "ran")
+	hooks := filepath.Join(tmp, "hooks")
+	os.Mkdir(hooks, 0o755)
+	os.WriteFile(filepath.Join(hooks, "post-checkout"), []byte("#!/bin/sh\ntouch "+marker+".hook\n"), 0o755)
+	attrs := filepath.Join(tmp, "attributes")
+	os.WriteFile(attrs, []byte("* filter=probe\n"), 0o644)
+	smudge := filepath.Join(tmp, "smudge")
+	os.WriteFile(smudge, []byte("#!/bin/sh\ntouch "+marker+".filter\ncat\n"), 0o755)
+	global := filepath.Join(tmp, "gitconfig")
+	os.WriteFile(global, []byte("[core]\n\thooksPath = "+hooks+"\n\tattributesFile = "+attrs+"\n[filter \"probe\"]\n\tsmudge = "+smudge+"\n\trequired = true\n"), 0o644)
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	ws := filepath.Join(stateDir(t), "ws")
+	if _, reason, err := materializeCheckout(context.Background(), ws, p, reg); err != nil || reason != "" {
+		t.Fatalf("checkout: %q %v", reason, err)
+	}
+	for _, m := range []string{marker + ".hook", marker + ".filter"} {
+		if _, err := os.Stat(m); err == nil {
+			t.Errorf("%s: user configuration ran inside the workspace", filepath.Base(m))
+		}
 	}
 }

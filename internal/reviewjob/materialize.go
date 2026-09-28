@@ -83,6 +83,13 @@ func materializePacket(ws string, p *packet.Packet, reason string) (string, erro
 	return note, nil
 }
 
+// hermetic runs git for the workspace without the user's system or global
+// configuration, so their hooks, attribute files and filters (git-lfs
+// smudge) never run and nothing is fetched (committees §6.6).
+func hermetic(dir string) packet.Git {
+	return packet.Git{Dir: dir, Env: []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_ATTR_NOSYSTEM=1", "GIT_LFS_SKIP_SMUDGE=1"}}
+}
+
 // candidates returns the repository roots of registered rooms whose origin
 // has repoID, deduplicated and ordered newest first (committees §6.6).
 func candidates(ctx context.Context, reg *rooms.Registry, repoID string) []string {
@@ -172,10 +179,10 @@ func materializeCheckout(ctx context.Context, ws string, p *packet.Packet, reg *
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return "", "", err
 	}
-	if _, err := (packet.Git{Dir: parent}).Run(ctx, nil, "clone", "-q", "--no-checkout", "--shared", chosen, ws); err != nil {
+	if _, err := hermetic(parent).Run(ctx, nil, "clone", "-q", "--no-checkout", "--shared", chosen, ws); err != nil {
 		return fail("clone", err)
 	}
-	g := packet.Git{Dir: ws}
+	g := hermetic(ws)
 	steps := [][]string{{"repack", "-a", "-d", "-q"}, {"remote", "remove", "origin"}}
 	for _, s := range steps {
 		if _, err := g.Run(ctx, nil, s...); err != nil {
@@ -186,7 +193,7 @@ func materializeCheckout(ctx context.Context, ws string, p *packet.Packet, reg *
 		return fail("alternates", err)
 	}
 	if m.BaseKind == "commit" {
-		if _, err := g.Run(ctx, nil, "checkout", "-q", "--detach", m.BaseCommit); err != nil {
+		if _, err := g.Run(ctx, nil, "-c", "core.symlinks=false", "checkout", "-q", "--detach", m.BaseCommit); err != nil {
 			return fail("checkout", err)
 		}
 	} else {

@@ -40,6 +40,9 @@ type Service struct {
 	Now        func() time.Time
 	Executable string
 
+	// down stops a listener; nil means host.Down (tests inject failures).
+	down func(ctx context.Context, room, name string, wait time.Duration) error
+
 	mu       sync.Mutex
 	inflight map[string]bool
 	wg       sync.WaitGroup
@@ -59,7 +62,7 @@ func (s *Service) workspace(id string) string {
 }
 
 func (s *Service) packetPath(id string) string {
-	return filepath.Join(s.StateDir, "reviews", "jobs", id+".input.json")
+	return filepath.Join(s.StateDir, "reviews", "inputs", id+".json")
 }
 
 // Wait blocks until background creations started by this process finish.
@@ -153,7 +156,7 @@ func (s *Service) start(id string) {
 			delete(s.inflight, id)
 			s.mu.Unlock()
 		}()
-		s.create(context.Background(), id)
+		s.create(id)
 	}()
 }
 
@@ -161,9 +164,9 @@ func (s *Service) start(id string) {
 // lock throughout. It resumes a job left in "creating" by a dead process:
 // a request already saved in the recorded workspace is adopted, so a member
 // that ran is never run again (committees §6.6, round 5 #1).
-func (s *Service) create(ctx context.Context, id string) {
+func (s *Service) create(id string) {
 	st := s.store()
-	lock, err := st.Lock(ctx, id)
+	lock, err := st.Lock(context.Background(), id)
 	if err != nil {
 		return
 	}
@@ -172,6 +175,10 @@ func (s *Service) create(ctx context.Context, id string) {
 	if err != nil || !ok || j.State != "creating" {
 		return
 	}
+	// Nothing about creating a job may outlive the job: a hung clone,
+	// repack or checkout is cut off at expiry and releases the lock.
+	ctx, cancel := context.WithDeadline(context.Background(), j.ExpiresAt)
+	defer cancel()
 	fail := func(msg string) {
 		j.State, j.Result = "error", "ERROR "+msg
 		st.Save(j)
@@ -205,13 +212,10 @@ func (s *Service) create(ctx context.Context, id string) {
 		fail(err.Error())
 		return
 	}
-	left := time.Until(j.ExpiresAt)
-	if left < time.Minute {
-		j.State, j.Result = "error", "ERROR expired before launch"
-		st.Save(j)
+	if _, err := s.launchTimeout(j); err != nil {
+		fail(err.Error())
 		return
 	}
-	pinned.ExecTimeoutSec = int(left / time.Second)
 	j.Workspace = s.workspace(id)
 	if err := st.Save(j); err != nil { // the workspace is recorded before anything runs
 		return
@@ -228,6 +232,13 @@ func (s *Service) create(ctx context.Context, id string) {
 		return
 	}
 	j.Note = note
+	// Materializing takes time: recheck the time left right before launch.
+	timeout, err := s.launchTimeout(j)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	pinned.ExecTimeoutSec = timeout
 	body := note + "\n\n" + req.Prompt
 	o := dispatch.Options{Room: j.Workspace, Executable: s.Executable, Presets: map[string]host.Preset{j.Preset: pinned}}
 	r, err := dispatch.Send(ctx, o, dispatch.SendSpec{Agent: j.Preset, Preset: j.Preset, From: "review", Body: body, RequestID: j.ID})
@@ -242,6 +253,16 @@ func (s *Service) create(ctx context.Context, id string) {
 	j.State = "running"
 	importRequest(&j, r)
 	st.Save(j)
+}
+
+// launchTimeout is the member's exec timeout: the time left until expiry,
+// refused when under a minute (committees §6.6).
+func (s *Service) launchTimeout(j Job) (int, error) {
+	left := j.ExpiresAt.Sub(s.now())
+	if left < time.Minute {
+		return 0, errors.New("expired before launch")
+	}
+	return int(left / time.Second), nil
 }
 
 // pin resolves the preset's executable before any workspace exists and
@@ -449,8 +470,7 @@ func (s *Service) Janitor(ctx context.Context) error {
 			st.Save(cur)
 		}
 		due := cur.Acked || cur.State == "cancelled" || now.After(cur.ExpiresAt.Add(time.Hour))
-		if due && !cur.Cleaned {
-			s.cleanup(ctx, cur)
+		if due && !cur.Cleaned && s.cleanup(ctx, cur) {
 			cur.Cleaned = true
 			st.Save(cur)
 		}
@@ -459,21 +479,27 @@ func (s *Service) Janitor(ctx context.Context) error {
 	return nil
 }
 
-// cleanup stops the job's listener and removes its workspace; the
-// workspace must lie under <state>/reviews/ws.
-func (s *Service) cleanup(ctx context.Context, j Job) {
+// cleanup stops the job's listener, removes its workspace (which must lie
+// under <state>/reviews/ws) and its stored input, and reports success; a
+// listener that could not be stopped is retried on the next pass.
+func (s *Service) cleanup(ctx context.Context, j Job) bool {
+	os.Remove(s.packetPath(j.ID))
 	if j.Workspace == "" {
-		return
+		return true
 	}
 	root := filepath.Join(s.StateDir, "reviews", "ws") + string(filepath.Separator)
 	if !strings.HasPrefix(j.Workspace, root) {
-		return
+		return false
 	}
-	if _, err := os.Stat(j.Workspace); err != nil {
-		return
+	if _, err := os.Stat(j.Workspace); errors.Is(err, os.ErrNotExist) {
+		return true
 	}
-	if err := host.Down(ctx, j.Workspace, j.Preset, 10*time.Second); err != nil {
-		return // try again next pass
+	down := s.down
+	if down == nil {
+		down = host.Down
 	}
-	os.RemoveAll(j.Workspace)
+	if err := down(ctx, j.Workspace, j.Preset, 10*time.Second); err != nil {
+		return false
+	}
+	return os.RemoveAll(j.Workspace) == nil
 }

@@ -161,3 +161,24 @@ func runIn(t *testing.T, dir string, args ...string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// The patch must not depend on the user's diff configuration: noprefix,
+// forced colour or an external diff tool would make it unappliable.
+func TestBuildPatchIgnoresUserDiffConfig(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "a.txt", "a\n")
+	git("add", ".")
+	git("commit", "-qm", "base")
+	git("config", "diff.noprefix", "true")
+	git("config", "color.ui", "always")
+	git("config", "diff.external", "false")
+	git("config", "diff.mnemonicPrefix", "true")
+	write(t, dir, "a.txt", "a\nb\n")
+	p, err := Build(context.Background(), dir, "uncommitted", "q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(p.Patch), "\x1b[") || !strings.Contains(string(p.Patch), "diff --git a/a.txt b/a.txt") {
+		t.Fatalf("patch shaped by user config:\n%q", p.Patch)
+	}
+}

@@ -203,3 +203,49 @@ func TestAck(t *testing.T) {
 		t.Fatalf("ack: %+v %v", j, err)
 	}
 }
+
+// Time spent materializing counts: the launch rechecks the time left, so a
+// slow checkout can never start a member past its expiry.
+func TestLaunchRechecksExpiryAfterMaterializing(t *testing.T) {
+	s := testService(t, "echo")
+	real := time.Now()
+	calls := 0
+	s.Now = func() time.Time { // validation sees now; the launch sees 90 s later
+		calls++
+		if calls == 1 {
+			return real
+		}
+		return real.Add(90 * time.Second)
+	}
+	req := jobRequest("rv-0000000000000000-d", "p", real.Add(2*time.Minute).UTC().Truncate(time.Second))
+	if _, err := s.Create(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	s.Wait()
+	j, _ := s.Status(req.JobID)
+	if j.State != "error" || !strings.Contains(j.Result, "expired") {
+		t.Fatalf("late launch: %+v", j)
+	}
+	if _, err := os.Stat(filepath.Join(j.Workspace, ".tincan", "requests")); err == nil {
+		t.Fatal("a request was saved for an expired job")
+	}
+}
+
+// A job's stored input is never mistaken for a job record: it is not
+// listed, and a request naming it cannot overwrite the real record.
+func TestInputFilesAreNotJobs(t *testing.T) {
+	s := testService(t, "echo")
+	ctx := context.Background()
+	req := jobRequest("rv-0000000000000000-f", "p", time.Now().Add(time.Hour).UTC().Truncate(time.Second))
+	s.Create(ctx, req)
+	s.Wait()
+	done := waitTerminal(t, s, req.JobID)
+	jobs, _ := s.store().List()
+	if len(jobs) != 1 {
+		t.Fatalf("listed %d jobs: %+v", len(jobs), jobs)
+	}
+	s.Cancel(ctx, req.JobID+".input", time.Time{})
+	if j, _ := s.Status(req.JobID); j.State != "done" || j.Result != done.Result {
+		t.Fatalf("real record changed: %+v", j)
+	}
+}
