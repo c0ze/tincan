@@ -1,10 +1,15 @@
 package web
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/c0ze/tincan/v2/internal/committee"
+	"github.com/c0ze/tincan/v2/internal/rooms"
 )
 
 func hubWithState(t *testing.T) (*Server, string) {
@@ -101,5 +106,54 @@ func writeFile(t *testing.T, path, s string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+func TestPeerCachesHubCommittees(t *testing.T) {
+	// hub = the httptest peer ("macmini") holding committees; the local
+	// server ("cachyos") runs with --committees-from macmini.
+	local, _, peerHTTP, hubServer := peerPair(t)
+	hubState, _ := filepath.EvalSymlinks(t.TempDir())
+	hubServer.cfg.StateDir = hubState
+	committee.NewStore(hubState).Put(context.Background(), committee.Committee{Name: "reviewers", Members: []string{"x@macmini"}})
+	localState, _ := filepath.EvalSymlinks(t.TempDir())
+	local.cfg.StateDir, local.cfg.CommitteesFrom = localState, "macmini"
+
+	rec := do(t, local.Handler(), "GET", "/api/committees", "", ownerHdr())
+	var view committeesView
+	decode(t, rec.Body.String(), &view)
+	if view.Role != "peer" || view.From != "macmini" || view.FetchedAt == nil || len(view.Committees) != 1 || view.Error != "" {
+		t.Fatalf("peer view: %s", rec.Body)
+	}
+	if rec := do(t, local.Handler(), "PUT", "/api/committees/x", `{"members":["x@macmini"]}`, mut()); rec.Code != 409 || !strings.Contains(rec.Body.String(), "edited on macmini") {
+		t.Fatalf("edit on peer: %d %s", rec.Code, rec.Body)
+	}
+	// Hub goes away: the cache is kept and the error is reported.
+	peerHTTP.Close()
+	c, _, _ := committee.LoadCache(localState)
+	c.FetchedAt = c.FetchedAt.Add(-time.Minute) // force a refresh attempt
+	committee.SaveCache(localState, c)
+	rec = do(t, local.Handler(), "GET", "/api/committees", "", ownerHdr())
+	decode(t, rec.Body.String(), &view)
+	if len(view.Committees) != 1 || view.Error == "" {
+		t.Fatalf("stale cache view: %s", rec.Body)
+	}
+}
+
+func TestPeerRefusesANonHub(t *testing.T) {
+	local, _, _, hubServer := peerPair(t)
+	hubServer.cfg.StateDir, _ = filepath.EvalSymlinks(t.TempDir())
+	hubServer.cfg.CommitteesFrom = "cachyos" // misconfigured: also a peer
+	local.cfg.StateDir, _ = filepath.EvalSymlinks(t.TempDir())
+	local.cfg.CommitteesFrom = "macmini"
+	rec := do(t, local.Handler(), "GET", "/api/committees", "", ownerHdr())
+	if !strings.Contains(rec.Body.String(), "not a committees hub") {
+		t.Fatalf("non-hub accepted: %s", rec.Body)
+	}
+}
+
+func TestNewRejectsUnknownCommitteesFrom(t *testing.T) {
+	_, err := New(Config{Owner: owner, Registry: rooms.Open(filepath.Join(t.TempDir(), "rooms.json")), CommitteesFrom: "nowhere"})
+	if err == nil || !strings.Contains(err.Error(), "nowhere") {
+		t.Fatalf("unknown hub accepted: %v", err)
 	}
 }

@@ -26,6 +26,8 @@ func cmdWeb(args []string, stdout, stderr io.Writer) int {
 	origin := fs.String("origin", "", "pinned browser origin for mutations, e.g. https://host.tailnet.ts.net")
 	budget := fs.Int("chain-budget", 6, "automatic agent executions per user message")
 	idle := fs.Duration("idle-stop", 30*time.Minute, "stop idle thread listeners after this long")
+	machineFlag := fs.String("machine", "", "this machine's name in committees and peers' --peer (default: first label of its Tailscale DNS name)")
+	from := fs.String("committees-from", "", "peer that hosts committee definitions (default: this machine is the hub)")
 	var peers, scans stringList
 	fs.Var(&peers, "peer", "name=https://peer/tincan/ (repeatable)")
 	fs.Var(&scans, "scan", "directory to scan for existing rooms (repeatable; default ~/projects)")
@@ -64,11 +66,16 @@ func cmdWeb(args []string, stdout, stderr io.Writer) int {
 	} else if n > 0 {
 		fmt.Fprintf(stderr, "tincan web: imported %d rooms\n", n)
 	}
-	machine, _ := os.Hostname()
-	machine, _, _ = strings.Cut(machine, ".")
+	// webIdentity's only extra host is this node's Tailscale DNS name.
+	dnsName := ""
+	if len(hosts) > 0 {
+		dnsName = hosts[0]
+	}
+	hostname, _ := os.Hostname()
+	machine := machineName(*machineFlag, dnsName, hostname)
 	// The --origin host joins the Host allowlist inside web.New.
 	srv, err := web.New(web.Config{PublicPath: *public, Owner: *owner, Origin: *origin, AllowedHosts: hosts, Machine: machine, Peers: peerList,
-		ChainBudget: *budget, IdleStop: *idle, Registry: reg, Dispatch: dispatch.Options{}, StateDir: rooms.StateDir()})
+		ChainBudget: *budget, IdleStop: *idle, Registry: reg, Dispatch: dispatch.Options{}, StateDir: rooms.StateDir(), CommitteesFrom: *from})
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan web: %v\n", err)
 		return ExitError
@@ -108,4 +115,18 @@ func webIdentity(ctx context.Context, owner, origin string, stderr io.Writer) (s
 		fmt.Fprintln(stderr, "tincan web: this node's Tailscale DNS name is unknown, so only loopback hosts are allowed; remote access needs --origin https://<host>")
 	}
 	return owner, hosts, nil
+}
+
+// machineName picks this machine's name: the flag, else the first label of
+// its Tailscale DNS name (what peers' --peer URLs use), else the host name.
+func machineName(flag, dnsName, hostname string) string {
+	if flag != "" {
+		return flag
+	}
+	if dnsName != "" {
+		label, _, _ := strings.Cut(dnsName, ".")
+		return label
+	}
+	label, _, _ := strings.Cut(hostname, ".")
+	return label
 }

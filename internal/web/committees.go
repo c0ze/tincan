@@ -186,6 +186,84 @@ func (s *Server) validateCommittee(ctx context.Context, c committee.Committee) (
 	return warnings, nil
 }
 
+// peerCommittees serves the cached copy, refreshing it first when it is more
+// than 10 s old (committees §6.7); a failed refresh keeps the last valid copy
+// and reports the error.
 func (s *Server) peerCommittees(ctx context.Context) committeesView {
-	return committeesView{Role: "peer", From: s.cfg.CommitteesFrom, Error: "not implemented", Committees: []committee.Committee{}}
+	c, ok, err := committee.LoadCache(s.cfg.StateDir)
+	if err != nil || !ok || time.Since(c.FetchedAt) > 10*time.Second {
+		s.refreshCommittees(ctx)
+		c, ok, err = committee.LoadCache(s.cfg.StateDir)
+	}
+	view := committeesView{Role: "peer", From: s.cfg.CommitteesFrom, Committees: []committee.Committee{}}
+	if err != nil {
+		view.Error = err.Error()
+		return view
+	}
+	if ok {
+		view.Committees, view.Error = c.Committees, c.Error
+		if !c.FetchedAt.IsZero() {
+			t := c.FetchedAt
+			view.FetchedAt = &t
+		}
+	}
+	return view
+}
+
+// refreshCommittees fetches the hub's committees into the cache. Concurrent
+// callers share one fetch at a time.
+func (s *Server) refreshCommittees(ctx context.Context) error {
+	s.committeesMu.Lock()
+	defer s.committeesMu.Unlock()
+	old, _, _ := committee.LoadCache(s.cfg.StateDir)
+	old.From, old.AttemptedAt = s.cfg.CommitteesFrom, time.Now().UTC()
+	var view committeesView
+	var err error
+	if p := s.peers[s.cfg.CommitteesFrom]; p == nil {
+		err = fmt.Errorf("%s is not a configured peer", s.cfg.CommitteesFrom)
+	} else {
+		err = p.call(ctx, "GET", "committees", nil, 1<<20, &view)
+	}
+	if err == nil && view.Role != "hub" {
+		err = fmt.Errorf("%s is not a committees hub (it reads committees from %q)", s.cfg.CommitteesFrom, view.From)
+	}
+	if err == nil {
+		for i := range view.Committees {
+			if nerr := view.Committees[i].Normalize(); nerr != nil {
+				err = fmt.Errorf("hub sent an invalid committee: %w", nerr)
+				break
+			}
+		}
+	}
+	if err != nil {
+		old.Error = err.Error()
+	} else {
+		old.Error, old.FetchedAt, old.Committees = "", old.AttemptedAt, view.Committees
+	}
+	if old.Committees == nil {
+		old.Committees = []committee.Committee{}
+	}
+	if serr := committee.SaveCache(s.cfg.StateDir, old); serr != nil {
+		return serr
+	}
+	return err
+}
+
+// syncCommittees refreshes the peer cache every 60 s.
+func (s *Server) syncCommittees(ctx context.Context) {
+	if s.cfg.CommitteesFrom == "" || s.cfg.StateDir == "" {
+		return
+	}
+	t := time.NewTicker(60 * time.Second)
+	defer t.Stop()
+	for {
+		if err := s.refreshCommittees(ctx); err != nil {
+			s.logOnce("committees.refresh", fmt.Sprintf("tincan web: committees from %s: %v", s.cfg.CommitteesFrom, err))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }

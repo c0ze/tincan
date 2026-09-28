@@ -194,6 +194,37 @@ Without an entry, `codex-default` maps to preset `codex` and any other ID
 maps to the preset with the same name. A malformed `quotas.json` is logged
 and the default labels/mapping are used instead — it never breaks the panel.
 
+## Committees
+
+A committee is a named group of reviewers, each a `preset@machine`, such as
+`codex-gmail@cachyos` or `claude-personal@macmini`. Define committees on the
+**Committees** page. Reviews that use them arrive in a later release.
+
+- **One hub.** Definitions live on the hub: the machine started *without*
+  `--committees-from`, in `<state>/committees.json`. Its peer runs
+  `tincan web --committees-from <hub peer name>`. It keeps a cached copy,
+  refreshed every 60 s and whenever the page loads, and shows the cache's age.
+  Edits always go to the hub; a peer refuses them with 409. If both machines
+  point at each other, the page says "not a committees hub".
+- **Machine names.** A member's machine is the name that machine's
+  `tincan web` uses for itself: `--machine`, by default the first label of
+  its Tailscale DNS name (`macmini` for `macmini.<tailnet>.ts.net`). That
+  matches the names used in `--peer name=url`.
+- **Checks when saving.** Every member must exist on its machine, be
+  installed, and use a bare command name or an absolute path; relative
+  executables are refused. A member on an offline peer cannot be saved. Presets
+  with a permission bypass (`--dangerously-skip-permissions`,
+  `--always-approve`, `--yolo`, `-s danger-full-access`) are saved with a
+  warning, because such a reviewer could modify files. A committee may not
+  share a name with a preset on any reachable machine.
+- **Limits.** 1–8 members, a deadline of 1–240 minutes (default 30),
+  instructions up to 8 KiB. Each save increments the version.
+
+Each machine also serves `api/presets`, its preset catalogue with
+availability, warnings and quota, but never env values. `tincan web` writes
+`<state>/web.json` every 10 s so the CLI and MCP can tell that a coordinator
+is running.
+
 ## Services
 
 Two starting points live under [`deploy/`](../deploy/); edit the peer URL,

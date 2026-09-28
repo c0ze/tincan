@@ -68,3 +68,17 @@ func TestWebIdentityWithoutOwnerFailsWhenDetectionFails(t *testing.T) {
 		t.Fatalf("got %v, want an error mentioning --owner", err)
 	}
 }
+
+func TestMachineNameDefaults(t *testing.T) {
+	for _, c := range []struct{ flag, dns, host, want string }{
+		{"", "macmini.brill-decibel.ts.net", "Mac-mini.local", "macmini"},
+		{"", "cachyos.brill-decibel.ts.net", "cachyos-desktop", "cachyos"},
+		{"", "", "cachyos-desktop", "cachyos-desktop"},
+		{"", "", "Mac-mini.local", "Mac-mini"},
+		{"box", "macmini.x.ts.net", "h", "box"},
+	} {
+		if got := machineName(c.flag, c.dns, c.host); got != c.want {
+			t.Errorf("machineName(%q,%q,%q) = %q, want %q", c.flag, c.dns, c.host, got, c.want)
+		}
+	}
+}

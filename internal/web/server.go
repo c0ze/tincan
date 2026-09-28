@@ -99,6 +99,8 @@ type Server struct {
 	// thread directory, so two concurrent requests for the same client_id
 	// would otherwise both see "not found" and both create one).
 	createMu sync.Mutex
+
+	committeesMu sync.Mutex // serializes peer committee-cache refreshes
 }
 
 func New(cfg Config) (*Server, error) {
@@ -160,6 +162,11 @@ func New(cfg Config) (*Server, error) {
 			return nil, err
 		}
 		s.peers[p.Name] = pp
+	}
+	if cfg.CommitteesFrom != "" {
+		if _, ok := s.peers[cfg.CommitteesFrom]; !ok {
+			return nil, fmt.Errorf("--committees-from %q is not a configured --peer", cfg.CommitteesFrom)
+		}
 	}
 	s.routes()
 	return s, nil
@@ -421,6 +428,7 @@ func Listen(spec string) (net.Listener, error) {
 func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 	go s.loop(ctx)       // Task 10
 	go s.watchPeers(ctx) // Task 11
+	go s.syncCommittees(ctx)
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()

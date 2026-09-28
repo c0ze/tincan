@@ -3,7 +3,9 @@
 <!-- net.tincan.web.plist — install to ~/Library/LaunchAgents/.
      Loopback TCP: the macOS Tailscale app is sandboxed and cannot reach a unix
      socket in your home directory. Serve it with:
-     tailscale serve --bg --set-path /tincan http://127.0.0.1:7788 -->
+     tailscale serve --bg --set-path /tincan http://127.0.0.1:7788
+     Committee definitions live on the machine run without
+     --committees-from (docs/web.md "Committees"). -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>net.tincan.web</string>
