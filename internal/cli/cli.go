@@ -51,6 +51,10 @@ Hosted listeners (tincan runs a headless agent CLI for you):
                                  the git work tree containing the working directory)
   tincan web [--listen unix:<path>|127.0.0.1:<port>] [--public-path /tincan] [--peer name=url]...
                                  chat UI for agents; expose with tailscale serve (see docs/web.md)
+  tincan review --committee <name> (--question <s> | --question-file <f>) [--scope <s>]
+                [--request-id <id>] [--wait] [flags]
+                                 ask a committee to review the change (needs tincan web)
+  tincan review --wait <id> | --cancel <id> [flags]
   tincan version [--format json]
   tincan gc [--older-than 168h] [--room <path>]
 
@@ -58,7 +62,7 @@ Common flags:
   --room <path>       room directory (default: current directory)
   --artifact <path>   artifact pointer, repeatable (send/ask/reply)
 
-Exit codes: 0 ok, 1 error, 2 usage, 3 timeout.
+Exit codes: 0 ok, 1 error, 2 usage, 3 timeout, 4 review closed with late or unreachable members.
 `
 
 // Run executes a tincan command and returns its exit code.
@@ -101,6 +105,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdVersion(args[1:], stdout, stderr)
 	case "gc":
 		return cmdGC(args[1:], stdout, stderr)
+	case "review":
+		return cmdReview(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usageText)
 		return ExitOK

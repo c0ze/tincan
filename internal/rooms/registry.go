@@ -35,8 +35,17 @@ type file struct {
 	Rooms []Room `json:"rooms"`
 }
 
-// StateDir is where per-user tincan state lives; "" when it cannot be found.
+// StateDir is where per-user tincan state lives, canonical (symlinks in its
+// existing ancestors resolved, so fsutil's symlink checks accept it); ""
+// when it cannot be found.
 func StateDir() string {
+	if d := stateDir(); d != "" {
+		return resolveAncestor(d)
+	}
+	return ""
+}
+
+func stateDir() string {
 	if d := os.Getenv("TINCAN_STATE_DIR"); d != "" {
 		return d
 	}

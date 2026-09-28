@@ -47,3 +47,17 @@ func TestHeartbeatCarriesCommitteeSource(t *testing.T) {
 		t.Fatalf("%+v %v", hb, err)
 	}
 }
+
+// A state directory reached through a symlink (macOS /var, or a relocated
+// ~/.local) is returned canonically, so fsutil's symlink checks accept it.
+func TestStateDirIsCanonical(t *testing.T) {
+	real, _ := filepath.EvalSymlinks(t.TempDir())
+	link := filepath.Join(t.TempDir(), "state-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlinks unavailable")
+	}
+	t.Setenv("TINCAN_STATE_DIR", filepath.Join(link, "tincan"))
+	if got, want := StateDir(), filepath.Join(real, "tincan"); got != want {
+		t.Fatalf("StateDir() = %q, want %q", got, want)
+	}
+}
