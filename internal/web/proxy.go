@@ -17,6 +17,10 @@ import (
 	"time"
 )
 
+// peerResponseHeaderTimeout bounds how long the hub waits for a peer's
+// response headers (SSE bodies stream on afterwards).
+const peerResponseHeaderTimeout = 30 * time.Second
+
 type peer struct {
 	name   string
 	base   *url.URL
@@ -35,7 +39,7 @@ func newPeer(p Peer) (*peer, error) {
 	}
 	transport := &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
-		ResponseHeaderTimeout: 30 * time.Second,
+		ResponseHeaderTimeout: peerResponseHeaderTimeout,
 		TLSHandshakeTimeout:   10 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 	}

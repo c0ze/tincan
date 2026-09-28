@@ -76,6 +76,34 @@ func TestAddRejectsHomeRootAndFiles(t *testing.T) {
 	}
 }
 
+// `tincan send` run in ~ or / touches that directory; it must never become a
+// room, while its subdirectories still can.
+func TestTouchIgnoresHomeAndRoot(t *testing.T) {
+	r := tempRegistry(t)
+	home := mkroom(t, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	for _, dir := range []string{home, filepath.Dir(home), string(filepath.Separator)} {
+		if err := r.Touch(dir); err != nil {
+			t.Fatalf("touch %s: %v", dir, err)
+		}
+	}
+	proj := filepath.Join(home, "proj")
+	if err := os.Mkdir(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Touch(proj); err != nil {
+		t.Fatal(err)
+	}
+	list, err := r.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Path != proj {
+		t.Fatalf("list = %+v, want only %s", list, proj)
+	}
+}
+
 func TestSetHiddenAndGet(t *testing.T) {
 	r := tempRegistry(t)
 	room := mkroom(t, "proj")

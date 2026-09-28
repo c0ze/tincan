@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/c0ze/tincan/v2/internal/dispatch"
 	"github.com/c0ze/tincan/v2/internal/rooms"
@@ -352,6 +353,43 @@ func TestOriginValidatedAndDefaultPortDropped(t *testing.T) {
 	h := hostServer(t, "https://tincan.example:443")
 	if rec := doHost(t, h, "GET", "/api/self", "tincan.example", ownerHdr()); rec.Code != 200 {
 		t.Fatalf("default-port origin host refused: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestSelfListsPeersSortedByName(t *testing.T) {
+	reg := rooms.Open(filepath.Join(t.TempDir(), "rooms.json"))
+	qdir := t.TempDir()
+	var peers []Peer
+	for _, n := range []string{"zeta", "alpha", "mid", "beta"} {
+		peers = append(peers, Peer{Name: n, URL: "https://" + n + ".example/tincan/"})
+	}
+	s, err := New(Config{Owner: owner, AllowedHosts: testHosts, Machine: "box", Registry: reg, Peers: peers, QuotaDir: qdir, QuotaConfig: filepath.Join(qdir, "quotas.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ { // map iteration order varies between calls
+		rec := do(t, s.Handler(), "GET", "/api/self", "", ownerHdr())
+		var self struct {
+			Peers []struct {
+				Name string `json:"name"`
+			} `json:"peers"`
+		}
+		decode(t, rec.Body.String(), &self)
+		var names []string
+		for _, p := range self.Peers {
+			names = append(names, p.Name)
+		}
+		if strings.Join(names, ",") != "alpha,beta,mid,zeta" {
+			t.Fatalf("peers %v", names)
+		}
+	}
+}
+
+// Stop's wait must end before the hub's proxy gives up on the response
+// headers, or a Stop through the hub reports a 502 instead of the thread.
+func TestStopWaitIsBelowProxyHeaderTimeout(t *testing.T) {
+	if stopWait != 25*time.Second || stopWait >= peerResponseHeaderTimeout {
+		t.Fatalf("stopWait %v, proxy ResponseHeaderTimeout %v", stopWait, peerResponseHeaderTimeout)
 	}
 }
 

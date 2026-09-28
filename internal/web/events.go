@@ -218,12 +218,13 @@ func (s *Server) runRoomPass(ctx context.Context, room rooms.Room, janitor bool)
 	if d == nil {
 		return
 	}
+	// A persistent failure repeats every tick; log each distinct error once.
 	if err := d.Reconcile(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "tincan web: %s: %v\n", room.Name, err)
+		s.logOnce(room.ID+"/reconcile", fmt.Sprintf("tincan web: %s: reconcile: %v", room.Name, err))
 	}
 	if janitor {
 		if err := d.Janitor(ctx, s.cfg.IdleStop); err != nil {
-			fmt.Fprintf(os.Stderr, "tincan web: %s: %v\n", room.Name, err)
+			s.logOnce(room.ID+"/janitor", fmt.Sprintf("tincan web: %s: janitor: %v", room.Name, err))
 		}
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -193,6 +194,7 @@ func (s *Server) apiSelf(w http.ResponseWriter, r *http.Request) {
 	for name, p := range s.peers {
 		peers = append(peers, peerView{Name: name, Online: p.online.Load()})
 	}
+	sort.Slice(peers, func(i, j int) bool { return peers[i].Name < peers[j].Name })
 	s.writeJSON(w, http.StatusOK, map[string]any{"machine": s.cfg.Machine, "version": buildinfo.Current().Version, "peers": peers})
 }
 

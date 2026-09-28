@@ -200,10 +200,11 @@ func (r *Registry) update(fn func(*file) error) error {
 	return fsutil.WriteFileAtomic(r.path, append(data, '\n'))
 }
 
-// upsert is the single insertion point, so the exclusion applies to Touch,
-// Add and Import alike.
+// upsert is the single insertion point, so the exclusions (review
+// workspaces, and the home directory, its ancestors and filesystem roots)
+// apply to Touch, Add and Import alike. Add reports both as explicit errors.
 func upsert(f *file, path string, used time.Time) {
-	if excluded(path) {
+	if excluded(path) || TooBroad(path) {
 		return
 	}
 	id := ID(path)

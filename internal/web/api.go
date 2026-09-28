@@ -362,6 +362,11 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusCreated, messageView{Message: m, HTML: RenderMarkdown(m.Text)})
 }
 
+// stopWait bounds how long POST …/stop waits for the thread to leave
+// stopping; it stays below the hub proxy's peerResponseHeaderTimeout so a
+// Stop sent through a hub gets the thread back instead of a 502.
+const stopWait = 25 * time.Second
+
 func (s *Server) stopThread(w http.ResponseWriter, r *http.Request) {
 	room, t, ok := s.threadOf(w, r)
 	if !ok {
@@ -372,7 +377,7 @@ func (s *Server) stopThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.hub.publish(note{Kind: "messages", Room: room.ID, Thread: t.ID})
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), stopWait)
 	defer cancel()
 	meta, err := thread.WaitStatus(ctx, t, thread.StatusStopping)
 	if err != nil && !errors.Is(err, context.DeadlineExceeded) {

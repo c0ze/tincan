@@ -4,6 +4,7 @@ package web
 import (
 	"bufio"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -217,4 +218,51 @@ func TestTickRunsRoomPassesConcurrentlyAndSkipsInFlight(t *testing.T) {
 	}
 
 	close(block)
+}
+
+// captureStderr runs fn with os.Stderr redirected and returns what it wrote.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+	fn()
+	w.Close()
+	out, _ := io.ReadAll(r)
+	r.Close()
+	return string(out)
+}
+
+// A room whose Reconcile and Janitor fail the same way every tick logs each
+// failure once, not once per tick.
+func TestRoomPassErrorsAreLoggedOnce(t *testing.T) {
+	s := testServer(t)
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	room, err := s.cfg.Registry.Add(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".tincan"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A file where the threads directory belongs makes thread.List fail.
+	if err := os.WriteFile(thread.Root(dir), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.dropDispatcher(room.ID) })
+	out := captureStderr(t, func() {
+		for i := 0; i < 3; i++ {
+			s.runRoomPass(context.Background(), room, true)
+		}
+	})
+	if n := strings.Count(out, "reconcile:"); n != 1 {
+		t.Errorf("reconcile error logged %d times, want 1:\n%s", n, out)
+	}
+	if n := strings.Count(out, "janitor:"); n != 1 {
+		t.Errorf("janitor error logged %d times, want 1:\n%s", n, out)
+	}
 }
