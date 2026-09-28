@@ -3,8 +3,10 @@
 Status: design discussed with the owner on 2026-09-28. Codex (gpt-6-astra,
 xhigh) reviewed a draft (16 findings) and this spec (16 findings); both rounds
 are resolved below (§13). Round 3 checked the spec against the phase 1 code
-that landed (`96d7d76`); phase 2a shipped (`af82dc4`) and round 3's phase 2b
-findings are resolved in §6 and §10 (§13), pending Codex round 4. The owner approved the key decisions (read-only
+that landed (`96d7d76`); phase 2a shipped (`af82dc4`). After round 4 the owner
+relaxed two guarantees — reviewers may rarely run twice after a crash, and
+only `@committee` mentions integrate with threads — and phase 2c was folded
+into 2b (§13 round 4). The owner approved the key decisions (read-only
 reviewer presets and independent clones with the residual risk stated;
 committee executions count against the thread budget; quota skipping off by
 default; phases 2a/2b/2c). Awaits the owner's review of this document.
@@ -32,8 +34,8 @@ Goals
 - Members on another machine review a faithful packet of the change, in a
   reconstructed checkout when their machine has the repository.
 - Every member's review is returned; the requester synthesizes.
-- Reviews survive client exits, coordinator restarts and peer outages without
-  running any member twice.
+- Reviews survive client exits, coordinator restarts and peer outages: every
+  recorded result is kept and every review reaches a final state.
 - Existing CLI/MCP contracts unchanged; new tools are additive.
 
 Non-goals
@@ -43,8 +45,13 @@ Non-goals
 - Quota-based skipping by default (opt-in only, §8).
 - Chained peers; more machines than the configured peers.
 - Chair/summarizer members.
-- Budget propagation through arbitrary nested `tincan_send` delegation; only
-  reviews carry a thread origin (§6.10).
+- Exactly-once execution. Reviewers are read-only, so a crash at the wrong
+  moment may run a member twice (costing quota) or leave an orphaned reviewer
+  running until its timeout, as phase 1 hosts can; it never corrupts a review
+  or loses a recorded result (§6.4, owner decision after round 4).
+- Tying MCP/CLI reviews to threads. Only `@committee` mentions join a thread's
+  budget and Stop; a review requested through MCP or the CLI is standalone,
+  and the calling agent waits for it and synthesizes itself (§6.10).
 
 ## 3. Decisions
 
@@ -56,16 +63,16 @@ Non-goals
 | Definitions | Edited in the web UI, stored on the hub, cached by the peer. |
 | Transport | The `tincan web` machine link (owner identity + CSRF rules of phase 1 §9). |
 | Reviewer isolation | Independent dissociated clone, read-only presets, executables pinned outside reviewed content; residual risk documented. |
-| Budget | Each member execution and each synthesis turn counts against the thread chain budget. |
+| Budget | For `@committee` mentioned by an agent in a thread: each member and the synthesis turn count against the chain budget. MCP/CLI reviews are unbudgeted. |
 | Quota skipping | Off by default; opt-in with strict, machine-local rules. |
-| Phasing | 2a account profiles → 2b durable reviews → 2c synthesis delivery. |
+| Phasing | 2a account profiles → 2b reviews, including thread synthesis (2c folded in). |
 
 ## 4. Phasing
 
 - **Phase 1** (separate spec/plan): web chat, two-way link, quota panels.
 - **Phase 2a — account profiles** (§5).
-- **Phase 2b — committees and durable reviews** (§6–§9).
-- **Phase 2c — synthesis delivery** (§10).
+- **Phase 2b — committees and reviews** (§6–§10), including the thread
+  synthesis turn that was phase 2c.
 
 Each phase ships with its own plan and tests and leaves the system working.
 
@@ -85,8 +92,8 @@ Presets in `~/.config/tincan/agents.json` gain:
   `kimi`), see §5.3.
 
 Environment for an agent run, in order: the scrubbed tincan environment
-(`agentEnv`), minus `env_unset`, plus `env`, **then** tincan's protocol
-variables (§6.10), which presets cannot override.
+(`agentEnv`), minus `env_unset`, plus `env`. The `TINCAN_` prefix stays
+reserved for future protocol variables.
 
 Example:
 
@@ -188,9 +195,9 @@ Storage and sync:
 
 ```
 <room>/.tincan/reviews/
-  staging/<review_id>/       being assembled; READY written last
+  staging/<review_id>.<nonce>/   one publisher's attempt; never read by the coordinator
   <review_id>/
-    input.json               immutable: committee snapshot, question, scope, origin, created, deadline
+    input.json               immutable: identity, committee snapshot, question, scope, origin, created, deadline
     packet/                  immutable: manifest.json, diff.patch, files/…, question.md
     prompts/<n>.txt          immutable: coordinator prompt for member n
     review.json              mutable state, rewritten atomically under ./lock
@@ -199,108 +206,96 @@ Storage and sync:
     lock
 ```
 
-- **`review_id` is derived, not stored under a key.** With a request ID it is
-  `rv-` + the first 16 hex digits of `sha256(canonical room + "\0" +
-  request_id)`; a thread's `@committee` message uses its deterministic request
-  ID `<tid>-<mid>`; without a request ID it is random. Publication is then
-  idempotent by construction (§6.3) and needs no key records, closing the gap
-  between publishing a directory and recording its key.
-- `input.json` holds the **identity** compared on replay: committee name and
-  version, question hash, scope, `included_tree`, origin.
+- **`review_id`** = `rv-` + the first 16 hex digits of `sha256(machine name +
+  "\0" + canonical room + "\0" + key)`, where the key is the caller's request
+  ID, or `<tid>-<mid>` for a thread's committee message; without a request ID
+  the ID is random. The machine name (phase 1's `--machine`) keeps IDs from
+  different requesting machines apart on a shared reviewer machine.
+- `input.json` holds the **identity** compared on replay: committee name,
+  version and member list, question hash, scope, `included_tree`, origin.
 - `review.json`: `status` (`running|closed|cancelled`), `settled` (bool),
-  `cancel_requested`, `closed_at`, `delivered` (phase 2c), and `members[]`:
-  `member`, `index`, `job_id` (`<review_id>-<index>`), `expires_at`, `state`
+  `cancel_requested`, `closed_at`, and `members[]`: `member`, `index`,
+  `job_id` (`<review_id>-<index>`), `expires_at`, `state`
   (`planned|submitting|submitted|running|done|error|skipped|unreachable|cancelled|expired`),
-  `late`, `posted` (result appended to the origin thread), `cancel_state`
-  (`none|requested|acked|moot`), `ack_state` (`none|acked|moot`), `started`,
-  `finished`, `note`.
+  `late`, `posted` (thread reviews: result appended), `started`, `finished`,
+  `note`.
 
 ### 6.3 Publication
-
-Every entry point publishes the same way; `READY` and the rename are the only
-commit points.
 
 1. **Coordinator present.** `tincan web` writes `<state>/web.json`
    (`pid`, `started`, `updated`) every tick. MCP and CLI entry points refuse
    with "tincan web is not running on this machine; start it (see
-   docs/web.md)" unless `updated` is under 30 s old. They then register the
-   room (`rooms.Touch`) and create `.tincan/`, so the next tick coordinates it
-   (phase 1 coordinates registered rooms that contain `.tincan/`). Nothing
-   probes or creates `dispatcher.lock` from outside the coordinator.
+   docs/web.md)" unless `updated` is under 30 s old. They register the room
+   (`rooms.Touch`), confirm the registry now lists it — an excluded path (e.g.
+   a review workspace), an over-broad room or a disabled registry is refused
+   with the reason — and create `.tincan/`, so the next tick coordinates it.
 2. **Replay.** If `reviews/<review_id>` exists, compare identities: equal →
    return it; different → conflict error.
-3. **Stage.** Build `staging/<review_id>/` (removing a leftover one first):
-   `input.json`, the packet (§6.5), every member prompt (§6.8), the initial
-   `review.json` (`running`; members `planned`, or `skipped` per §8); fsync
-   each file, then write and fsync `READY`.
-4. **Origin commit** (thread origins only, §6.10): one thread transaction.
-5. **Publish.** Rename `staging/<review_id>` → `<review_id>`. If the target
-   exists, fall back to step 2's comparison (another process published the
-   same staging first).
+3. **Stage** in a directory private to this attempt,
+   `staging/<review_id>.<nonce>/`: `input.json`, the packet (§6.5), every
+   member prompt (§6.8) and the initial `review.json` (`running`; members
+   `planned`, or `skipped` per §8), each fsynced.
+4. **Publish.** Rename it to `<review_id>`. If the target already exists,
+   another attempt won: remove this staging directory and apply step 2's
+   comparison.
 
-Recovery rules, applied by the coordinator:
-- A staging directory with `READY` whose review is referenced by a thread
-  committee message (§6.10) is published by the coordinator (step 5).
-- Any other staging directory older than one hour is removed.
-- The coordinator never builds a packet except for a thread's `@committee`
-  mention (§6.10), and then only in step 3 of this procedure.
+Attempts never touch each other's staging directories, so no lock is needed;
+the rename is the only commit point. Staging directories older than one hour
+are removed by the coordinator.
 
 ### 6.4 Coordination and lifecycle
 
 **Placement.** Reviews reconcile inside phase 1's room pass, on the
 `thread.Dispatcher` that already owns the room's `dispatcher.lock` — the same
-per-room serialization and cross-room concurrency as threads. Each pass visits
-every review that is not `settled`, after the room's threads. Lock order is
-always thread lock → review lock → job lock.
+per-room serialization and cross-room concurrency as threads — after the
+room's threads, for every review that is not `settled`. Lock order: thread
+lock → review lock → job lock.
 
-**Per-member obligations.** Each member carries up to four independent
-obligations; each step is idempotent and has a bound derived from the
+**Delivery guarantee.** Every step is idempotent in the normal case; a crash
+between an external call and recording its outcome may repeat that call
+(creating a job twice is prevented by job identity; a job that was accepted
+but whose acceptance was lost may, in the worst case, run once more on a
+replacement). Results, once recorded, are never lost or overwritten.
+
+**Member obligations.** Every non-final step ends at a bound derived from the
 member's `expires_at` (deadline + 30 min, §6.6), so no review is reconciled
 forever.
 
 1. **Submit** (`planned` → `submitting` → `submitted`): persist `submitting`,
    then create the job — in-process for a local member, `POST
-   api/review-jobs` through the peer client (§6.7) for a remote one. Responses:
+   api/review-jobs` through the peer client (§6.7) for a remote one.
    - 2xx → `submitted` (or the job's reported state).
-   - 409 identity conflict, 400/404/422 (unknown preset, relative
-     executable, invalid request) → `error` with the response text:
-     permanent, never retried.
+   - 409, 400, 404, 422 → `error` with the response text; permanent.
    - 410 → `expired`.
-   - 5xx, timeout, connection failure → stay `submitting`, retry every 15 s.
-   At the deadline a `submitting` member gets one `GET`: a job that exists is
-   adopted (its state becomes the member's); 404 → send a tombstoning cancel
-   (so a delayed create is refused) and mark `unreachable` once it is acked;
-   still no answer → `unreachable` with note "outcome unknown: peer not
-   reachable". After `expires_at` nothing further is attempted for submission:
-   a job can neither be created nor launched past its expiry (§6.6).
-2. **Collect** (`submitted`/`running` → terminal): read the job every 5 s and
-   on notes; on a terminal job write `results/<n>.md`, then the member state.
-   An unreachable peer leaves the member as is; past `expires_at` + 5 min the
-   member becomes `expired` with note "result not retrievable".
-3. **Acknowledge** (remote members with a recorded terminal result):
-   `POST …/ack` until 2xx, 404 or 410 → `ack_state: acked`; past `expires_at`
-   + 7 days (when the peer drops unacknowledged jobs anyway) → `moot`.
-   Acknowledgement never blocks close.
-4. **Cancel** (only after `cancel_requested`): `planned` members become
-   `cancelled` unsent; `submitting`, `submitted` and `running` members get
-   `POST …/cancel` (tombstone if unknown, §6.6) every 15 s until acked; past
-   `expires_at` the job cannot be running, so `cancel_state` becomes `moot`.
-   A member whose cancel is acked and that has no result is `cancelled`.
+   - 5xx, timeout, connection failure → stay `submitting`; retry every 15 s
+     until the deadline, then `unreachable` ("peer not reachable").
+2. **Collect** (`submitting`, `submitted`, `running`, `unreachable`): read the
+   job every 5 s (and on notes); `unreachable` members are still polled,
+   because a lost response may hide an accepted job. On a terminal job write
+   `results/<n>.md`, then the member state (an `unreachable` member adopts
+   it). Past `expires_at` + 5 min polling stops; a member still without a
+   result becomes `expired` (or stays `unreachable`), "result not retrievable".
+3. **Acknowledge**: after recording a remote result, `POST …/ack` once per
+   pass until 2xx, 404 or 410, at most until `expires_at` + 5 min; the peer
+   cleans up unacknowledged jobs on its own (§6.6).
+4. **Cancel** (after `cancel_requested`): `planned` members become `cancelled`
+   unsent; members in any other non-final state — including `unreachable` —
+   get `POST …/cancel` (tombstone if unknown, §6.6) each pass until 2xx, at
+   most until `expires_at`.
 
 **Close** once: when every member is terminal or the deadline passes, set
 `status: closed`, `closed_at`, and mark non-terminal members `late: true`.
-The bundle (§6.9) is written from the state at close before `closed` is
-persisted (a crash in between rewrites the same bundle). Late results are
-recorded and shown; the bundle and any delivery are not redone.
+The bundle (§6.9) is written before `closed` is persisted (a crash in between
+rewrites the same bundle). Late results are recorded and shown; the bundle is
+not rewritten.
 
 **Cancel** (allowed until settled, including after close): persist
 `cancel_requested`, then run obligation 4. The review becomes `cancelled` if
 it had not closed.
 
-**Settle**: every member terminal; every remote terminal result acked or
-moot; every requested cancel acked or moot; (2c) delivery done or not
-applicable; (thread origins) every result posted or the thread no longer
-open. Settled reviews are not reconciled again.
+**Settle** when every obligation has ended (reached its outcome or its bound)
+and, for thread reviews, every recorded result is `posted`. Settled reviews
+are not reconciled again.
 
 ### 6.5 Scopes and the packet
 
@@ -367,11 +362,10 @@ hold `<state>/reviews/jobs/<job_id>.lock`.
 `expires_at`). A repeat with the same identity returns the current state; a
 different identity → 409. `expires_at` is absolute (review deadline + 30 min,
 at most 270 min after creation); a create or replay at or after `expires_at` is
-rejected (410). Cancelled and acknowledged jobs keep a tombstone for 30 days;
-since every job expires within hours, any replay after the tombstone is gone is
-rejected as expired, so a job can never run twice. A cancel for an unknown
-`job_id` creates a tombstone with the supplied `expires_at` (or 30 days), and a
-later create with that ID is refused.
+rejected (410). Cancelled and acknowledged jobs keep a tombstone until 7 days
+after `expires_at`; a replay after that is rejected as expired anyway. A cancel
+for an unknown `job_id` creates a tombstone with the supplied `expires_at` (or
+7 days), and a later create with that ID is refused.
 
 **Repository identity** (`repo_id`): the origin URL without credentials,
 normalized — lower-case host, port kept (non-default ports are part of the
@@ -429,21 +423,32 @@ expired). Request ID = `job_id`. The prompt is the receiver's workspace note
 (§6.8) followed by the coordinator prompt, whose hash must equal
 `prompt_sha256`. Workspaces are never registered as rooms (phase 1 §15.3).
 
-**Create**: under the job lock: record the job (identity, `created`), resolve
-and pin the executable, materialize the workspace, then submit through
-`dispatch.Send` with request ID `job_id`. A `Send` error after it saved the
-request (a launch failure) cancels that saved request before the job is marked
-`error`, so a later listener launch cannot run it; the error is permanent and
-a replay with the same identity returns it without running anything.
+**Create**: under the job lock, with job states `creating → running →
+done|error|cancelled`: record the job (`creating`), resolve and pin the
+executable, materialize a fresh workspace, submit through `dispatch.Send`
+with request ID `job_id`, then record `running`. A `Send` error after it saved
+the request (a launch failure) cancels that saved request, then records a
+permanent `error`. A replay of an identical create finding `creating` with the
+job lock free (the creator died) restarts creation from a fresh workspace;
+this is the one place a member can run twice (§6.4).
 
-**Cancel acknowledgement**: under the job lock, record the tombstone (launch is
-now impossible), cancel the request and ask the host to stop it, and
-acknowledge only once the request is terminal or the host has exited.
+**Status** is read on demand: `GET` (and the local in-process equivalent)
+reads the job record and, while `running`, the request record in the
+workspace room; a terminal request is copied into the job record (result ≤
+1 MiB). No reconciler is needed for results.
 
-**Cleanup** after the result is acknowledged or an acknowledged cancel: stop the listener
-(`host.Down`, wait for exit), remove the workspace, keep the tombstone (result
-removed after 7 days). Active jobs are never swept by age; an unacknowledged
-terminal job is cleaned up 7 days after `expires_at`.
+**Cancel acknowledgement**: under the job lock, record the tombstone (a launch
+is now refused), cancel the request, ask the host to stop it, and acknowledge
+once the request is terminal or the host has exited. If the host died, its
+agent process may outlive it until the exec timeout (phase 1 behaviour); the
+docs list this as residual risk.
+
+**Job janitor**: `tincan web` runs a machine-level pass every minute over
+`<state>/reviews/jobs/`: after the result is acknowledged or the job is
+cancelled — or 1 hour after `expires_at` for anything else — it stops the
+listener (`host.Down`, wait for exit) and removes the workspace; records and
+tombstones are removed 7 days after `expires_at`. Workspaces are never
+registered as rooms (phase 1 §15.3), so room passes never see them.
 
 ### 6.7 Machine-link API (added to phase 1's `tincan web`)
 
@@ -510,77 +515,14 @@ tree, close time, late members), then one section per member —
 `min(200 KiB, 896 KiB / members)`, truncated with a pointer to
 `results/<n>.md`.
 
-### 6.10 Entry points, origin and threads
+### 6.10 Entry points and threads
 
-**Protocol variables.** `serve` sets, for every agent execution, after preset
-`env` (§5.1) and replacing any inherited value: `TINCAN_ROOM` (canonical room)
-and `TINCAN_REQUEST_ID` (the request being executed). Both are derived afresh
-per execution from the request itself; a variable with no value is removed,
-never inherited from the host's own environment. There is no separate origin
-variable and nothing new is persisted per request.
-
-- `tincan mcp` without `--room` uses `TINCAN_ROOM` when set, before inferring
-  from the working directory (a subdirectory room is found correctly).
-- **Origin is the request's own identity.** A thread turn's request ID is
-  phase 1's deterministic `<tid>-<mid>`. `tincan_review`/`tincan review`
-  treat the call as thread-originated only if `TINCAN_REQUEST_ID` parses as
-  `<tid>-<mid>` and, in `TINCAN_ROOM`'s thread `<tid>`, message `<mid>` is an
-  agent turn with that request ID in state `running`. Anything else —
-  including a later request of the same listener, or nested delegation through
-  `tincan_send` — has origin `mcp`/`cli`: a request can never inherit another
-  request's chain.
-- Agent CLIs that start MCP servers with a filtered environment (Codex does
-  unless configured) lose these variables; their reviews are `mcp`-origin:
-  unbudgeted and unaffected by thread Stop. The docs say so.
-
-**Thread journal additions.** A new message role `committee` (author = the
-committee name) represents one review in a thread; its `Review` field names
-the `review_id`, and it is *active* while `pending` or `running` (phase 1's
-Stop barrier waits for active messages). Member results are messages with role
-`review`, author `<committee>/<member>`, `Review` = `<review_id>/<n>`; they
-never trigger mentions. Chain `reserve` events gain an optional `key`:
-replaying a keyed reservation already in the journal is a no-op; unkeyed
-(phase 1) reservations still count once each.
-
-**`@committee` mentions** (owner messages and agent handoffs).
-`@<committee>` is resolved after presets and before hosted listeners. In the
-same transaction phase 1 uses to plan turns — the owner's post, or an agent's
-handoffs marker — the dispatcher appends the committee message, its intent
-(request ID `<tid>-<mid>`, hence the `review_id`) and `pending` state; for an
-agent handoff it also appends one keyed reservation `review:<review_id>:<n>`
-per member, or, if the chain cannot afford them all, one `suggested` message
-for the whole committee and nothing else. On the next pass the dispatcher
-builds the review (§6.3 steps 2, 3 and 5; the origin is already committed) — scope `uncommitted` in a Git room, else
-`none`; the question is the mentioning message plus the transcript,
-truncated oldest-first to fit 64 KiB — and marks the message `running`. Build
-errors (refused scope, unknown member) mark it `error` with the reason.
-
-**`tincan_review` from a thread turn.** The entry point stages the review
-(§6.3 step 3), then in one thread transaction checks that the thread is open,
-the chain is not stopped and the budget covers every member, and appends the
-committee message (`Review` = `review_id`, `ReplyTo` the calling turn, in its
-chain), its keyed reservations and `pending` — unless a committee message for
-that review already exists. It then publishes (§6.3 step 5). A refused
-transaction removes the staging directory and returns the reason ("chain
-budget exhausted: 3 needed, 1 left"). If the entry point dies after the
-transaction, the coordinator publishes the `READY` staging directory; a
-committee message whose staging and review are both missing after ten
-minutes becomes `error` ("review input was lost").
-
-**Results in the thread.** When a member's result is recorded, the coordinator
-appends the member's `review` message (skipped if one with that `Review`
-already exists), then sets `posted`. When the review closes or is cancelled,
-the committee message's state follows (`done`, `cancelled`, `error` when every
-member failed). Nothing is appended once the thread is not open; `posted` is
-then set without appending.
-
-**Stop and archive.** `finishStop` treats an active committee message like an
-agent turn: it persists `cancel_requested` in `review.json` (thread lock, then
-review lock), marks the message `cancelled`, and does not wait for remote
-acknowledgements — the review keeps cancelling on its own and its card shows
-"cancelling n members". New committee messages and reservations are refused on
-stopped chains and non-open threads. Archived threads are not reconciled, but
-their reviews are, because reviews reconcile from `.tincan/reviews`.
+**MCP and CLI reviews are standalone.** They belong to the room, not to a
+thread: unbudgeted, unaffected by thread Stop, cancelled with their own
+cancel. An agent that asks for a review — in a thread turn or anywhere else —
+calls `tincan_review`, waits with `tincan_review_wait`, and synthesizes the
+bundle itself within its turn ("the requester synthesizes", §3). They appear
+in the room's Activity and review list.
 
 **MCP** (additive):
 - `tincan_review {committee, question, scope?, request_id?}` →
@@ -595,6 +537,57 @@ their reviews are, because reviews reconcile from `.tincan/reviews`.
 reattaches; `tincan review --cancel <id>`. `--wait` exits 3 when the review
 closed with late or unreachable members.
 
+**Thread reviews: `@committee`.** `@<committee>` is resolved after presets and
+before hosted listeners, in owner messages and agent handoffs.
+
+- *Journal additions.* A message role `committee` (author = the committee
+  name) stands for one review. Its intent event carries the `review_id`, the
+  **frozen committee snapshot** (version and ordered member list, ≤ 8) and the
+  mentioning message ID; the review is built only from that snapshot. Member
+  results are messages with role `review`, author `<committee>/<member>` and a
+  `Review` reference `<review_id>/<n>`; they never trigger mentions. Chain
+  `reserve` events gain an optional `key`: replaying a keyed reservation
+  already in the journal is a no-op; unkeyed (phase 1) reservations still
+  count once each.
+- *Plan* (same transaction phase 1 uses to plan turns — the owner's post or an
+  agent's handoffs marker): append the committee message, its intent and
+  `pending`. For an agent handoff also append keyed reservations
+  `review:<review_id>:<n>` per member; if the chain cannot afford them all,
+  append one `suggested` message for the whole committee instead. Owner
+  mentions reserve nothing, as for phase 1 owner turns.
+- *Build* (phase 1's `submit` pattern): a pass checks in a transaction that
+  the message is still `pending`, the thread open and the chain not stopped;
+  builds and publishes the review (§6.3 steps 2–4) — scope `uncommitted` in a
+  Git room, else `none`; question = the mentioning message plus the transcript
+  before it, truncated oldest-first to 64 KiB; the working tree is captured at
+  build time — then, in a second transaction, marks the message `running` if
+  it is still `pending`, or else sets `cancel_requested` on the review it just
+  published. Build errors (refused scope, unknown member) mark it `error`.
+- *Results.* When a member result is recorded, append its `review` message
+  (skipped if that `Review` reference exists), then set `posted`. When the
+  review closes or is cancelled, the committee message follows (`done` with
+  a short summary and the bundle path, `cancelled`, or `error` when every
+  member failed). Nothing is appended once the thread is not open; `posted`
+  is then set without appending.
+- *Stop and archive.* `finishStop` cancels `pending` committee messages
+  directly (never built), and sets `cancel_requested` on **every unsettled
+  review referenced by the thread's committee messages**, whatever the
+  message state, including reviews that closed with members still running. It
+  does not wait for remote acknowledgements; the review cancels them on its
+  own and its card shows "cancelling n members". Archived threads are not
+  reconciled, but their reviews are, because reviews reconcile from
+  `.tincan/reviews`.
+
+**Synthesis** (formerly phase 2c). When a review mentioned by an **agent**
+closes, the transaction that marks its committee message `done` also plans an
+automatic turn for the mentioning agent's listener with phase 1's `planTurn`,
+triggered by the committee message — so chain budget, suggestions, Stop,
+Retry and Send all behave exactly as for a handoff. The prompt is phase 1's
+turn prompt; its transcript includes the member reviews and the summary with
+the bundle path. Because the `done` transition happens once, late results
+never cause a second turn. Owner mentions get no automatic synthesis; the
+owner mentions an agent to ask for one.
+
 **UI**: Committees page (members per machine from each machine's
 `api/presets`, with quota and warnings; cache age on the peer); review cards
 in threads; reviews in Activity.
@@ -607,17 +600,18 @@ in threads; reviews in Activity.
 | Unknown committee / no definitions | Error naming the committee and cache age. |
 | Conflicting request key or job identity | Conflict error / 409 (permanent member error). |
 | Peer unreachable | Submit retries until the deadline, then `unreachable` ("outcome unknown"); collection, acks and cancels stop at their `expires_at`-derived bounds (§6.4). |
-| Lost submit response | Member stays `submitting`; identical retries; a final `GET` adopts an existing job. |
+| Lost submit response | Member stays `submitting`; identical retries; `unreachable` members are still polled and adopt a job that exists. |
 | Job launch fails on the member machine | Saved request cancelled; member `error`, never retried. |
-| Entry point dies after the thread transaction | Coordinator publishes the `READY` staging; otherwise the committee message errors after ten minutes. |
-| Thread stopped or archived | Committee messages cancelled at once; the review keeps cancelling remote members on its own. |
+| Job creator dies mid-create | The next identical create restarts it from a fresh workspace (may run twice). |
+| Entry point dies before the rename | Nothing published; its staging directory is removed after an hour. |
+| Thread stopped or archived | Pending committee messages cancelled; every unsettled review of the thread cancels its members on its own. |
 | No candidate / missing objects / partial clone | Packet-only mode, stated in the workspace note. |
 | Patch validation or apply fails, tree mismatch | Clone removed; packet-only mode. |
 | Unmerged index or sparse checkout | Request refused with a clear error. |
 | Member preset missing or relative executable | Job rejected; member `error`. |
 | Member past the deadline | `late`; recorded if done before `expires_at`, else `expired`. |
 | All members skipped/unreachable | Closes with "no coverage". |
-| Coordinator crash at any step | Next reconcile continues; nothing runs twice. |
+| Coordinator crash at any step | Next reconcile continues; recorded results are kept; a member may rarely run twice (§6.4). |
 
 ## 8. Quotas and skipping
 
@@ -657,42 +651,17 @@ in threads; reviews in Activity.
 - Path policy and exclusive no-follow creation for every materialized path.
 - `env` values never appear in process arguments or public views.
 
-## 10. Phase 2c — synthesis delivery
+## 10. Synthesis (folded into phase 2b)
 
-For reviews with a verified thread origin whose requester is an agent (an
-agent's reply mentioned the committee, or a thread agent called
-`tincan_review`):
-
-- When the review closes, the coordinator (holding the thread lock, then the
-  review lock) first writes the exact synthesis prompt with phase 1's
-  `WritePrompt` under the turn's request ID, then appends, in one thread
-  journal transaction: a `synthesis` reservation keyed `synthesis:<review_id>`,
-  an agent message with the deterministic ID `m` + first 12 hex of
-  SHA-256(`synthesis:<review_id>`) and `Review` = `<review_id>`, its intent,
-  and its pending state — unless that message already exists. It then sets
-  `delivered` in `review.json`. A crash between the two is repaired on the next
-  pass because the message ID is deterministic; phase 1's `submit` sends the
-  stored prompt unchanged.
-- If the chain is stopped, the thread archived, or the budget exhausted, it
-  appends a `suggested` message ("Send committee results to claude.t7f2")
-  with the same deterministic ID instead.
-- The prompt says the reviews are complete, points to
-  `<room>/.tincan/reviews/<id>/bundle.md`, and includes the bundle inline up
-  to 128 KiB. The turn queues behind the listener's other work.
-- Late results never create a second synthesis turn. Owner-mentioned
-  committees and non-thread origins get no automatic synthesis.
-- **Retry and Send.** Retrying a failed synthesis turn reuses its stored
-  prompt (copied to the new request ID) instead of phase 1's rebuild from the
-  trigger; a never-submitted one is retried in place, and only a fresh retry
-  gets the single-use `KindRetry` marker. Sending a synthesis suggestion plans
-  the synthesis turn itself (bundle and requester from the review), not a new
-  owner message with the suggestion's text.
+Phase 2c is folded into 2b: thread synthesis is an ordinary `planTurn`
+handoff (§6.10), and MCP/CLI requesters synthesize within their own turn. No
+synthesis-specific prompt storage, Retry or Send exists.
 
 ## 11. Testing
 
 Phase 2a
 - Env key validation (bad keys, scrubbed names, `PATH`, `TINCAN_*`), `~`
-  expansion, precedence (`env_unset`, `env`, protocol variables last).
+  expansion, precedence (`env_unset`, then `env`).
 - `env` values absent from process arguments of a live host and from
   `presets`/`status`; private config file path, permissions and removal;
   explicit-settings comparison uses the private file.
@@ -712,37 +681,30 @@ Phase 2b
   pre-existing symlink targets, platform-invalid names → rejected, nothing
   written outside the workspace.
 - Executable pinning: a reviewed change adding `./reviewer` never runs it;
-  relative-executable presets rejected as members.
-- Publication: concurrent identical requests with one request ID → one
-  review; differing → conflict; crash at each step (staged, `READY`, thread
-  transaction, renamed) leaves nothing visible, a review the coordinator
-  finishes publishing, or a complete review; stale staging removed; a stale
-  `web.json` refuses without writing.
-- Jobs: identical replay runs once; different identity 409; expired create 410;
-  cancel-before-create tombstone refuses a later create; ack then replay never
-  re-runs; cancel acknowledged only after termination.
-- Coordinator crash at every step (reserved, submitting, submitted, collected,
-  closed, bundle written, cancel requested) → exactly one execution per member
-  (execution counter as in phase 1's fixture agent); closed-but-unsettled
-  reviews keep collecting late results and acks.
+  relative-executable presets rejected as members; a vanished pinned file
+  fails the job.
+- Publication: concurrent identical requests → one review, the losing staging
+  removed; differing → conflict; stale `web.json` and excluded rooms refused
+  without writing; stale staging removed; IDs differ across machine names.
+- Jobs: identical replay returns the job; different identity 409; expired
+  create 410; cancel-before-create tombstone refuses a later create; a create
+  interrupted in `creating` restarts on replay; launch failure cancels the
+  saved request; the janitor removes workspaces only after the host exits.
+- Coordinator crash at every step (submitting, submitted, collected, closed,
+  bundle written, cancel requested) → the review finishes, recorded results
+  are kept, the bundle is identical.
 - Two machines with the in-process peer harness: offline peer → retries →
-  `unreachable`; lost response → `submitting` → final `GET` adopts the one
-  job; permanent 4xx → `error` without retry; cancel retries until acked or
-  moot; ack retries until acked or moot; every obligation stops at its bound.
+  `unreachable`; lost response → the job is adopted by polling; permanent 4xx
+  → `error` without retry; cancel and ack stop at their bounds.
 - Outbound peer client passes the peer's Host, forwarded-Host, owner, Funnel
   and CSRF checks.
-- Budget: keyed reservations are not double-charged on replay; a committee
-  larger than the remaining budget becomes one suggestion.
-- Origin: `TINCAN_ROOM` picks the subdirectory room; a request ID that is not
-  a running thread turn in that room yields `mcp` origin; variables are not
-  inherited by the next request; Stop cancels a thread-origin review without
-  waiting for remote acks; archived threads' reviews keep reconciling.
+- Threads: owner `@committee` reserves nothing; agent handoff reserves keyed
+  per member, not double-charged on replay; unaffordable → one suggestion;
+  the frozen snapshot is used even if the committee is edited before build;
+  Stop while `pending` never builds; Stop after build or after close cancels
+  the review; results post once; synthesis turn planned once, gated by budget
+  and Stop, never repeated by late results.
 - Quota skip: every condition that must prevent a skip; ambiguous mappings.
-
-Phase 2c
-- Exactly one synthesis turn per closed agent-originated review across crashes
-  between journal append and `delivered`; gated by Stop, archive and budget;
-  late results do not trigger a second turn.
 
 ## 12. Dependencies on phase 1
 
@@ -752,10 +714,10 @@ a `.tincan/` directory; registry exclusion of `<state>/reviews/` at every
 insertion point; one-line atomic journal transactions with journal-authoritative
 meta; deterministic turn request IDs; `WritePrompt`/`submit`; the Stop/archive
 barrier over active messages; per-room passes on the owning dispatcher.
-Phase 2b adds: keyed reservations, the `committee` and `review` message roles
-and the `Review` event field; review reconciliation in the room pass;
-`<state>/web.json`; protocol variables in `serve`; the outbound peer client;
-`api/presets`; `committees`/`reviews` notes. Quota skipping needs a
+Phase 2b adds: keyed reservations, the `committee` and `review` message roles,
+the committee intent snapshot and `Review` reference; review reconciliation
+in the room pass; the machine-level job janitor; `<state>/web.json`; the
+outbound peer client; `api/presets`; `committees`/`reviews` notes. Quota skipping needs a
 config-first count of `quotas.json` mappings (§8), which phase 1's `Load`
 does not provide.
 
@@ -821,3 +783,23 @@ Phase 2a findings (#6 partly, #11) were resolved in §5 and shipped. The phase
 | 9 | No machine-level preset catalogue; SSE doesn't cover committees/reviews | `api/presets` catalogue; `committees`/`reviews` notes; peer committee cache by polling plus on-demand refresh; no daemon-to-daemon SSE (§6.7). |
 | 10 | Synthesis doesn't fit Send/Retry | Stored exact prompt before the intent; synthesis-specific Retry and Send; `KindRetry` only for fresh retries (§10). |
 | 11 | Foreground serve, fingerprint migration, quota ambiguity count | Resolved in §5.2, §5.3, §8 and shipped. |
+
+### Round 4 (revised §6, 12 findings)
+
+The owner chose to relax guarantees rather than harden further (§2
+non-goals). Resolution of each finding:
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | Concurrent publishers share one staging directory | Per-attempt `staging/<id>.<nonce>`; rename is the only commit point; the loser removes its own staging (§6.3). |
+| 2 | Replay can replace committed staging; dedup before budget | Gone: MCP/CLI reviews have no thread commitment; thread reviews are built by the coordinator from the frozen intent (§6.10). |
+| 3 | Mention reservations not bound to a frozen definition | The committee intent stores version and ordered member list; the build uses only that snapshot (§6.10). |
+| 4 | Receiver create has no crash recovery | Job states with `creating`; an identical replay with the lock free restarts creation (may run twice); status read on demand; machine-level job janitor (§6.6). |
+| 5 | Origin rule rejects executing turns | Removed with the origin rule: MCP/CLI reviews are standalone (§6.10). |
+| 6 | Stop before publication undefined | `pending` committee messages are cancelled directly; the build re-checks `pending` and cancels a review it published after a Stop (§6.10). |
+| 7 | Stop misses closed reviews with running members | Stop cancels every unsettled review referenced by the thread's committee messages, whatever their state (§6.10). |
+| 8 | `unreachable` discards a possibly accepted job | `unreachable` members are still polled and cancelled until their bounds (§6.4). |
+| 9 | Host exit does not prove worker termination | Accepted as phase 1 residual risk; the janitor removes workspaces only after the host exits (§6.6, §2). |
+| 10 | `rooms.Touch` does not prove coordination | Entry points confirm registry membership and refuse excluded rooms or a disabled registry (§6.3). |
+| 11 | Review IDs lack a machine namespace | The machine name is part of the derivation (§6.2). |
+| 12 | Synthesis Retry/Send guards | Synthesis is an ordinary `planTurn` handoff, so phase 1's guards apply unchanged (§6.10, §10). |
