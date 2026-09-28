@@ -141,3 +141,110 @@ func (d *Dispatcher) buildReview(ctx context.Context, t *Thread, m Message) erro
 	}
 	return nil
 }
+
+var _ review.ThreadSink = (*Dispatcher)(nil)
+
+// PostResult appends a member's review to the thread once, while the thread
+// is open; otherwise it is skipped (and counts as posted).
+func (d *Dispatcher) PostResult(ctx context.Context, in review.Input, m review.Member, text string) error {
+	tid, mid, ok := review.ThreadOrigin(in.Origin)
+	if !ok {
+		return nil
+	}
+	t, err := Open(d.Opts.Room, tid)
+	if err != nil {
+		return nil // the thread is gone: nothing to post to
+	}
+	ref := fmt.Sprintf("%s/%d", in.ReviewID, m.Index)
+	return t.Update(ctx, func(tx *Tx) error {
+		if tx.Meta.Status != StatusOpen {
+			return nil
+		}
+		for _, msg := range tx.Snap.Messages {
+			if msg.Role == RoleReview && msg.Review == ref {
+				return nil
+			}
+		}
+		cm, ok := tx.Snap.Message(mid)
+		if !ok {
+			return nil
+		}
+		ev := tx.Append(Event{Kind: KindMessage, Author: in.Committee.Name + "/" + m.Member, Role: RoleReview, Text: text, ReplyTo: mid, Chain: cm.Chain, Review: ref})
+		tx.Append(Event{Kind: KindState, Message: ev.ID, State: StateDone, Text: text})
+		return nil
+	})
+}
+
+// Complete moves the committee message to its final state once the review
+// closed or was cancelled, and — when an agent asked — plans that agent's
+// synthesis turn in the same transaction. It reports done once the message
+// is final (including when Stop or archive finalized it).
+func (d *Dispatcher) Complete(ctx context.Context, in review.Input, st review.State) (bool, error) {
+	tid, mid, ok := review.ThreadOrigin(in.Origin)
+	if !ok {
+		return true, nil
+	}
+	t, err := Open(d.Opts.Room, tid)
+	if err != nil {
+		return true, nil
+	}
+	done := false
+	err = t.Update(ctx, func(tx *Tx) error {
+		cm, ok := tx.Snap.Message(mid)
+		if !ok || (cm.State != StatePending && cm.State != StateRunning) {
+			done = true
+			return nil
+		}
+		if tx.Meta.Status != StatusOpen {
+			return nil // finishStop finalizes it
+		}
+		state, text := committeeOutcome(in, st)
+		tx.Append(Event{Kind: KindState, Message: mid, State: state, Text: text})
+		done = true
+		if state != StateDone {
+			return nil
+		}
+		trigger, ok := tx.Snap.Message(cm.ReplyTo)
+		if !ok || trigger.Role != RoleAgent || trigger.Listener == "" {
+			return nil
+		}
+		final, _ := tx.Snap.Message(mid)
+		_, owned := tx.Meta.Listeners[trigger.Listener]
+		_, err := d.planTurn(t, tx, Target{Mention: trigger.Listener, Listener: trigger.Listener, Preset: trigger.Preset, Existing: !owned}, final, cm.Chain, true)
+		return err
+	})
+	return done, err
+}
+
+// committeeOutcome summarizes a finished review for its committee message.
+func committeeOutcome(in review.Input, st review.State) (string, string) {
+	var b strings.Builder
+	finished := 0
+	fmt.Fprintf(&b, "Committee %s (v%d) ", in.Committee.Name, in.Committee.Version)
+	if st.Status == "cancelled" {
+		b.WriteString("review was cancelled.\n")
+	} else {
+		b.WriteString("review closed.\n")
+	}
+	for _, m := range st.Members {
+		fmt.Fprintf(&b, "- %s: %s", m.Member, m.State)
+		if m.Late {
+			b.WriteString(" (late)")
+		}
+		if m.Note != "" {
+			b.WriteString(" — " + m.Note)
+		}
+		b.WriteString("\n")
+		if m.State == "done" {
+			finished++
+		}
+	}
+	fmt.Fprintf(&b, "\nBundle: .tincan/reviews/%s/bundle.md\n", in.ReviewID)
+	switch {
+	case st.Status == "cancelled":
+		return StateCancelled, b.String()
+	case finished == 0:
+		return StateError, b.String()
+	}
+	return StateDone, b.String()
+}

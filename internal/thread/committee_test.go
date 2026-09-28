@@ -180,3 +180,137 @@ func TestRunningCommitteeMessageIsLeftToTheCoordinator(t *testing.T) {
 		t.Fatalf("agent paths touched the committee message: %+v", cm)
 	}
 }
+
+// running builds a committee message to running and returns it with its input.
+func running(t *testing.T, e *env, d *thread.Dispatcher, th *thread.Thread, text string) (thread.Message, review.Input) {
+	t.Helper()
+	d.Post(context.Background(), th.ID, text, "")
+	snap := e.settle(d, th, func(s thread.Snapshot) bool {
+		cms := committeeMessages(s)
+		return len(cms) == 1 && cms[0].State == thread.StateRunning
+	})
+	cm := committeeMessages(snap)[0]
+	in, err := review.ReadInput(e.room, cm.Review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cm, in
+}
+
+func TestResultsPostOnceAndCompletionIsOnce(t *testing.T) {
+	e, d, _ := committeeEnv(t, "x@box", "y@box")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	cm, in := running(t, e, d, th, "@reviewers check")
+	ctx := context.Background()
+	st, _ := review.ReadState(e.room, in.ReviewID)
+	for i := 0; i < 2; i++ {
+		if err := d.PostResult(ctx, in, st.Members[0], "x says ok"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap, _ := th.Snapshot()
+	n := 0
+	for _, m := range snap.Messages {
+		if m.Role == thread.RoleReview {
+			n++
+			if m.Author != "reviewers/x@box" || m.ReplyTo != cm.ID || m.Text != "x says ok" || m.State != thread.StateDone {
+				t.Fatalf("review message: %+v", m)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("posted %d times", n)
+	}
+	st.Status = "closed"
+	st.Members[0].State = "done"
+	st.Members[1].State = "error"
+	done, err := d.Complete(ctx, in, st)
+	if err != nil || !done {
+		t.Fatalf("complete: %v %v", done, err)
+	}
+	snap, _ = th.Snapshot()
+	got, _ := snap.Message(cm.ID)
+	if got.State != thread.StateDone || !strings.Contains(got.Text, "bundle.md") {
+		t.Fatalf("committee message: %+v", got)
+	}
+	if done, _ := d.Complete(ctx, in, st); !done {
+		t.Fatal("second completion not reported done")
+	}
+	if len(agentMessages(snap, "")) != 0 {
+		t.Fatal("an owner mention planned a synthesis turn")
+	}
+}
+
+func TestAgentMentionGetsOneSynthesisTurn(t *testing.T) {
+	e, d, _ := committeeEnv(t, "x@box")
+	e.script("a", "reply", "done. @reviewers please review")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d.Post(context.Background(), th.ID, "go", "")
+	snap := e.settle(d, th, func(s thread.Snapshot) bool {
+		cms := committeeMessages(s)
+		return len(cms) == 1 && cms[0].State == thread.StateRunning
+	})
+	cm := committeeMessages(snap)[0]
+	in, _ := review.ReadInput(e.room, cm.Review)
+	st, _ := review.ReadState(e.room, in.ReviewID)
+	st.Status, st.Members[0].State = "closed", "done"
+	ctx := context.Background()
+	d.PostResult(ctx, in, st.Members[0], "LGTM from x")
+	d.Complete(ctx, in, st)
+	d.Complete(ctx, in, st)
+	e.script("a", "reply", "synthesized")
+	snap = e.settle(d, th, quiescent)
+	var synth []thread.Message
+	for _, m := range agentMessages(snap, "") {
+		if m.ReplyTo == cm.ID {
+			synth = append(synth, m)
+		}
+	}
+	if len(synth) != 1 || synth[0].Listener != agentMessages(snap, "")[0].Listener {
+		t.Fatalf("synthesis turns: %+v", synth)
+	}
+	if last := readLast(e, "a"); !strings.Contains(last, "LGTM from x") {
+		t.Fatalf("synthesis prompt lacks the member review:\n%s", last)
+	}
+	// A late result after completion is posted, with no second synthesis.
+	st.Members = append(st.Members, review.Member{Member: "late@box", Index: 1})
+	d.PostResult(ctx, in, st.Members[1], "late words")
+	snap = e.settle(d, th, quiescent)
+	count := 0
+	for _, m := range agentMessages(snap, "") {
+		if m.ReplyTo == cm.ID {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("late result caused another synthesis: %d", count)
+	}
+}
+
+func TestResultsAreNotPostedToAnArchivedThread(t *testing.T) {
+	t.Skip("Task 6")
+	e, d, _ := committeeEnv(t, "x@box")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	_, in := running(t, e, d, th, "@reviewers check")
+	d.SetArchived(context.Background(), th.ID, true)
+	e.settle(d, th, func(s thread.Snapshot) bool { return s.Meta.Status == thread.StatusArchived })
+	st, _ := review.ReadState(e.room, in.ReviewID)
+	if err := d.PostResult(context.Background(), in, st.Members[0], "too late"); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ := th.Snapshot()
+	for _, m := range snap.Messages {
+		if m.Role == thread.RoleReview {
+			t.Fatal("posted into an archived thread")
+		}
+	}
+	st.Status = "cancelled"
+	if done, err := d.Complete(context.Background(), in, st); err != nil || !done {
+		t.Fatalf("archived thread completion: %v %v", done, err)
+	}
+}
+
+func readLast(e *env, name string) string {
+	b, _ := os.ReadFile(filepath.Join(e.fixture, name+".last"))
+	return string(b)
+}
