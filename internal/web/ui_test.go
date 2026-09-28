@@ -45,6 +45,11 @@ func TestUIContract(t *testing.T) {
 		"!state.editingCommittee",
 		// Reviews (committees spec §6.10, 2b-3).
 		"showReview(",
+		// Committee messages in threads (2b-4).
+		`m.role === "committee"`,
+		"Open review",
+		// A review opened from a thread is not re-rendered over by thread notes.
+		"n.thread === cur.tid && !state.reviewOpen",
 		// The Activity page re-renders on every activity note; a question being
 		// typed into "Start a review" must survive it.
 		"state.reviewDraft",

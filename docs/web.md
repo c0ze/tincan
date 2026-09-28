@@ -284,6 +284,24 @@ member ends as `unreachable` or `expired`, so a review always finishes. With
 declares `blocking` and whose quota is at 100% is skipped with a note naming
 the window and reset time.
 
+### In threads
+
+Write `@reviewers` in a thread to ask that committee:
+
+- **Results.** Each member's review appears in the thread as it arrives,
+  under the name `reviewers/<member>`. **Open review** on the committee's
+  message shows every member and the bundle.
+- **Synthesis.** When an agent mentioned the committee, that agent gets one
+  follow-up turn with the reviews in its context to synthesize them. When you
+  mentioned it, ask an agent yourself (`@claude summarize the reviews`).
+- **Budget.** An agent's `@committee` costs one chain execution per member,
+  plus the synthesis turn. A chain that cannot afford it gets a **Send**
+  suggestion instead, which you can send yourself.
+- **Stop and Archive** cancel the thread's reviews; members still running on
+  other machines are stopped on their own.
+- **Snapshot.** The committee used is its definition at the moment of the
+  mention; later edits do not change a review in progress.
+
 ## Services
 
 Two starting points live under [`deploy/`](../deploy/); edit the peer URL,

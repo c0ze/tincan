@@ -305,6 +305,21 @@ function renderMessage(m) {
   const who = el("div", "who", m.author);
   who.append(el("span", "when", new Date(m.time).toLocaleTimeString()));
   box.append(who);
+  if (m.role === "committee") {
+    const cur = state.current;
+    const members = (m.committee && m.committee.members) || [];
+    if (m.state === "pending" || m.state === "running") {
+      box.append(el("div", "working", `committee ${m.author} reviewing… (${members.join(", ")})`));
+    } else {
+      box.append(m.text ? renderBody(m) : el("div", "body muted", m.state));
+    }
+    if (m.review && cur) {
+      const open = el("button", "secondary", "Open review");
+      open.onclick = () => showReview(cur.key, cur.rid, m.review, "thread");
+      box.append(el("div", "tools")).lastChild.append(open);
+    }
+    return box;
+  }
   if (m.state === "pending" || m.state === "running") {
     const c = state.chains[m.chain];
     const used = c ? c.used : 0;
@@ -325,7 +340,7 @@ function renderMessage(m) {
   }
   if (m.state === "uncollectable") { box.append(el("div", "body", "result expired")); return box; }
   box.append(m.text ? renderBody(m) : el("div", "body muted", m.role === "agent" ? "(no output)" : ""));
-  if (m.state === "error" || m.state === "cancelled") {
+  if (m.role === "agent" && (m.state === "error" || m.state === "cancelled")) {
     const tools = el("div", "tools");
     if (!m.retried) {
       const retry = el("button", "", "Retry");
@@ -485,7 +500,8 @@ function reviewForm(key, rid) {
   return form;
 }
 
-async function showReview(key, rid, id) {
+async function showReview(key, rid, id, from) {
+  from = from || (state.reviewOpen && state.reviewOpen.id === id ? state.reviewOpen.from : "activity");
   const d = await api(key, `rooms/${encodeURIComponent(rid)}/reviews/${encodeURIComponent(id)}`);
   const view = $("view");
   const box = el("div", "review");
@@ -502,9 +518,10 @@ async function showReview(key, rid, id) {
     box.append(cancel);
   }
   const back = el("button", "secondary", "Back to activity");
-  back.onclick = showActivity;
+  back.textContent = from === "thread" ? "Back to thread" : "Back to activity";
+  back.onclick = () => { state.reviewOpen = null; from === "thread" ? openCurrent() : showActivity(); };
   box.append(back);
-  state.reviewOpen = { key, rid, id };
+  state.reviewOpen = { key, rid, id, from };
   view.replaceChildren(box);
 }
 
@@ -777,7 +794,7 @@ function connect(key) {
     renderSidebar();
     if (!cur || cur.key !== key || cur.rid !== n.room) return;
     if (cur.tid === "activity" && n.kind === "activity" && !activityBusy()) showActivity();
-    if (n.thread === cur.tid) refreshMessages();
+    if (n.thread === cur.tid && !state.reviewOpen) refreshMessages();
   };
 }
 

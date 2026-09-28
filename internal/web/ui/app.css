@@ -120,3 +120,5 @@ tr.clickable:hover { background: var(--accent-bg); }
 .review pre.result { white-space: pre-wrap; background: var(--code); padding: 8px; border-radius: 6px; max-height: 480px; overflow: auto; }
 .review-form { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; max-width: 640px; margin-top: 12px; }
 .review-form textarea { width: 100%; }
+.msg.committee { border-left: 3px solid var(--accent); padding-left: 8px; }
+.msg.review .who::after { content: " · review"; color: var(--muted); font-weight: 400; }
