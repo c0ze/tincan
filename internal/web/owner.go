@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -54,7 +55,13 @@ func DetectNode(ctx context.Context) (owner, dnsName string, err error) {
 		if err != nil {
 			continue
 		}
-		out, err := exec.CommandContext(ctx, path, "status", "--json").Output()
+		cmd := exec.CommandContext(ctx, path, "status", "--json")
+		// The macOS app binary behaves as the CLI only when TERM is set, and
+		// launchd starts services without one.
+		if os.Getenv("TERM") == "" {
+			cmd.Env = append(os.Environ(), "TERM=dumb")
+		}
+		out, err := cmd.Output()
 		if err != nil {
 			stderr := ""
 			var exitErr *exec.ExitError

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -433,5 +434,32 @@ func TestDetectNodeReadsDNSName(t *testing.T) {
 	}
 	if got, err := DetectOwner(context.Background()); err != nil || got != "me@example.com" {
 		t.Fatalf("DetectOwner %q %v", got, err)
+	}
+}
+
+// The macOS app binary acts as the CLI only when TERM is set; launchd starts
+// services without it, so DetectNode must supply one.
+func TestDetectNodeSetsTermForTheCLI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix shebang script")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "tailscale")
+	status := `{"Self":{"UserID":7,"DNSName":"box.tailnet.ts.net."},"User":{"7":{"LoginName":"me@example.com"}}}`
+	// Perl, not sh: macOS /bin/sh sets TERM=dumb itself when it is missing.
+	perl, err := exec.LookPath("perl")
+	if err != nil {
+		t.Skip("perl not available")
+	}
+	body := "#!" + perl + "\nif (!defined $ENV{TERM} || $ENV{TERM} eq '') { print \"The Tailscale GUI failed to start\\n\"; exit 0 }\nprint '" + status + "';\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TERM", "")
+	os.Unsetenv("TERM")
+	login, dns, err := DetectNode(context.Background())
+	if err != nil || login != "me@example.com" || dns != "box.tailnet.ts.net" {
+		t.Fatalf("%q %q %v", login, dns, err)
 	}
 }
