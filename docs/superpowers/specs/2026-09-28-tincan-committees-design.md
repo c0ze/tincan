@@ -2,7 +2,10 @@
 
 Status: design discussed with the owner on 2026-09-28. Codex (gpt-6-astra,
 xhigh) reviewed a draft (16 findings) and this spec (16 findings); both rounds
-are resolved below (§13). The owner approved the key decisions (read-only
+are resolved below (§13). Round 3 checked the spec against the phase 1 code
+that landed (`96d7d76`): its phase 2a findings are folded into §5 and §8; its
+phase 2b findings are open (§13 round 3) and must be resolved in this document
+before the 2b plan is written. The owner approved the key decisions (read-only
 reviewer presets and independent clones with the residual risk stated;
 committee executions count against the thread budget; quota skipping off by
 default; phases 2a/2b/2c). Awaits the owner's review of this document.
@@ -103,13 +106,19 @@ which would expose `env` values in process listings. Instead:
 - `Up` writes the resolved preset to
   `<room>/.tincan/hosts/config/<owner>.json`, where `<owner>` is the host
   lifetime identity `Up` already generates. The directory is 0700, the file
-  0600, written atomically. `Up` passes `--resolved-preset-file <path>`.
-- The file lives as long as that host lifetime; `Down` and a clean `serve`
-  exit remove it; stale files whose owner is not alive are removed by `Up`.
-- "Explicit settings must match the running configuration" compares against
-  this private file, never against redacted views.
-- Public views — `tincan presets`, `tincan_presets`, host state, `status` —
-  show `env` keys only, never values.
+  0600, written atomically. `Up` passes `--resolved-preset-file <path>`
+  (`--resolved-preset <json>` is removed).
+- The file is only the hand-off from `Up` to the daemon it spawns: `serve`
+  reads it at startup and removes it. `Up` removes it itself if the daemon
+  never became ready, and removes stale files whose owner is not alive.
+- Foreground `tincan serve` resolves the preset in-process and needs no file.
+- The durable record of the running configuration stays where phase 1 put it:
+  the listener's 0600 state file (`State.Config`), written by `serve` in both
+  modes. "Explicit settings must match the running configuration"
+  (`existingResult`) keeps comparing against it, never against redacted views.
+- Public views — `tincan presets`, `tincan_presets`, `status`, web — show
+  `env`/`env_unset` keys only, never values. `State.Config` is never
+  serialized to a public view.
 
 ### 5.3 Session provider identity
 
@@ -120,7 +129,16 @@ which would expose `env` values in process listings. Instead:
   `provider`.
 - The session fingerprint includes provider, executable and a hash of the
   sorted `env`/`env_unset` configuration, so changing a listener's account
-  never resumes another account's conversation.
+  never resumes another account's conversation. Session records gain
+  `"version": 2`.
+- Legacy records (no version; fingerprint `sha256(Exec, Stdin, Reply)`,
+  `Provider` = label) are migrated in place, not invalidated, when the legacy
+  fingerprint still matches, the preset has no `env`/`env_unset`, and the new
+  provider equals the recorded one. Anything else keeps phase 1's error
+  ("stop and reset the listener explicitly").
+- All label-keyed session behaviour — `SupportsSessions`, `WithSession`,
+  resume/new-session argv, session-ID validation, output parsing and Kimi's
+  reply cleanup — switches to the provider through one helper.
 - `tincan_presets` reports `session_supported` from the provider.
 - Codex remains stateless.
 
@@ -362,7 +380,10 @@ regular 0600 files in directories the materializer created itself.
 **Executables are pinned outside reviewed content.** The member preset's
 executable is resolved on the member machine **before** the workspace exists,
 never relative to the workspace (committee members may only use bare names or
-absolute paths), and the resolved absolute path is used for the run.
+absolute paths), and the resolved absolute path is used for the run through a
+strict execution path: no re-resolution, no base-name fallback (phase 1's
+`ResolveExecutable` falls back when an absolute path is missing), no template
+expansion of `argv[0]`; if the pinned file has disappeared the job fails.
 Repository-controlled agent configuration inside the workspace (e.g. a
 reviewed repo's `.claude/settings.json` hooks) can still influence a reviewer;
 reviewer presets should disable project configuration where the CLI allows it
@@ -506,7 +527,10 @@ age on the peer); review cards in threads; reviews in Activity.
   member's machine `GET api/presets/{preset}/quota-status` (local call for
   local members) at publication. That machine decides, and answers
   `{exhausted: true, reset_at, window}` only if: exactly one `quotas.json`
-  entry explicitly maps the preset (none or several → not exhausted, with the
+  entry explicitly maps the preset — counted over the whole configuration,
+  including entries whose cache file is absent (phase 1's `Load` enumerates
+  caches, so this needs a config-first count); a malformed `quotas.json` is
+  non-fatal for display and always prevents skipping (none or several → not exhausted, with the
   reason); the entry declares `blocking`; its state is `ok` (phase 1 truth
   table: fresh, successful, valid); and the blocking window's percentage is
   ≥ 100 with a reset time in the future. `either` means the weekly or the
@@ -517,7 +541,9 @@ age on the peer); review cards in threads; reviews in Activity.
 ## 9. Security
 
 - Only the owner's devices reach any endpoint; jobs arrive only through
-  `tincan web`.
+  `tincan web`. Exception inherited from phase 1: where `tincan web` listens
+  on loopback TCP (the macOS deployment), other local OS users can forge the
+  identity header (`docs/web.md`); the same caveat covers the machine link.
 - Reviewers run with the owner's OS permissions. The dissociated clone keeps
   ordinary edits away from the owner's tree and Git metadata; read-only
   presets stop well-behaved CLIs from writing; executables are pinned outside
@@ -656,3 +682,23 @@ protocol variables to the runner.
 | 14 | Remote skipping lacked information | Machine-local `quota-status` decision; explicit single mapping required (§8). |
 | 15 | Preset file collided with listener state | `hosts/config/<owner>.json`; private comparison (§5.2). |
 | 16 | Phase 1 integration | Dispatcher lock for all `.tincan` rooms; exclusion at every insertion point (phase 1 §15.3). |
+
+### Round 3 (against the phase 1 code at `96d7d76`, 11 findings)
+
+Phase 2a findings (#6 partly, #11) are resolved above. The phase 2b findings
+reopen round 2 #1–#5 and #7 and stay **open** until this document resolves
+them; the 2b plan is not written before then.
+
+| # | Finding | Status / direction |
+|---|---|---|
+| 1 | Crash between directory rename and `keys/<request_id>` duplicates a review | Open. Durably bind key → review ID before publication (as `request.Store` does), record the key in immutable input, recovery for every intermediate state. |
+| 2 | Journal reservation, review publication and handoff marker are not one transaction | Open. Durable review-intent event referencing staged input, committed with keyed reservations and the handoff marker via `Thread.Update`/`SaveMeta`; replay/dedup rules; legacy unkeyed reservations kept. |
+| 3 | Origin lives only in runner variables | Open. Persist origin per request (in `SendSpec` and the envelope), include it in idempotency comparison, derive protocol variables per execution and clear absent ones. |
+| 4 | Stop/archive have no review barrier | Open. Durable review references on the thread, cancellation under the barrier, no new reservations on stopped chains, reconciliation continues after archive; state whether Stop waits for remote acks. |
+| 5 | Unsettled states without transitions (`submitting` not collected, failed acks, permanent errors) | Open. Reconcile submission, acknowledgement and cancellation independently; classify permanent errors; model unreachable-peer uncertainty; separate `dispatch.Send` launch failure from the thread wrapper's cancellation. |
+| 6 | Absolute executables are re-resolved with fallback | Resolved in §6.6 (strict pinned execution). |
+| 7 | Coordinator probe misreads first-use rooms; `filelock.Try` writes | Open. Room enrollment/initialization, bounded readiness before publication, reuse the owned dispatcher lock in `runRoomPass`, workspaces under `<state>/reviews/`. |
+| 8 | Machine link has no outbound RPC contract | Open. Shared outbound peer client honouring phase 1's Host/forwarded-Host/owner/Funnel/CSRF rules. Loopback-TCP identity caveat added to §9. |
+| 9 | No machine-level preset catalogue; SSE doesn't cover committees/reviews | Open. Redacted machine catalogue with warnings, note schemas, scanner coverage and peer reconnect/refetch — or polling first. Keep `Resolver() (Resolver, error)`. |
+| 10 | Synthesis doesn't fit Send/Retry | Open (2c). Persist synthesis identity and exact prompt before its intent; synthesis-specific Send/Retry; `KindRetry` only for fresh retries. |
+| 11 | Foreground serve, fingerprint migration, quota ambiguity count | Resolved in §5.2, §5.3, §8. |
