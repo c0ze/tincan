@@ -45,6 +45,10 @@ func TestUIContract(t *testing.T) {
 		"!state.editingCommittee",
 		// Reviews (committees spec §6.10, 2b-3).
 		"showReview(",
+		// The Activity page re-renders on every activity note; a question being
+		// typed into "Start a review" must survive it.
+		"state.reviewDraft",
+		"activityBusy()",
 		"Start a review",
 		`n.kind === "reviews"`,
 		`/reviews/${encodeURIComponent(`,

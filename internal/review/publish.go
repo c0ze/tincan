@@ -150,6 +150,11 @@ func replay(room, id string, existing, want Input) (Input, State, error) {
 // RequestCancel records cancellation (committees §6.4); the coordinator
 // then cancels members. A running review becomes cancelled at once.
 func RequestCancel(ctx context.Context, room, id string) (State, error) {
+	// Taking the lock would create the review directory; an unknown ID must
+	// leave nothing behind.
+	if _, err := ReadState(room, id); err != nil {
+		return State{}, fmt.Errorf("review %s not found: %w", id, err)
+	}
 	l, err := Lock(ctx, room, id)
 	if err != nil {
 		return State{}, err

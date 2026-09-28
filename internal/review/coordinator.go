@@ -86,9 +86,41 @@ func (c *Coordinator) due(key string, every time.Duration) bool {
 	return true
 }
 
+// passKey carries the machines that failed during one Reconcile pass.
+type passKey struct{}
+
+type pass struct {
+	mu   sync.Mutex
+	down map[string]bool
+}
+
+// machineDown reports whether a call to machine already failed transiently
+// in this pass: its remaining members wait for the next pass, so one
+// unresponsive machine costs one timeout per pass, not one per member.
+func machineDown(ctx context.Context, machine string) bool {
+	p, _ := ctx.Value(passKey{}).(*pass)
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.down[machine]
+}
+
+func noteFailure(ctx context.Context, machine string, err error) {
+	p, _ := ctx.Value(passKey{}).(*pass)
+	if p == nil || err == nil || Classify(err) != "transient" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.down[machine] = true
+}
+
 // Reconcile advances every unsettled review in room one step and removes
 // stale staging directories.
 func (c *Coordinator) Reconcile(ctx context.Context, room string) error {
+	ctx = context.WithValue(ctx, passKey{}, &pass{down: map[string]bool{}})
 	c.cleanStaging(room)
 	ids, err := List(room)
 	if err != nil {
@@ -191,9 +223,10 @@ func (c *Coordinator) member(ctx context.Context, room string, in Input, st *Sta
 		case now.After(m.ExpiresAt):
 			m.CancelAcked = true // the job cannot be running past its expiry
 			return save()
-		case c.due(key+"cancel", cancelEvery):
+		case !machineDown(ctx, machine) && c.due(key+"cancel", cancelEvery):
 			js, acked, err := c.Transport.Cancel(ctx, machine, m.JobID, m.ExpiresAt)
 			if err != nil {
+				noteFailure(ctx, machine, err)
 				return nil
 			}
 			if err := c.adopt(room, in.ReviewID, m, js); err != nil {
@@ -209,6 +242,9 @@ func (c *Coordinator) member(ctx context.Context, room string, in Input, st *Sta
 		}
 		return nil
 	case m.State == "planned" && !st.CancelRequested:
+		if machineDown(ctx, machine) {
+			return nil
+		}
 		if in.Committee.SkipExhausted {
 			if d, err := c.Transport.QuotaStatus(ctx, machine, preset); err == nil && d.Exhausted {
 				m.State, m.Finished = "skipped", now
@@ -238,11 +274,12 @@ func (c *Coordinator) member(ctx context.Context, room string, in Input, st *Sta
 			m.Finished = now
 			return save()
 		}
-		if !c.due(key+"poll", pollEvery) {
+		if machineDown(ctx, machine) || !c.due(key+"poll", pollEvery) {
 			return nil
 		}
 		js, err := c.Transport.Status(ctx, machine, m.JobID)
 		if err != nil {
+			noteFailure(ctx, machine, err)
 			return nil
 		}
 		before := *m
@@ -258,7 +295,7 @@ func (c *Coordinator) member(ctx context.Context, room string, in Input, st *Sta
 }
 
 func (c *Coordinator) submit(ctx context.Context, room string, in Input, m *Member, machine, preset string, save func() error) error {
-	if !c.due(m.JobID+"/submit", submitEvery) {
+	if machineDown(ctx, machine) || !c.due(m.JobID+"/submit", submitEvery) {
 		return nil
 	}
 	p, err := ReadPacket(room, in.ReviewID)
@@ -287,6 +324,7 @@ func (c *Coordinator) submit(ctx context.Context, room string, in Input, m *Memb
 	case Classify(err) == "gone":
 		m.State, m.Note, m.Finished = "expired", err.Error(), c.now()
 	default:
+		noteFailure(ctx, machine, err)
 		return nil // transient: stay submitting, retry later
 	}
 	return save()
@@ -303,10 +341,11 @@ func (c *Coordinator) ack(ctx context.Context, room string, in Input, m *Member,
 		m.Acked = true
 		return save()
 	}
-	if !c.due(m.JobID+"/ack", ackEvery) {
+	if machineDown(ctx, machine) || !c.due(m.JobID+"/ack", ackEvery) {
 		return nil
 	}
 	err := c.Transport.Ack(ctx, machine, m.JobID)
+	noteFailure(ctx, machine, err)
 	if err == nil || Classify(err) != "transient" {
 		m.Acked = true
 		return save()

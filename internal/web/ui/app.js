@@ -28,6 +28,7 @@ const state = {
   committeeNotice: "", // outcome of the last committee save/delete, shown above the list
   editingCommittee: false, // the committee editor is open: notes must not re-render over it
   reviewOpen: null,    // {key, rid, id} while a review's detail is shown
+  reviewDraft: {},     // key/rid -> {committee, scope, question} typed into "Start a review"
 };
 
 function fmtLeft(iso) {
@@ -443,23 +444,39 @@ async function showActivity() {
   view.append(el("h3", "", "Reviews"), reviews.length ? vt : el("p", "muted", "No reviews."), reviewForm(cur.key, cur.rid));
 }
 
+// activityBusy reports whether the owner is typing in "Start a review":
+// note-driven re-renders wait rather than steal focus.
+function activityBusy() {
+  const a = document.activeElement;
+  return !!(a && a.closest && a.closest(".review-form"));
+}
+
 function reviewForm(key, rid) {
   const form = el("form", "review-form");
+  // The Activity page re-renders on every note; keep what is being typed.
+  const draft = state.reviewDraft[key + "/" + rid] || (state.reviewDraft[key + "/" + rid] = {});
   const committee = el("select");
   api(key, "committees").then((d) => {
     for (const c of d.committees) committee.append(Object.assign(el("option", "", c.name), { value: c.name }));
+    if (draft.committee) committee.value = draft.committee;
   }).catch(() => {});
   const scope = el("select");
   for (const s of ["uncommitted", "branch", "none"]) scope.append(Object.assign(el("option", "", s), { value: s }));
+  if (draft.scope) scope.value = draft.scope;
   const question = el("textarea");
   question.rows = 3;
   question.placeholder = "What should the committee check?";
+  question.value = draft.question || "";
+  committee.onchange = () => { draft.committee = committee.value; };
+  scope.onchange = () => { draft.scope = scope.value; };
+  question.oninput = () => { draft.question = question.value; };
   const status = el("p", "muted");
   const go = el("button", "", "Request review");
   go.type = "button";
   go.onclick = async () => {
     try {
       const r = await api(key, `rooms/${encodeURIComponent(rid)}/reviews`, { method: "POST", body: { committee: committee.value, scope: scope.value, question: question.value, request_id: clientId() } });
+      delete state.reviewDraft[key + "/" + rid];
       showReview(key, rid, r.review_id);
     } catch (e) { status.textContent = e.message; }
   };
@@ -745,7 +762,7 @@ function connect(key) {
     if (n.kind === "reviews") {
       const cur = state.current;
       if (state.reviewOpen && state.reviewOpen.key === key && state.reviewOpen.rid === n.room) showReview(key, n.room, state.reviewOpen.id);
-      else if (cur && cur.key === key && cur.rid === n.room && cur.tid === "activity") showActivity();
+      else if (cur && cur.key === key && cur.rid === n.room && cur.tid === "activity" && !activityBusy()) showActivity();
       return;
     }
     if (n.kind === "committees") {
@@ -759,7 +776,7 @@ function connect(key) {
     }
     renderSidebar();
     if (!cur || cur.key !== key || cur.rid !== n.room) return;
-    if (cur.tid === "activity" && n.kind === "activity") showActivity();
+    if (cur.tid === "activity" && n.kind === "activity" && !activityBusy()) showActivity();
     if (n.thread === cur.tid) refreshMessages();
   };
 }

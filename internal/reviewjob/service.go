@@ -92,7 +92,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Job, error) {
 	if !req.ExpiresAt.After(now) {
 		return Job{}, gone("the job has expired")
 	}
-	if req.ExpiresAt.After(now.Add(MaxLifetime)) {
+	// Allow a few minutes of clock skew: a requester asking for the maximum
+	// lifetime by its own clock must not be refused by ours.
+	if req.ExpiresAt.After(now.Add(MaxLifetime + 5*time.Minute)) {
 		return Job{}, invalid(fmt.Sprintf("expires_at is more than %v away", MaxLifetime))
 	}
 	presets, err := s.Presets()

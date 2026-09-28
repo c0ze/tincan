@@ -249,3 +249,14 @@ func TestInputFilesAreNotJobs(t *testing.T) {
 		t.Fatalf("real record changed: %+v", j)
 	}
 }
+
+// A committee with the maximum deadline asks for exactly MaxLifetime; a
+// member whose clock runs a little behind must still accept it.
+func TestCreateToleratesClockSkewAtMaxLifetime(t *testing.T) {
+	s := testService(t, "echo")
+	req := jobRequest("rv-0000000000000000-g", "p", time.Now().Add(MaxLifetime+2*time.Minute).UTC().Truncate(time.Second))
+	if _, err := s.Create(context.Background(), req); err != nil {
+		t.Fatalf("max-deadline job refused: %v", err)
+	}
+	s.Wait()
+}

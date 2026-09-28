@@ -43,3 +43,27 @@ func TestReviewCLI(t *testing.T) {
 		t.Fatal("missing --committee accepted")
 	}
 }
+
+// A room reached through a symlink (macOS /tmp, /var, or a symlinked $PWD)
+// works for --wait and --cancel, not only for publishing.
+func TestReviewCLISymlinkedRoom(t *testing.T) {
+	state := rooms.StateDir()
+	committee.NewStore(state).Put(context.Background(), committee.Committee{Name: "solo", Members: []string{"claude@box"}})
+	rooms.WriteHeartbeat(state, rooms.Heartbeat{PID: 1, Machine: "box", Updated: time.Now()})
+	real, _ := filepath.EvalSymlinks(t.TempDir())
+	link := filepath.Join(t.TempDir(), "room-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlinks unavailable")
+	}
+	code, out, errOut := run("review", "--room", link, "--committee", "solo", "--question", "q", "--scope", "none")
+	id := strings.TrimSpace(out)
+	if code != ExitOK {
+		t.Fatalf("publish: %d %q", code, errOut)
+	}
+	if code, _, errOut := run("review", "--room", link, "--cancel", id); code != ExitOK {
+		t.Fatalf("cancel through symlink: %d %q", code, errOut)
+	}
+	if code, _, errOut := run("review", "--room", link, "--wait", id, "--timeout", "2"); code != ExitOK {
+		t.Fatalf("wait through symlink: %d %q", code, errOut)
+	}
+}

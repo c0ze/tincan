@@ -128,3 +128,15 @@ func TestRequestCancel(t *testing.T) {
 		t.Fatalf("%+v %v", st, err)
 	}
 }
+
+// Cancelling an ID that names no review must not create one: a stray
+// directory would break every later coordinator pass.
+func TestRequestCancelUnknownCreatesNothing(t *testing.T) {
+	room := roomDir(t)
+	if _, err := RequestCancel(context.Background(), room, "rv-0123456789abcdef"); err == nil {
+		t.Fatal("cancelled a review that does not exist")
+	}
+	if _, err := os.Stat(Root(room)); !os.IsNotExist(err) {
+		t.Fatalf("cancel of an unknown review created %s", Root(room))
+	}
+}

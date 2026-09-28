@@ -317,3 +317,61 @@ func TestStaleStagingRemoved(t *testing.T) {
 		t.Fatal("stale staging kept")
 	}
 }
+
+// slowTransport fails every call to "slow" after a delay, counting calls.
+type slowTransport struct {
+	*fakeTransport
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *slowTransport) hit(machine string) error {
+	if machine != "slow" {
+		return nil
+	}
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	time.Sleep(50 * time.Millisecond)
+	return errors.New("i/o timeout")
+}
+
+func (s *slowTransport) Create(ctx context.Context, machine string, req reviewjob.CreateRequest) (JobStatus, error) {
+	if err := s.hit(machine); err != nil {
+		return JobStatus{}, err
+	}
+	return s.fakeTransport.Create(ctx, machine, req)
+}
+
+func (s *slowTransport) Status(ctx context.Context, machine, id string) (JobStatus, error) {
+	if err := s.hit(machine); err != nil {
+		return JobStatus{}, err
+	}
+	return s.fakeTransport.Status(ctx, machine, id)
+}
+
+// One unresponsive machine costs one call per pass, however many members
+// it has: a pass (which also runs the room's thread dispatch and holds the
+// review lock that cancellation needs) is never stalled by N timeouts.
+func TestUnresponsiveMachineCostsOneCallPerPass(t *testing.T) {
+	room, _ := published(t, []string{"a@slow", "b@slow", "c@slow", "d@macmini"}, 10*time.Minute, false)
+	st := &slowTransport{fakeTransport: newFake()}
+	c := &Coordinator{Transport: st, Now: time.Now}
+	c.Reconcile(context.Background(), room)
+	if st.calls != 1 {
+		t.Fatalf("calls to the unresponsive machine in one pass: %d", st.calls)
+	}
+	if st.creates[mustState(t, room).Members[3].JobID] != 1 {
+		t.Fatal("a member on a healthy machine was not submitted")
+	}
+}
+
+func mustState(t *testing.T, room string) State {
+	t.Helper()
+	ids, _ := List(room)
+	st, err := ReadState(room, ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
+}

@@ -32,7 +32,7 @@ func jobStatus(j reviewjob.Job) review.JobStatus {
 
 func (t transport) Create(ctx context.Context, machine string, req reviewjob.CreateRequest) (review.JobStatus, error) {
 	if machine == t.s.cfg.Machine {
-		j, err := t.s.jobs.Create(ctx, req)
+		j, err := t.s.jobs.Create(ctx, req) // the caller's 60 s deadline applies
 		return jobStatus(j), err
 	}
 	p, err := t.peerFor(machine)
@@ -60,6 +60,8 @@ func (t transport) Status(ctx context.Context, machine, id string) (review.JobSt
 
 func (t transport) Ack(ctx context.Context, machine, id string) error {
 	if machine == t.s.cfg.Machine {
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second) // never wait out a job lock held by a slow creation
+		defer cancel()
 		_, err := t.s.jobs.Ack(ctx, id)
 		return err
 	}
@@ -72,6 +74,8 @@ func (t transport) Ack(ctx context.Context, machine, id string) error {
 
 func (t transport) Cancel(ctx context.Context, machine, id string, exp time.Time) (review.JobStatus, bool, error) {
 	if machine == t.s.cfg.Machine {
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
 		j, acked, err := t.s.jobs.Cancel(ctx, id, exp)
 		return jobStatus(j), acked, err
 	}

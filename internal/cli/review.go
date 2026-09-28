@@ -38,6 +38,14 @@ func cmdReview(args []string, stdout, stderr io.Writer) int {
 		args = fs.Args()[1:]
 	}
 	ctx := context.Background()
+	// The review store refuses symlinked paths (macOS /tmp, /var, a
+	// symlinked $PWD); Publish canonicalizes, so wait and cancel must too.
+	canonical, err := rooms.Canonical(*room)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan review: %v\n", err)
+		return ExitError
+	}
+	*room = canonical
 	if *cancel {
 		if len(positional) != 1 {
 			fmt.Fprintln(stderr, "tincan review: --cancel takes a review id")
