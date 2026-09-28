@@ -289,3 +289,16 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+func TestTickWritesHeartbeat(t *testing.T) {
+	s := testServer(t)
+	state, _ := filepath.EvalSymlinks(t.TempDir())
+	s.cfg.StateDir = state
+	s.tick(context.Background())
+	hb, err := os.ReadFile(rooms.HeartbeatPath(state))
+	if err != nil || !strings.Contains(string(hb), `"machine": "testbox"`) {
+		t.Fatalf("heartbeat: %s %v", hb, err)
+	}
+	if !rooms.CoordinatorAlive(state, time.Now()) {
+		t.Fatal("tick did not make the coordinator alive")
+	}
+}

@@ -68,7 +68,7 @@ func cmdWeb(args []string, stdout, stderr io.Writer) int {
 	machine, _, _ = strings.Cut(machine, ".")
 	// The --origin host joins the Host allowlist inside web.New.
 	srv, err := web.New(web.Config{PublicPath: *public, Owner: *owner, Origin: *origin, AllowedHosts: hosts, Machine: machine, Peers: peerList,
-		ChainBudget: *budget, IdleStop: *idle, Registry: reg, Dispatch: dispatch.Options{}})
+		ChainBudget: *budget, IdleStop: *idle, Registry: reg, Dispatch: dispatch.Options{}, StateDir: rooms.StateDir()})
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan web: %v\n", err)
 		return ExitError

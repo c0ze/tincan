@@ -61,6 +61,9 @@ type Config struct {
 	Dispatch     dispatch.Options // Executable and Presets; Room is set per room
 	QuotaDir     string           // default quota.DefaultCacheDir()
 	QuotaConfig  string           // default quota.DefaultConfigPath()
+	// StateDir is the shared tincan state directory (rooms.StateDir()).
+	// Empty disables the heartbeat and committee storage (tests).
+	StateDir string
 }
 
 type Server struct {
@@ -79,6 +82,8 @@ type Server struct {
 	lastJanitor   time.Time                     // touched only by tick
 	lastQuotaNote time.Time                     // touched only by tick
 	wg            sync.WaitGroup                // tracks room passes spawned by tick, for a clean shutdown
+	started       time.Time                     // for the heartbeat
+	lastHeartbeat time.Time                     // touched only by tick
 
 	// reconcileRoom runs one room's Reconcile-and-Janitor pass; it defaults
 	// to runRoomPass and is overridden in tests to exercise tick's
@@ -144,7 +149,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, hosts: hosts, base: base, mux: http.NewServeMux(), index: idx, hub: newHub(), peers: map[string]*peer{}, dispatchers: map[string]*thread.Dispatcher{}, inFlight: map[string]bool{}, lastLog: map[string]string{}}
+	s := &Server{cfg: cfg, hosts: hosts, base: base, mux: http.NewServeMux(), index: idx, hub: newHub(), peers: map[string]*peer{}, dispatchers: map[string]*thread.Dispatcher{}, inFlight: map[string]bool{}, lastLog: map[string]string{}, started: time.Now()}
 	s.reconcileRoom = s.runRoomPass
 	for _, p := range cfg.Peers {
 		pp, err := newPeer(p)
@@ -419,6 +424,11 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		srv.Shutdown(shutdown)
+	}()
+	defer func() {
+		if s.cfg.StateDir != "" {
+			rooms.RemoveHeartbeat(s.cfg.StateDir, os.Getpid())
+		}
 	}()
 	err := srv.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) {
