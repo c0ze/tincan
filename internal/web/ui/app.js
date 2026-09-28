@@ -267,6 +267,7 @@ async function refreshMessages() {
 function sorted() { return [...state.messages.values()].sort((a, b) => a.n - b.n); }
 
 function renderThread() {
+  if (state.reviewOpen) return; // a review opened from this thread owns the view (progress polls, notes)
   const meta = state.meta;
   $("title").textContent = meta.title;
   const archived = meta.status === "archived";
@@ -316,7 +317,9 @@ function renderMessage(m) {
     if (m.review && cur) {
       const open = el("button", "secondary", "Open review");
       open.onclick = () => showReview(cur.key, cur.rid, m.review, "thread");
-      box.append(el("div", "tools")).lastChild.append(open);
+      const tools = el("div", "tools");
+      tools.append(open);
+      box.append(tools);
     }
     return box;
   }
@@ -335,7 +338,9 @@ function renderMessage(m) {
     box.append(el("div", "", "Handoff not sent: chain budget reached."));
     const send = el("button", "", "Send");
     send.onclick = () => post(m.text);
-    box.append(el("div", "muted", m.text), el("div", "tools")).lastChild.append(send);
+    const tools = el("div", "tools");
+    tools.append(send);
+    box.append(el("div", "muted", m.text), tools);
     return box;
   }
   if (m.state === "uncollectable") { box.append(el("div", "body", "result expired")); return box; }

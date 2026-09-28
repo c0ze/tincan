@@ -50,6 +50,7 @@ func TestUIContract(t *testing.T) {
 		"Open review",
 		// A review opened from a thread is not re-rendered over by thread notes.
 		"n.thread === cur.tid && !state.reviewOpen",
+		"function renderThread() {\n  if (state.reviewOpen) return;",
 		// The Activity page re-renders on every activity note; a question being
 		// typed into "Start a review" must survive it.
 		"state.reviewDraft",
@@ -69,6 +70,11 @@ func TestUIContract(t *testing.T) {
 	}
 	if strings.Contains(src, "r.missing) continue") {
 		t.Error("app.js still skips missing rooms")
+	}
+	// Element.append returns undefined: chaining .lastChild after it throws
+	// and aborts rendering the whole thread.
+	if strings.Contains(src, ").lastChild.append(") {
+		t.Error("app.js chains .lastChild on Element.append's (undefined) result")
 	}
 	if n := strings.Count(src, "innerHTML"); n != 1 {
 		t.Errorf("innerHTML used %d times; only the server-rendered message html may use it", n)
