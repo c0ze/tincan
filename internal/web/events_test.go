@@ -180,6 +180,13 @@ func TestTickRunsRoomPassesConcurrentlyAndSkipsInFlight(t *testing.T) {
 
 	s.tick(context.Background()) // baseline scan; also starts room A's blocking pass
 	drain(ch)
+	// Room B's first pass runs in its own goroutine; wait until it has fully
+	// finished (in-flight flag cleared) so the next tick is not a legitimate skip.
+	waitFor(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return atomic.LoadInt32(&callsB) == 1 && !s.inFlight[rb.ID]
+	})
 
 	// Room B's thread changes; scan must notice it on the next tick
 	// regardless of room A's pass still being in flight.
@@ -213,6 +220,7 @@ func TestTickRunsRoomPassesConcurrentlyAndSkipsInFlight(t *testing.T) {
 	if got := atomic.LoadInt32(&callsA); got != 1 {
 		t.Fatalf("room A's in-flight pass was re-entered: calls=%d", got)
 	}
+	waitFor(t, func() bool { return atomic.LoadInt32(&callsB) >= 2 })
 	if got := atomic.LoadInt32(&callsB); got != 2 {
 		t.Fatalf("room B's pass should have run on both ticks: calls=%d", got)
 	}
@@ -267,5 +275,17 @@ func TestRoomPassErrorsAreLoggedOnce(t *testing.T) {
 	}
 	if n := strings.Count(out, "janitor:"); n != 1 {
 		t.Errorf("janitor error logged %d times, want 1:\n%s", n, out)
+	}
+}
+
+// waitFor polls cond until it holds or 5 s pass.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within 5s")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
