@@ -30,6 +30,25 @@ the socket over `tailscale serve`. Concretely:
 - Do not expose the listening socket or port any other way (no port-forward,
   no reverse proxy other than `tailscale serve`, no binding to a non-loopback
   address). There is deliberately no non-loopback TCP option.
+- Prefer the default unix socket. With `--listen 127.0.0.1:<port>`, **any
+  local process of any OS user on that machine can connect to the port and
+  forge the `Tailscale-User-Login` header** — the identity header is only
+  trustworthy when `tailscale serve` is the sole way in, which a private
+  `0700`/`0600` socket guarantees and a loopback port does not. Use TCP only
+  where serve cannot reach the socket, and only on a machine whose other
+  local users and processes you trust as much as yourself.
+- Never enable Tailscale **Funnel** for this hostname or port: Funnel puts it
+  on the public internet. tincan refuses any request carrying the
+  `Tailscale-Funnel-Request` header as a second line of defence, but do not
+  rely on that.
+- Other apps served on the same `tailscale serve` hostname (for example `/`
+  and `/comics` beside `/tincan` on cachyos) share its browser origin, so the
+  browser treats their pages as same-origin with tincan: a page they serve can
+  call tincan's API with your identity. Only co-host apps you trust as much
+  as tincan itself, or give tincan a hostname of its own.
+- Every request's `Host` (and `X-Forwarded-Host`, when present) must be on
+  the [Host allowlist](#host-allowlist); this blocks DNS-rebinding pages that
+  resolve their own name to `127.0.0.1`.
 - Keep the room list to projects you are comfortable running agents in from
   any of your own devices, including hosts you occasionally lend to others.
 
@@ -58,6 +77,12 @@ node (via `tailscale` on `PATH`, or
 found, or the command fails (for example because the node is tagged and has
 no owning user), startup fails and prints that CLI's own error appended with
 `; pass --owner <login>` — pass `--owner` explicitly in that case.
+
+The same `tailscale status --json` call supplies this node's Tailscale DNS
+name for the [Host allowlist](#host-allowlist). With an explicit `--owner`,
+tincan still runs it for the name but does not fail if it errors; it then
+allows only loopback hosts and the `--origin` host, and prints a one-line
+note that remote access needs `--origin https://<host>`.
 
 ### Listener rules
 
@@ -92,6 +117,22 @@ tincan web --listen 127.0.0.1:7788 ...
 /Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg --set-path /tincan http://127.0.0.1:7788
 ```
 
+### Host allowlist
+
+Every request, whatever its method, is refused with `403 {"error": "host
+not allowed"}` unless its `Host` header names this server:
+
+- a loopback literal — `127.0.0.1`, `[::1]` or `localhost` — on any port;
+- this node's Tailscale DNS name (e.g. `cachyos.<tailnet>.ts.net`, as
+  `tailscale status --json` reports it), on any port;
+- the host of `--origin` when it is set (host and port, case-insensitive).
+
+When `X-Forwarded-Host` is present, it must pass the same list. `tailscale
+serve` keeps the browser's `Host` (the node's DNS name), so a normal deployment
+needs no flag. If the DNS name could not be detected (for example with an
+explicit `--owner` and no working Tailscale CLI), or you reach tincan under a
+different name, pass `--origin https://<host>`.
+
 ### CSRF and `--origin`
 
 Mutating requests (`POST`/`PATCH`) must carry `X-Tincan-Request: 1`; when they
@@ -102,7 +143,9 @@ it, falling back to `Host`; the scheme is not checked. Behind a plain
 `tailscale serve --set-path` this works without any flag. If some other proxy
 rewrites `Host` without adding `X-Forwarded-Host`, pass
 `--origin https://<host>`: with `--origin` set, the whole `Origin` value
-(scheme and host together) must match it exactly instead.
+(scheme and host together) must match it exactly instead, and its host joins
+the [Host allowlist](#host-allowlist). Refused requests get a JSON `403`
+(`{"error": "..."}`).
 
 ## Two machines
 
@@ -220,9 +263,25 @@ where it left off.
 An agent turn that fails, times out, is cancelled, or is collected but prints
 nothing at all shows as a red error card (an empty reply is reported as
 "empty reply") with **Retry** and **Open log**. Retry re-runs that one turn:
-it re-uses the same request when it never actually ran, or starts a fresh
-one in a brand-new chain otherwise (for example after the thread was
-Stopped). A given failed turn can be retried only once from the same card.
+it re-uses the same request when that request was never saved or never
+started, or starts a fresh one in a brand-new chain otherwise (for example
+after the thread was Stopped, or after a launch failure). A fresh retry can
+be made only once from the same card; a same-request retry that fails again
+can be retried again.
+When a listener fails to launch after its request was saved, the saved
+request is cancelled at once (and Stop/Archive cancel any such leftovers), so
+a later launch of that listener never runs the stale prompt.
+
+## Rooms in the sidebar
+
+Rooms come from the registry (`--scan` at startup, and every room a tincan
+command runs in, except your home directory, its ancestors and filesystem
+roots). Each machine has **+ add room**, which asks for an absolute directory
+path. Each room has **hide**/**unhide**; hidden rooms appear, dimmed, only
+with **show hidden rooms** checked. A room whose directory is gone stays
+listed, greyed and marked "(missing)", so you can hide it. A room with
+archived threads offers **show archived**, listing them so you can open one
+and **Unarchive** it.
 
 ## Limits
 
