@@ -85,6 +85,7 @@ function clientId() { return (crypto.randomUUID ? crypto.randomUUID() : String(D
 
 function parseHash() {
   try {
+    if (location.hash === "#/committees") return { view: "committees" };
     const [key, rid, tid] = location.hash.replace(/^#\//, "").split("/").map(decodeURIComponent);
     return key && rid ? { key, rid, tid: tid || "activity" } : null;
   } catch (e) {
@@ -231,6 +232,7 @@ async function openCurrent() {
   $("stop").hidden = $("archive").hidden = true;
   $("chips").replaceChildren();
   if (!cur) { $("title").textContent = "Pick a room"; return; }
+  if (cur.view === "committees") return showCommittees();
   if (cur.tid === "activity") return showActivity();
   state.agents = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/agents`).catch(() => ({ presets: [], listeners: [] }));
   await refreshMessages();
@@ -429,6 +431,110 @@ function row(cell, values) {
   return tr;
 }
 
+// ---------- committees ----------
+async function showCommittees() {
+  $("title").textContent = "Committees";
+  const view = $("view");
+  view.replaceChildren(el("p", "muted", "Loading…"));
+  let data;
+  try { data = await api("local", "committees"); } catch (e) { view.replaceChildren(el("p", "error", e.message)); return; }
+  const hubKey = data.role === "peer" ? data.from : "local";
+  const catalogues = {};
+  await Promise.all(state.machines.filter((m) => m.online).map(async (m) => {
+    catalogues[m.name] = { key: m.key, presets: await api(m.key, "presets").catch(() => []) };
+  }));
+  if (!state.current || state.current.view !== "committees") return; // navigated away
+  const box = el("div", "committees");
+  if (data.role === "peer") {
+    const age = data.fetched_at ? fmtAgo(data.fetched_at) : "never";
+    box.append(el("p", "muted", `Definitions are kept on ${data.from}; this copy was fetched ${age}.` + (data.error ? ` Last refresh failed: ${data.error}` : "")));
+  }
+  for (const c of data.committees) {
+    const card = el("div", "committee");
+    card.append(el("h3", "", `${c.name} · v${c.version}`), el("p", "", c.members.join(", ")),
+      el("p", "muted", `deadline ${c.deadline_minutes}m` + (c.skip_exhausted ? " · skips exhausted members" : "")));
+    if (c.instructions) card.append(el("pre", "instructions", c.instructions));
+    const edit = el("button", "secondary", "Edit");
+    edit.onclick = () => editCommittee(hubKey, catalogues, c);
+    card.append(edit);
+    box.append(card);
+  }
+  const add = el("button", "", "+ New committee");
+  add.onclick = () => editCommittee(hubKey, catalogues, null);
+  box.append(add);
+  view.replaceChildren(box);
+}
+
+function fmtAgo(iso) {
+  const s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
+  return s < 60 ? `${Math.round(s)}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+}
+
+function editCommittee(hubKey, catalogues, c) {
+  const view = $("view");
+  const form = el("form", "committee-edit");
+  const name = el("input");
+  name.value = c ? c.name : "";
+  name.disabled = !!c;
+  name.placeholder = "name";
+  const deadline = el("input");
+  deadline.type = "number"; deadline.min = 1; deadline.max = 240;
+  deadline.value = c ? c.deadline_minutes : 30;
+  const skip = el("input");
+  skip.type = "checkbox";
+  skip.checked = !!(c && c.skip_exhausted);
+  const instructions = el("textarea");
+  instructions.rows = 4;
+  instructions.value = c ? c.instructions || "" : "";
+  const chosen = new Set(c ? c.members : []);
+  const members = el("div", "members");
+  for (const [machine, cat] of Object.entries(catalogues)) {
+    const group = el("fieldset");
+    group.append(el("legend", "", machine));
+    for (const p of cat.presets) {
+      const id = `${p.name}@${machine}`;
+      const label = el("label", "member" + (p.available ? "" : " unavailable"));
+      const box = el("input");
+      box.type = "checkbox";
+      box.checked = chosen.has(id);
+      box.disabled = !p.available || p.exec_kind === "relative";
+      box.onchange = () => { box.checked ? chosen.add(id) : chosen.delete(id); };
+      const q = p.quota && p.quota.percent != null ? ` · ${Math.round(p.quota.percent)}%` : "";
+      label.append(box, document.createTextNode(` ${p.name}${q}`));
+      for (const w of p.warnings || []) label.append(el("span", "warning", ` ⚠ ${w}`));
+      group.append(label);
+    }
+    members.append(group);
+  }
+  const status = el("p", "muted");
+  const save = el("button", "", "Save");
+  const del = el("button", "danger", "Delete");
+  del.type = save.type = "button";
+  save.onclick = async () => {
+    try {
+      const res = await api(hubKey, `committees/${encodeURIComponent(name.value)}`, { method: "PUT", body: {
+        members: [...chosen], deadline_minutes: Number(deadline.value), instructions: instructions.value, skip_exhausted: skip.checked } });
+      status.textContent = (res.warnings || []).length ? "Saved with warnings: " + res.warnings.join("; ") : "Saved.";
+      if (!(res.warnings || []).length) showCommittees();
+    } catch (e) { status.textContent = e.message; }
+  };
+  del.onclick = async () => {
+    if (!c || !confirm(`Delete committee ${c.name}?`)) return;
+    try { await api(hubKey, `committees/${encodeURIComponent(c.name)}`, { method: "DELETE" }); showCommittees(); }
+    catch (e) { status.textContent = e.message; }
+  };
+  const cancel = el("button", "secondary", "Cancel");
+  cancel.type = "button";
+  cancel.onclick = showCommittees;
+  const row = (text, input) => { const l = el("label", "", text + " "); l.append(input); return l; };
+  form.append(el("h3", "", c ? `Edit ${c.name}` : "New committee"), row("Name", name), members,
+    row("Deadline (minutes)", deadline), row("Skip members whose quota is exhausted", skip),
+    row("Instructions", instructions), save, cancel);
+  if (c) form.append(del);
+  form.append(status);
+  view.replaceChildren(form);
+}
+
 // ---------- composer + @ autocomplete ----------
 function mentionAtCursor(input) {
   const upto = input.value.slice(0, input.selectionStart);
@@ -541,6 +647,10 @@ function connect(key) {
       if (m) await loadQuotas(m);
       renderSidebar();
       if (state.meta && state.current && state.current.tid !== "activity") renderThread();
+      return;
+    }
+    if (n.kind === "committees") {
+      if (state.current && state.current.view === "committees") showCommittees();
       return;
     }
     if (n.room) await loadThreads(key, n.room).catch(() => {});

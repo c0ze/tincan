@@ -32,6 +32,13 @@ func TestUIContract(t *testing.T) {
 		// Composer and polling robustness.
 		"draft.id",
 		"pollBusy",
+		// Committees page (committees spec §6.1, §6.7).
+		`"#/committees"`,
+		`api("local", "committees")`,
+		`method: "PUT"`,
+		`method: "DELETE"`,
+		`"presets"`,
+		`n.kind === "committees"`,
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("app.js missing %q", want)

@@ -98,3 +98,16 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; }
   #close-drawer, #open-drawer { display: inline-block; }
   #view { padding: 12px; }
 }
+#committees-link { display: block; padding-left: 6px; margin-bottom: 10px; text-decoration: none; }
+.committees { max-width: 760px; }
+.committee { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin-bottom: 10px; }
+.committee h3 { margin: 0 0 4px; }
+.committee .instructions { white-space: pre-wrap; background: var(--code); padding: 6px 8px; border-radius: 6px; }
+.committee-edit { max-width: 760px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.committee-edit label { display: block; }
+.committee-edit textarea { width: 100%; }
+.members { display: flex; flex-wrap: wrap; gap: 10px; }
+.members fieldset { border: 1px solid var(--line); border-radius: 8px; min-width: 220px; }
+.members .member { display: block; }
+.members .unavailable { color: var(--muted); }
+.warning { color: var(--busy); font-size: 12px; }
