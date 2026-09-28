@@ -91,3 +91,46 @@ func TestReviewsNote(t *testing.T) {
 		}
 	}
 }
+func TestReviewAPI(t *testing.T) {
+	s, rid := apiServer(t) // machine "box", preset "claude" available
+	state, _ := filepath.EvalSymlinks(t.TempDir())
+	s.cfg.StateDir = state
+	s.initJobs()
+	committee.NewStore(state).Put(context.Background(), committee.Committee{Name: "solo", Members: []string{"claude@box"}})
+	h := s.Handler()
+	rec := do(t, h, "POST", "/api/rooms/"+rid+"/reviews", `{"committee":"solo","question":"ok?","scope":"none","request_id":"k"}`, mut())
+	if rec.Code != 201 {
+		t.Fatalf("start: %d %s", rec.Code, rec.Body)
+	}
+	var sum reviewSummary
+	decode(t, rec.Body.String(), &sum)
+	if sum.Committee != "solo" || len(sum.Members) != 1 || sum.Status != "running" {
+		t.Fatalf("summary: %+v", sum)
+	}
+	if rec := do(t, h, "POST", "/api/rooms/"+rid+"/reviews", `{"committee":"solo","question":"different","scope":"none","request_id":"k"}`, mut()); rec.Code != 409 {
+		t.Fatalf("conflict: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "POST", "/api/rooms/"+rid+"/reviews", `{"committee":"nobody","question":"q"}`, mut()); rec.Code != 404 {
+		t.Fatalf("unknown committee: %d %s", rec.Code, rec.Body)
+	}
+	rec = do(t, h, "GET", "/api/rooms/"+rid+"/reviews", "", ownerHdr())
+	var list []reviewSummary
+	decode(t, rec.Body.String(), &list)
+	if len(list) != 1 || list[0].ReviewID != sum.ReviewID {
+		t.Fatalf("list: %s", rec.Body)
+	}
+	rec = do(t, h, "GET", "/api/rooms/"+rid+"/reviews/"+sum.ReviewID, "", ownerHdr())
+	var det reviewDetail
+	decode(t, rec.Body.String(), &det)
+	if det.Question != "ok?" || det.Scope != "none" {
+		t.Fatalf("detail: %s", rec.Body)
+	}
+	rec = do(t, h, "POST", "/api/rooms/"+rid+"/reviews/"+sum.ReviewID+"/cancel", "", mut())
+	decode(t, rec.Body.String(), &sum)
+	if rec.Code != 200 || sum.Status != "cancelled" {
+		t.Fatalf("cancel: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "GET", "/api/rooms/"+rid+"/reviews/rv-../../x", "", ownerHdr()); rec.Code == 200 {
+		t.Fatal("traversal accepted")
+	}
+}
