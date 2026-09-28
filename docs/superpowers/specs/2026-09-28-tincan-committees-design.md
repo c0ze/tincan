@@ -557,8 +557,8 @@ in the room's Activity and review list.
 
 **CLI**: `tincan review --committee X (--question <text> | --question-file
 <f>) [--scope …] [--request-id id] [--room dir] [--wait]`; `tincan review
---wait <id>` reattaches; `tincan review --cancel <id>`. `--wait` exits 3 when the review
-closed with late or unreachable members.
+--wait <id>` reattaches; `tincan review --cancel <id>`. `--wait` exits 4 when the review
+closed with late or unreachable members (3 is the CLI's existing timeout code).
 
 **Thread reviews: `@committee`.** `@<committee>` is resolved after presets and
 before hosted listeners, in owner messages and agent handoffs.
