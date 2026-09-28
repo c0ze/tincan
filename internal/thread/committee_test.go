@@ -326,3 +326,55 @@ func TestStopWhileRunningCancelsTheReview(t *testing.T) {
 		t.Fatalf("review not cancelled: %+v", st)
 	}
 }
+
+// Committees are optional: a corrupt committees.json must not break threads.
+// Posts still work, and @reviewers is simply not dispatched.
+func TestCorruptCommitteesFileDoesNotBreakThreads(t *testing.T) {
+	e, d, state := committeeEnv(t, "x@box")
+	os.WriteFile(filepath.Join(state, "committees.json"), []byte("{broken"), 0o600)
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	if _, err := d.Post(context.Background(), th.ID, "hello", ""); err != nil {
+		t.Fatalf("plain post failed: %v", err)
+	}
+	if _, err := d.Post(context.Background(), th.ID, "@reviewers check", ""); err != nil {
+		t.Fatalf("committee post failed: %v", err)
+	}
+	snap := e.settle(d, th, quiescent)
+	if len(committeeMessages(snap)) != 0 {
+		t.Fatal("planned a committee from a corrupt file")
+	}
+	unresolved := false
+	for _, m := range snap.Messages {
+		if m.Role == thread.RoleSystem && strings.Contains(m.Text, "@reviewers") {
+			unresolved = true
+		}
+	}
+	if !unresolved {
+		t.Fatalf("no unresolved note: %+v", snap.Messages)
+	}
+}
+
+// The synthesis turn answers the committee; an agent that thanks it by name
+// ("Thanks @reviewers") must not start another review of the same change.
+func TestSynthesisReplyDoesNotRestartTheCommittee(t *testing.T) {
+	e, d, _ := committeeEnv(t, "x@box")
+	e.script("a", "reply", "done. @reviewers please review")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d.Post(context.Background(), th.ID, "go", "")
+	snap := e.settle(d, th, func(s thread.Snapshot) bool {
+		cms := committeeMessages(s)
+		return len(cms) == 1 && cms[0].State == thread.StateRunning
+	})
+	cm := committeeMessages(snap)[0]
+	in, _ := review.ReadInput(e.room, cm.Review)
+	st, _ := review.ReadState(e.room, in.ReviewID)
+	st.Status, st.Members[0].State = "closed", "done"
+	e.script("a", "reply", "Thanks @reviewers, all addressed.")
+	ctx := context.Background()
+	d.PostResult(ctx, in, st.Members[0], "LGTM")
+	d.Complete(ctx, in, st)
+	snap = e.settle(d, th, quiescent)
+	if n := len(committeeMessages(snap)); n != 1 {
+		t.Fatalf("synthesis reply restarted the committee: %d committee messages", n)
+	}
+}

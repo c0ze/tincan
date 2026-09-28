@@ -86,13 +86,14 @@ func (d *Dispatcher) Resolver() (Resolver, error) {
 	}
 	var committees map[string]committee.Committee
 	if d.StateDir != "" && d.Machine != "" {
-		list, err := committee.List(d.StateDir, d.CommitteesFrom != "")
-		if err != nil {
-			return Resolver{}, err
-		}
-		committees = map[string]committee.Committee{}
-		for _, c := range list {
-			committees[c.Name] = c
+		// Committees are optional: an unreadable definitions file disables
+		// @committee (mentions show as not dispatched; the Committees page
+		// reports the file) rather than breaking every thread.
+		if list, err := committee.List(d.StateDir, d.CommitteesFrom != ""); err == nil {
+			committees = map[string]committee.Committee{}
+			for _, c := range list {
+				committees[c.Name] = c
+			}
 		}
 	}
 	return Resolver{Room: d.Opts.Room, Presets: presets, Committees: committees, Alive: func(name string) (host.State, bool) {
@@ -431,8 +432,18 @@ func (d *Dispatcher) handoffs(ctx context.Context, t *Thread, m Message) error {
 			if len(unresolved) > 0 {
 				d.system(tx, unresolvedNote(unresolved), cur.Chain)
 			}
+			// A synthesis turn answers a committee message; naming that
+			// committee in the reply ("Thanks @reviewers") is not a request
+			// to review the same change again.
+			answered := ""
+			if prev, ok := tx.Snap.Message(cur.ReplyTo); ok && prev.Role == RoleCommittee {
+				answered = prev.Author
+			}
 			for _, tg := range targets {
 				if tg.Listener == cur.Listener {
+					continue
+				}
+				if tg.Committee != nil && tg.Committee.Name == answered {
 					continue
 				}
 				var id string
