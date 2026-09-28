@@ -20,6 +20,26 @@ func TestUIContract(t *testing.T) {
 			t.Errorf("app.js missing %q", want)
 		}
 	}
+	// Room and thread management (spec §4.1, §11): add a room, hide/unhide
+	// it, show missing rooms instead of skipping them, reach archived threads.
+	for _, want := range []string{
+		`api(m.key, "rooms", { method: "POST", body: { path } })`,
+		`method: "PATCH", body: { hidden: !r.hidden }`,
+		"+ add room",
+		`r.missing ? " (missing)" : ""`,
+		"showArchived",
+		"show archived",
+		// Composer and polling robustness.
+		"draft.id",
+		"pollBusy",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+	if strings.Contains(src, "r.missing) continue") {
+		t.Error("app.js still skips missing rooms")
+	}
 	if n := strings.Count(src, "innerHTML"); n != 1 {
 		t.Errorf("innerHTML used %d times; only the server-rendered message html may use it", n)
 	}

@@ -24,6 +24,7 @@ const state = {
   progress: new Map(), // request id -> {cursor, text}
   sources: {},
   quotas: {},          // key -> [quota entry]
+  showArchived: {},    // key/rid -> true when the room lists its archived threads
 };
 
 function fmtLeft(iso) {
@@ -128,29 +129,72 @@ function renderSidebar() {
     name.append(el("span", "dot" + (m.online ? " on" : "")), document.createTextNode(m.name + (m.online ? "" : " (offline)")));
     box.append(name, renderLimits(m));
     for (const r of state.rooms[m.key] || []) {
-      if ((r.hidden && !showHidden) || r.missing) continue;
-      const room = el("div", "room");
-      const rn = el("div", "name" + (cur.key === m.key && cur.rid === r.id ? " on" : ""), "# " + r.name);
-      rn.title = r.path;
-      rn.onclick = () => go(m.key, r.id, "activity");
-      room.append(rn);
-      for (const t of state.threads[m.key + "/" + r.id] || []) {
-        if (t.status === "archived" && !(cur.tid === t.id)) continue;
-        const it = el("div", "item" + (cur.tid === t.id ? " on" : ""), "› " + t.title);
-        if (t.running) it.append(el("span", "count", ` ${t.running}●`));
-        it.onclick = () => go(m.key, r.id, t.id);
-        room.append(it);
-      }
-      const act = el("div", "item" + (cur.key === m.key && cur.rid === r.id && cur.tid === "activity" ? " on" : ""),
-        `› Activity${r.running ? ` (${r.running} running)` : ""}`);
-      act.onclick = () => go(m.key, r.id, "activity");
-      const add = el("div", "item new", "+ new thread");
-      add.onclick = () => newThread(m.key, r.id);
-      room.append(act, add);
-      box.append(room);
+      if (r.hidden && !showHidden) continue;
+      box.append(renderRoom(m, r, cur));
+    }
+    if (m.online) {
+      const add = el("div", "item new add-room", "+ add room");
+      add.onclick = () => addRoom(m);
+      box.append(add);
     }
     nav.append(box);
   }
+}
+
+function renderRoom(m, r, cur) {
+  const room = el("div", "room" + (r.hidden ? " is-hidden" : "") + (r.missing ? " missing" : ""));
+  const rn = el("div", "name" + (cur.key === m.key && cur.rid === r.id ? " on" : ""));
+  rn.title = r.path;
+  rn.append(el("span", "label", "# " + r.name + (r.missing ? " (missing)" : "")));
+  const toggle = el("button", "icon room-toggle", r.hidden ? "unhide" : "hide");
+  toggle.title = r.hidden ? "Show this room in the sidebar" : "Hide this room from the sidebar";
+  toggle.onclick = (e) => { e.stopPropagation(); setRoomHidden(m, r); };
+  rn.append(toggle);
+  room.append(rn);
+  if (r.missing) return room; // its directory is gone: nothing to open, only Hide
+  rn.onclick = () => go(m.key, r.id, "activity");
+  const threadKey = m.key + "/" + r.id;
+  const threads = state.threads[threadKey] || [];
+  const showArch = !!state.showArchived[threadKey];
+  for (const t of threads) {
+    const archived = t.status === "archived";
+    if (archived && !showArch && cur.tid !== t.id) continue;
+    const it = el("div", "item" + (archived ? " archived" : "") + (cur.tid === t.id ? " on" : ""), "› " + t.title);
+    if (t.running) it.append(el("span", "count", ` ${t.running}●`));
+    it.onclick = () => go(m.key, r.id, t.id);
+    room.append(it);
+  }
+  const act = el("div", "item" + (cur.key === m.key && cur.rid === r.id && cur.tid === "activity" ? " on" : ""),
+    `› Activity${r.running ? ` (${r.running} running)` : ""}`);
+  act.onclick = () => go(m.key, r.id, "activity");
+  const add = el("div", "item new", "+ new thread");
+  add.onclick = () => newThread(m.key, r.id);
+  room.append(act, add);
+  const nArchived = threads.filter((t) => t.status === "archived").length;
+  if (nArchived || showArch) {
+    const arch = el("div", "item new", showArch ? "hide archived" : `show archived (${nArchived})`);
+    arch.onclick = () => { state.showArchived[threadKey] = !showArch; renderSidebar(); };
+    room.append(arch);
+  }
+  return room;
+}
+
+async function addRoom(m) {
+  const path = (prompt(`Add a room on ${m.name}: absolute path of its directory`) || "").trim();
+  if (!path) return;
+  try {
+    await api(m.key, "rooms", { method: "POST", body: { path } });
+    await loadRooms(m);
+    renderSidebar();
+  } catch (e) { alert(e.message); }
+}
+
+async function setRoomHidden(m, r) {
+  try {
+    await api(m.key, `rooms/${encodeURIComponent(r.id)}`, { method: "PATCH", body: { hidden: !r.hidden } });
+    await loadRooms(m);
+    renderSidebar();
+  } catch (e) { alert(e.message); }
 }
 
 // ---------- new thread ----------
@@ -289,24 +333,32 @@ function renderMessage(m) {
   return box;
 }
 
+// pollProgress runs on an interval; a slow poll must not overlap the next
+// one (both would read the same cursor and append the same output twice).
+let pollBusy = false;
 async function pollProgress() {
   const cur = state.current;
-  if (!cur || cur.tid === "activity") return;
-  let changed = false;
-  for (const m of state.messages.values()) {
-    if (m.state !== "running" || !m.request_id) continue;
-    const p = state.progress.get(m.request_id) || { cursor: 0, text: "" };
-    try {
-      const r = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/requests/${m.request_id}/progress?cursor=${p.cursor}`);
-      if (r.events && r.events.length) {
-        p.text = (p.text + r.events.map((e) => e.text).join("")).slice(-20000);
-        changed = true;
-      }
-      p.cursor = r.next_cursor;
-      state.progress.set(m.request_id, p);
-    } catch (e) { /* next poll retries */ }
+  if (pollBusy || !cur || cur.tid === "activity") return;
+  pollBusy = true;
+  try {
+    let changed = false;
+    for (const m of state.messages.values()) {
+      if (m.state !== "running" || !m.request_id) continue;
+      const p = state.progress.get(m.request_id) || { cursor: 0, text: "" };
+      try {
+        const r = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/requests/${m.request_id}/progress?cursor=${p.cursor}`);
+        if (r.events && r.events.length) {
+          p.text = (p.text + r.events.map((e) => e.text).join("")).slice(-20000);
+          changed = true;
+        }
+        p.cursor = r.next_cursor;
+        state.progress.set(m.request_id, p);
+      } catch (e) { /* next poll retries */ }
+    }
+    if (changed && state.current === cur && state.meta) renderThread();
+  } finally {
+    pollBusy = false;
   }
-  if (changed) renderThread();
 }
 
 async function act(path, body) {
@@ -317,13 +369,16 @@ async function act(path, body) {
   } catch (e) { alert(e.message); }
 }
 
-async function post(text) {
+// post sends text with id as its client_id (a fresh one when omitted) and
+// reports whether the server accepted it.
+async function post(text, id) {
   const cur = state.current;
-  if (!text.trim()) return;
+  if (!text.trim()) return true;
   try {
-    await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/threads/${encodeURIComponent(cur.tid)}/messages`, { method: "POST", body: { text, client_id: clientId() } });
-    await refreshMessages();
-  } catch (e) { alert(e.message); }
+    await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/threads/${encodeURIComponent(cur.tid)}/messages`, { method: "POST", body: { text, client_id: id || clientId() } });
+  } catch (e) { alert(e.message); return false; }
+  try { await refreshMessages(); } catch (e) { alert(e.message); }
+  return true;
 }
 
 async function openLog(name) {
@@ -421,12 +476,22 @@ function wireComposer() {
       $("composer").requestSubmit();
     }
   });
+  // One client_id per composed message: a failed post restores the text,
+  // and re-sending the same text reuses the id, so a post that reached the
+  // server before failing is deduplicated instead of appearing twice.
+  const draft = { text: null, id: null };
   $("composer").addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = input.value;
+    if (!text.trim()) return;
+    if (draft.text !== text) { draft.text = text; draft.id = clientId(); }
     input.value = "";
     $("suggest").hidden = true;
-    await post(text);
+    if (await post(text, draft.id)) {
+      draft.text = draft.id = null;
+    } else if (!input.value) {
+      input.value = text;
+    }
   });
   $("stop").onclick = () => act("stop");
   $("archive").onclick = () => act("archive", { archived: state.meta.status !== "archived" });
