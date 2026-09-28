@@ -301,6 +301,12 @@ func (d *Dispatcher) submit(ctx context.Context, t *Thread, m Message) error {
 	} else {
 		_, sendErr = dispatch.Send(ctx, d.Opts, dispatch.SendSpec{Agent: m.Listener, Preset: m.Preset, From: d.From, Body: prompt, RequestID: m.RequestID})
 	}
+	if sendErr != nil {
+		// Send may have saved and enqueued the request before its launch
+		// failed; the turn is about to become an error, so the saved record
+		// must not run on the listener's next launch.
+		d.abandon(ctx, m.Listener, m.RequestID)
+	}
 	if err := d.hook("after-submit"); err != nil {
 		return err
 	}
@@ -315,6 +321,24 @@ func (d *Dispatcher) submit(ctx context.Context, t *Thread, m Message) error {
 		tx.Append(Event{Kind: KindState, Message: m.ID, State: StateRunning})
 		return nil
 	})
+}
+
+// abandon cancels the saved, non-terminal request of a turn that is being
+// given up, so a later launch of its listener cannot run the stale prompt:
+// a queued record becomes canceled atomically, and a running one gets
+// CancelRequested plus a best-effort host.Cancel. Missing records and errors
+// are ignored (best effort).
+func (d *Dispatcher) abandon(ctx context.Context, listener, rid string) {
+	if rid == "" {
+		return
+	}
+	if r, err := request.Get(d.Opts.Room, rid); err != nil || r.Terminal() {
+		return
+	}
+	r, err := request.Cancel(ctx, d.Opts.Room, rid)
+	if err == nil && !r.Terminal() {
+		host.Cancel(ctx, d.Opts.Room, listener, rid)
+	}
 }
 
 // outcome maps a terminal request record to a message state and text.

@@ -73,6 +73,12 @@ func (d *Dispatcher) finishStop(ctx context.Context, t *Thread, snap Snapshot) e
 	var settled []result
 	pending := false
 	for _, m := range snap.Messages {
+		// A failed or cancelled turn may still own a saved, runnable request
+		// (e.g. its launch failed); cancel it so it never runs later. This is
+		// best effort and does not hold the thread in stopping/archiving.
+		if m.Role == RoleAgent && (m.State == StateError || m.State == StateCancelled) {
+			d.abandon(ctx, m.Listener, m.RequestID)
+		}
 		if !m.Active() {
 			continue
 		}
@@ -89,7 +95,9 @@ func (d *Dispatcher) finishStop(ctx context.Context, t *Thread, snap Snapshot) e
 				// The hosted listener is gone (crashed or its process was
 				// killed): host.Cancel can never reach it and the request
 				// would never become terminal on its own, stranding the
-				// thread in stopping/archiving forever. Settle it directly.
+				// thread in stopping/archiving forever. Settle it directly,
+				// after a best-effort host.Cancel in case the probe is wrong.
+				host.Cancel(ctx, room, m.Listener, m.RequestID)
 				r, err = request.Finish(room, r.Envelope, "ERROR interrupted: hosted listener is not running; stopped by the owner")
 				if err != nil {
 					return err
@@ -147,9 +155,12 @@ func (d *Dispatcher) finishStop(ctx context.Context, t *Thread, snap Snapshot) e
 // saved or never ran and its chain can still submit; otherwise (including
 // when the original chain was stopped by a Stop or Archive barrier, which
 // bars it from ever submitting again) a fresh turn in a brand-new chain, as
-// Post itself uses, for the same listener and trigger. A turn can be
-// retried only once; the KindRetry marker on the original message rejects a
-// second call.
+// Post itself uses, for the same listener and trigger. A record that already
+// carries a cancel request never counts as re-runnable in place. A turn can
+// be retried fresh only once; the KindRetry marker on the original message
+// rejects a second call. An in-place retry sets no marker (its pending and
+// running states already refuse a concurrent Retry), so if it fails again it
+// can be retried again.
 func (d *Dispatcher) Retry(ctx context.Context, tid, mid string) error {
 	t, err := Open(d.Opts.Room, tid)
 	if err != nil {
@@ -173,14 +184,13 @@ func (d *Dispatcher) Retry(ctx context.Context, tid, mid string) error {
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		stale := errors.Is(err, os.ErrNotExist) || (err == nil && !r.Terminal())
+		stale := errors.Is(err, os.ErrNotExist) || (err == nil && !r.Terminal() && !r.CancelRequested)
 		stopped := false
 		if c := tx.Snap.Chains[m.Chain]; c != nil {
 			stopped = c.Stopped
 		}
 		if stale && !stopped {
 			tx.Append(Event{Kind: KindState, Message: m.ID, State: StatePending})
-			tx.Append(Event{Kind: KindRetry, Message: m.ID})
 			return nil
 		}
 		if stale {
@@ -188,8 +198,12 @@ func (d *Dispatcher) Retry(ctx context.Context, tid, mid string) error {
 			// again; cancel it defensively (it may already be gone) and
 			// retry fresh instead of resetting to a pending state submit()
 			// would refuse forever.
-			if _, cerr := request.Cancel(ctx, d.Opts.Room, m.RequestID); cerr != nil && !errors.Is(cerr, os.ErrNotExist) {
+			cr, cerr := request.Cancel(ctx, d.Opts.Room, m.RequestID)
+			if cerr != nil && !errors.Is(cerr, os.ErrNotExist) {
 				return cerr
+			}
+			if cerr == nil && !cr.Terminal() {
+				host.Cancel(ctx, d.Opts.Room, m.Listener, m.RequestID) // best effort
 			}
 		}
 		trigger, ok := tx.Snap.Message(m.ReplyTo)
