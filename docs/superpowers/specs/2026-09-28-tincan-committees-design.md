@@ -104,13 +104,15 @@ Example:
 which would expose `env` values in process listings. Instead:
 
 - `Up` writes the resolved preset to
-  `<room>/.tincan/hosts/config/<owner>.json`, where `<owner>` is the host
-  lifetime identity `Up` already generates. The directory is 0700, the file
+  `<room>/.tincan/hosts/config/<name>/<owner>.json`, where `<owner>` is the
+  host lifetime identity `Up` already generates (one directory per listener,
+  because listener names may contain dots). The directory is 0700, the file
   0600, written atomically. `Up` passes `--resolved-preset-file <path>`
   (`--resolved-preset <json>` is removed).
 - The file is only the hand-off from `Up` to the daemon it spawns: `serve`
   reads it at startup and removes it. `Up` removes it itself if the daemon
-  never became ready, and removes stale files whose owner is not alive.
+  never became ready. Holding the launch lock with the lifetime lock free, it
+  first empties that listener's directory: any file there is stale.
 - Foreground `tincan serve` resolves the preset in-process and needs no file.
 - The durable record of the running configuration stays where phase 1 put it:
   the listener's 0600 state file (`State.Config`), written by `serve` in both
