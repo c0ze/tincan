@@ -6,7 +6,7 @@ are resolved below (§13). Round 3 checked the spec against the phase 1 code
 that landed (`96d7d76`); phase 2a shipped (`af82dc4`). After round 4 the owner
 relaxed two guarantees — reviewers may rarely run twice after a crash, and
 only `@committee` mentions integrate with threads — and phase 2c was folded
-into 2b (§13 round 4). The owner approved the key decisions (read-only
+into 2b (§13 round 4). Round 5's findings are resolved (§13); ready to plan. The owner approved the key decisions (read-only
 reviewer presets and independent clones with the residual risk stated;
 committee executions count against the thread budget; quota skipping off by
 default; phases 2a/2b/2c). Awaits the owner's review of this document.
@@ -213,8 +213,11 @@ Storage and sync:
   different requesting machines apart on a shared reviewer machine.
 - `input.json` holds the **identity** compared on replay: committee name,
   version and member list, question hash, scope, `included_tree`, origin.
-- `review.json`: `status` (`running|closed|cancelled`), `settled` (bool),
-  `cancel_requested`, `closed_at`, and `members[]`: `member`, `index`,
+- `review.json`: `status` (`running|closing|closed|cancelled`), `settled`
+  (bool), `cancel_requested`, `closed_at`, `closure` (the immutable snapshot
+  taken at close: each member's state, `late` flag and whether its result is
+  included), `thread_done` (thread reviews: committee message terminal), and
+  `members[]`: `member`, `index`,
   `job_id` (`<review_id>-<index>`), `expires_at`, `state`
   (`planned|submitting|submitted|running|done|error|skipped|unreachable|cancelled|expired`),
   `late`, `posted` (thread reviews: result appended), `started`, `finished`,
@@ -283,18 +286,24 @@ forever.
    get `POST …/cancel` (tombstone if unknown, §6.6) each pass until 2xx, at
    most until `expires_at`.
 
-**Close** once: when every member is terminal or the deadline passes, set
-`status: closed`, `closed_at`, and mark non-terminal members `late: true`.
-The bundle (§6.9) is written before `closed` is persisted (a crash in between
-rewrites the same bundle). Late results are recorded and shown; the bundle is
-not rewritten.
+**Close** once: when every member is terminal or the deadline passes, persist
+`status: closing` with `closed_at` and the `closure` snapshot (non-terminal
+members marked `late`). Then render `bundle.md` from the snapshot alone —
+included results are the `results/<n>.md` files the snapshot names, which are
+never rewritten — and persist `status: closed`. A crash in between re-renders
+byte-identical output from the same snapshot. Late results are recorded and
+shown; the bundle is not rewritten.
 
 **Cancel** (allowed until settled, including after close): persist
 `cancel_requested`, then run obligation 4. The review becomes `cancelled` if
 it had not closed.
 
 **Settle** when every obligation has ended (reached its outcome or its bound)
-and, for thread reviews, every recorded result is `posted`. Settled reviews
+and, for thread reviews, every recorded result is `posted` and `thread_done`
+is set — the committee message's terminal transaction (with its synthesis
+turn, §6.10) has committed, or Stop/archive terminalized the message. While
+the review is closed or cancelled and `thread_done` is unset, each pass retries
+that transaction. Settled reviews
 are not reconciled again.
 
 ### 6.5 Scopes and the packet
@@ -423,30 +432,40 @@ expired). Request ID = `job_id`. The prompt is the receiver's workspace note
 (§6.8) followed by the coordinator prompt, whose hash must equal
 `prompt_sha256`. Workspaces are never registered as rooms (phase 1 §15.3).
 
-**Create**: under the job lock, with job states `creating → running →
-done|error|cancelled`: record the job (`creating`), resolve and pin the
-executable, materialize a fresh workspace, submit through `dispatch.Send`
-with request ID `job_id`, then record `running`. A `Send` error after it saved
-the request (a launch failure) cancels that saved request, then records a
-permanent `error`. A replay of an identical create finding `creating` with the
-job lock free (the creator died) restarts creation from a fresh workspace;
-this is the one place a member can run twice (§6.4).
+Every read-modify-write of a job record — create, status promotion, cancel,
+ack, janitor — holds the job lock.
+
+**Create**, with job states `creating → running → done|error|cancelled`:
+record the job (`creating`), resolve and pin the executable, choose the
+workspace path and record it in the job **before** materializing or
+submitting, materialize it, submit through `dispatch.Send` with request ID
+`job_id`, then record `running`. A `Send` error after it saved the request (a
+launch failure) cancels that saved request, then records a permanent `error`.
+A replay of an identical create that finds `creating` with the job lock free
+(the creator died) first inspects the recorded workspace: a request record
+there is adopted (terminal → its result is imported; otherwise → `running`);
+only when none exists is creation restarted in a fresh workspace — the one
+place a member can run twice (§6.4).
 
 **Status** is read on demand: `GET` (and the local in-process equivalent)
 reads the job record and, while `running`, the request record in the
-workspace room; a terminal request is copied into the job record (result ≤
-1 MiB). No reconciler is needed for results.
+workspace room; a terminal request's result (≤ 1 MiB) is **imported** into the
+job record. No reconciler is needed for results.
 
-**Cancel acknowledgement**: under the job lock, record the tombstone (a launch
-is now refused), cancel the request, ask the host to stop it, and acknowledge
-once the request is terminal or the host has exited. If the host died, its
+**Cancel acknowledgement**: first import a terminal request result if there is
+one — a job that already finished stays `done` with its result, and the
+cancel is acknowledged. Otherwise record the tombstone (a launch is now
+refused), cancel the request (importing the result it returns if it had just
+finished), ask the host to stop it, and acknowledge once the request is
+terminal or the host has exited. If the host died, its
 agent process may outlive it until the exec timeout (phase 1 behaviour); the
 docs list this as residual risk.
 
 **Job janitor**: `tincan web` runs a machine-level pass every minute over
 `<state>/reviews/jobs/`: after the result is acknowledged or the job is
-cancelled — or 1 hour after `expires_at` for anything else — it stops the
-listener (`host.Down`, wait for exit) and removes the workspace; records and
+cancelled — or 1 hour after `expires_at` for anything else — it imports any
+terminal request result not yet imported, stops the listener (`host.Down`,
+wait for exit) and removes the workspace; records and
 tombstones are removed 7 days after `expires_at`. Workspaces are never
 registered as rooms (phase 1 §15.3), so room passes never see them.
 
@@ -556,8 +575,12 @@ before hosted listeners, in owner messages and agent handoffs.
   append one `suggested` message for the whole committee instead. Owner
   mentions reserve nothing, as for phase 1 owner turns.
 - *Build* (phase 1's `submit` pattern): a pass checks in a transaction that
-  the message is still `pending`, the thread open and the chain not stopped;
-  builds and publishes the review (§6.3 steps 2–4) — scope `uncommitted` in a
+  the message is still `pending`, the thread open and the chain not stopped.
+  If `reviews/<review_id>` (from the intent) already exists — a previous pass
+  published it and crashed — it is adopted after checking that its
+  `input.json` names this thread and message; nothing is rebuilt and the
+  working tree is not captured again. Otherwise it builds and publishes the
+  review (§6.3 steps 3–4) — scope `uncommitted` in a
   Git room, else `none`; question = the mentioning message plus the transcript
   before it, truncated oldest-first to 64 KiB; the working tree is captured at
   build time — then, in a second transaction, marks the message `running` if
@@ -569,10 +592,14 @@ before hosted listeners, in owner messages and agent handoffs.
   a short summary and the bundle path, `cancelled`, or `error` when every
   member failed). Nothing is appended once the thread is not open; `posted`
   is then set without appending.
-- *Stop and archive.* `finishStop` cancels `pending` committee messages
-  directly (never built), and sets `cancel_requested` on **every unsettled
-  review referenced by the thread's committee messages**, whatever the
-  message state, including reviews that closed with members still running. It
+- *Stop and archive.* `finishStop` gets a committee branch, separate from its
+  agent-request loop (committee messages have no request ID): it sets
+  `cancel_requested` on **every unsettled review referenced by the thread's
+  committee messages**, whatever the message state — including reviews that
+  closed with members still running — then, in its own transaction, marks
+  every `pending` or `running` committee message `cancelled` (a `pending` one
+  was never built) and sets `thread_done` on their reviews. Committee messages
+  are then terminal, so the barrier completes. It
   does not wait for remote acknowledgements; the review cancels them on its
   own and its card shows "cancelling n members". Archived threads are not
   reconciled, but their reviews are, because reviews reconcile from
@@ -803,3 +830,14 @@ non-goals). Resolution of each finding:
 | 10 | `rooms.Touch` does not prove coordination | Entry points confirm registry membership and refuse excluded rooms or a disabled registry (§6.3). |
 | 11 | Review IDs lack a machine namespace | The machine name is part of the derivation (§6.2). |
 | 12 | Synthesis Retry/Send guards | Synthesis is an ordinary `planTurn` handoff, so phase 1's guards apply unchanged (§6.10, §10). |
+
+### Round 5 (relaxed contract, 6 findings)
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | Restarting `creating` can discard a finished result | The workspace path is recorded before submission; recovery adopts its request (and result) before restarting (§6.6). |
+| 2 | Cancel/cleanup can destroy an uncollected result | All job writes under the job lock; results imported before cancel, tombstone and cleanup; a finished job stays `done` (§6.6). |
+| 3 | Archive leaves running committee messages running | Separate `finishStop` committee branch cancels reviews and terminalizes pending/running committee messages (§6.10). |
+| 4 | Build replay after publication conflicts | The intent's `review_id` is looked up first and an existing review adopted without recapturing the tree (§6.10). |
+| 5 | Settlement skips the committee completion transaction | `thread_done` is a settlement condition, retried each pass (§6.4). |
+| 6 | Bundle rewrite not byte-identical | `closing` state with an immutable `closure` snapshot; the bundle renders from it alone (§6.4). |
