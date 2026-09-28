@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- net.tincan.web.plist — install to ~/Library/LaunchAgents/ -->
+<!-- net.tincan.web.plist — install to ~/Library/LaunchAgents/.
+     Loopback TCP: the macOS Tailscale app is sandboxed and cannot reach a unix
+     socket in your home directory. Serve it with:
+     tailscale serve --bg --set-path /tincan http://127.0.0.1:7788 -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>net.tincan.web</string>
@@ -8,6 +11,7 @@
   <array>
     <string>/Users/USER/.local/bin/tincan</string>
     <string>web</string>
+    <string>--listen</string><string>127.0.0.1:7788</string>
     <string>--public-path</string><string>/tincan</string>
     <string>--peer</string><string>cachyos=https://cachyos.brill-decibel.ts.net/tincan/</string>
   </array>
