@@ -95,12 +95,14 @@ tincan web --listen 127.0.0.1:7788 ...
 ### CSRF and `--origin`
 
 Mutating requests (`POST`/`PATCH`) must carry `X-Tincan-Request: 1`; when they
-also carry an `Origin` header, it must match the scheme and host the browser
-is actually using — normally `X-Forwarded-Host` as `tailscale serve` sets it,
-falling back to `Host`. Behind a plain `tailscale serve --set-path` this works
-without any flag. If some other proxy rewrites `Host` without adding
-`X-Forwarded-Host`, pass `--origin https://<host>` to pin the origin mutations
-must match explicitly.
+also carry an `Origin` header, it is checked against the host the browser is
+actually using. Without `--origin`, only the *host* of `Origin` is compared
+(case-insensitively) — against `X-Forwarded-Host` as `tailscale serve` sets
+it, falling back to `Host`; the scheme is not checked. Behind a plain
+`tailscale serve --set-path` this works without any flag. If some other proxy
+rewrites `Host` without adding `X-Forwarded-Host`, pass
+`--origin https://<host>`: with `--origin` set, the whole `Origin` value
+(scheme and host together) must match it exactly instead.
 
 ## Two machines
 
@@ -127,7 +129,8 @@ caches your own refreshers already write to
 `~/.cache/<provider>-quota.json` or `~/.cache/<provider>-quota-<profile>.json`
 (for example a conky script polling every 60 s, or a LaunchAgent). `tincan
 web` never fetches quota data itself, never calls a provider API and never
-reads credentials — it only reads those cache files. Both the newer schema
+reads credentials — it only reads those cache files. A cache file larger than
+64 KiB, or that is not a regular file, is ignored. Both the newer schema
 (`percent`, `reset_at`, `short_percent`, `short_reset_at`, `fetched_at`,
 `attempted_at`, optional `error`) and the legacy one (`percent`, `reset_secs`,
 `fetched_at`, optional `short_percent`) are understood. A reading is `stale`
