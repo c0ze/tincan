@@ -1,0 +1,18 @@
+<!-- net.tincan.web.plist — install to ~/Library/LaunchAgents/ -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>net.tincan.web</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/USER/.local/bin/tincan</string>
+    <string>web</string>
+    <string>--public-path</string><string>/tincan</string>
+    <string>--peer</string><string>cachyos=https://cachyos.brill-decibel.ts.net/tincan/</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/Users/USER/Library/Logs/tincan-web.log</string>
+</dict>
+</plist>

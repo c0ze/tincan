@@ -14,6 +14,9 @@ logs and request state stay in the room. Near-zero tokens while idle.
 - **`tincan mcp`** — expose structured orchestration tools
   to an MCP client over stdio, with durable request handles and bounded waits.
   Launch and talk to workers from tools without opening a terminal for each one.
+- **`tincan web`** — a tailnet-only chat UI: threads per project,
+  `@codex review claude's change`, agents hand work to each other, one page
+  for several machines. See [`docs/web.md`](docs/web.md).
 
 Operating guide: [`PROTOCOL.md`](PROTOCOL.md). Client setup and session prompts:
 [`docs/setup.md`](docs/setup.md). Release notes: [`v2.0.0`](docs/releases/v2.0.0.md).

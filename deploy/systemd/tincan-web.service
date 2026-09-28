@@ -1,0 +1,12 @@
+# tincan-web.service — install to ~/.config/systemd/user/
+[Unit]
+Description=tincan web chat
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/tincan web --public-path /tincan --peer macmini=https://macmini.brill-decibel.ts.net/tincan/
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

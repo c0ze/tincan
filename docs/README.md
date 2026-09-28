@@ -7,6 +7,9 @@ Use these guides for tincan v2:
   session prompts and authentication troubleshooting.
 - [Operating protocol](../PROTOCOL.md): CLI and MCP arguments, delivery,
   persistence, cancellation, trust boundary and platform limits.
+- [Web chat](web.md): `tincan web` flags, the threat model, exposing it over
+  Tailscale, the two-machine link, quota panels and the service files under
+  `deploy/`.
 - [v2.0.0 release notes](releases/v2.0.0.md): changes, upgrade steps and validation.
 - [Contributor guide](contributing.md): local checks and release process.
 - [Tell skill](../skills/tell/SKILL.md) and
@@ -27,3 +30,5 @@ historical; use the guides above for current behavior.
   [phase-one implementation plan](superpowers/plans/2026-07-03-tincan-phase1.md).
 - [Hosted-listener design](superpowers/specs/2026-09-07-hosted-listeners-design.md)
   and [implementation plan](superpowers/plans/2026-09-07-hosted-listeners.md).
+- [Web chat design](superpowers/specs/2026-09-28-tincan-web-chat-design.md)
+  and [implementation plan](superpowers/plans/2026-09-28-tincan-web-chat.md).

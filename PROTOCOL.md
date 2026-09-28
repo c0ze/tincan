@@ -75,8 +75,13 @@ tincan down   <name> [--wait <sec=15>]
 tincan presets [--format table|json]
 tincan version [--format json]
 tincan mcp [--room <absolute-path>]
+tincan web [flags]
 tincan gc [--older-than 168h] [--room <path>]
 ```
+
+`tincan web` serves a tailnet-only chat UI over the rooms registered on this
+machine (and, with `--peer`, a linked machine's rooms too). See
+[`docs/web.md`](docs/web.md) for flags, the threat model and deployment.
 
 Messaging, hosted lifecycle and cleanup commands take `--room <path>` (default
 `.`); MCP binds its room at startup (default: the git work tree containing its
