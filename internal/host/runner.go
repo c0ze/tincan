@@ -15,11 +15,13 @@ import (
 
 // RunSpec is one rendered agent invocation.
 type RunSpec struct {
-	Argv    []string      // rendered command line; Argv[0] is resolved by ResolveExecutable
-	Dir     string        // working directory (the room)
-	Stdin   *string       // body to pipe to stdin, or nil for no stdin at all
-	OutFile string        // the {out} path when the preset replies via file, else ""
-	Timeout time.Duration // 0 = unbounded
+	Argv     []string          // rendered command line; Argv[0] is resolved by ResolveExecutable
+	Dir      string            // working directory (the room)
+	Stdin    *string           // body to pipe to stdin, or nil for no stdin at all
+	Env      map[string]string // preset env, applied after EnvUnset (spec §5.1)
+	EnvUnset []string          // inherited variables to remove
+	OutFile  string            // the {out} path when the preset replies via file, else ""
+	Timeout  time.Duration     // 0 = unbounded
 	// Output receives stdout/stderr chunks as they arrive. Calls are serialized.
 	Output         func(stream string, data []byte) error
 	MaxOutputBytes int // per stream; zero uses MaxCapturedOutput
@@ -92,9 +94,13 @@ func Run(ctx context.Context, spec RunSpec) Result {
 	if err != nil {
 		return Result{ExitCode: -1, Err: err, Duration: time.Since(start)}
 	}
+	env, err := composeEnv(agentEnv(), spec.EnvUnset, spec.Env)
+	if err != nil {
+		return Result{ExitCode: -1, Err: err, Duration: time.Since(start)}
+	}
 	cmd := exec.Command(path, spec.Argv[1:]...)
 	cmd.Dir = spec.Dir
-	cmd.Env = agentEnv()
+	cmd.Env = env
 	cmd.SysProcAttr = childAttr()
 	if spec.Stdin != nil {
 		cmd.Stdin = strings.NewReader(*spec.Stdin)

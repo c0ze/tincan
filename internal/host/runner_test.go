@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -231,4 +233,51 @@ func TestTailKeepsLastBytes(t *testing.T) {
 		}
 	}
 	_ = os.Getpid
+}
+
+func TestRunAppliesAccountProfileEnv(t *testing.T) {
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	t.Setenv("ANTHROPIC_API_KEY", "inherited")
+	t.Setenv("PROFILE_DIR", "inherited")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+	}
+	res := Run(context.Background(), RunSpec{
+		Argv: fakeExec("env", "ANTHROPIC_API_KEY", "PROFILE_DIR", "PROFILE_MODE"), Dir: t.TempDir(),
+		Env:      map[string]string{"PROFILE_DIR": "~/.claude-personal", "PROFILE_MODE": "work"},
+		EnvUnset: []string{"ANTHROPIC_API_KEY"},
+	})
+	if res.Err != nil || res.ExitCode != 0 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	want := "PROFILE_DIR=" + filepath.Join(home, ".claude-personal") + "\nPROFILE_MODE=work\n"
+	if string(res.Stdout) != want {
+		t.Fatalf("agent environment:\n%s\nwant:\n%s", res.Stdout, want)
+	}
+}
+
+func TestRunProfileTildeNeedsHomeDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("home directory comes from USERPROFILE and the profile API")
+	}
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	t.Setenv("HOME", "")
+	spec := RunSpec{Argv: fakeExec("env", "PROFILE_DIR"), Dir: t.TempDir(), Env: map[string]string{"PROFILE_DIR": "~/.p"}}
+	res := Run(context.Background(), spec)
+	if res.Err == nil || res.ExitCode != -1 {
+		t.Fatalf("ran without a home directory: %+v", res)
+	}
+	if body := ReplyBody(spec, res); !strings.HasPrefix(body, "ERROR exec: env PROFILE_DIR") {
+		t.Fatalf("reply = %q", body)
+	}
+}
+
+func TestComposeEnvWithoutProfileKeepsBase(t *testing.T) {
+	base := []string{"A=1", "B=2"}
+	got, err := composeEnv(base, nil, nil)
+	if err != nil || !reflect.DeepEqual(got, base) {
+		t.Fatalf("composeEnv changed base: %v %v", got, err)
+	}
 }

@@ -202,7 +202,7 @@ func handle(ctx context.Context, o ServeOptions, e *envelope.Envelope) string {
 		return "ERROR session: " + err.Error()
 	}
 	p := session.Preset
-	spec := RunSpec{Dir: o.Room, Timeout: time.Duration(p.ExecTimeoutSec) * time.Second,
+	spec := RunSpec{Dir: o.Room, Timeout: time.Duration(p.ExecTimeoutSec) * time.Second, Env: p.Env, EnvUnset: p.EnvUnset,
 		Output: func(stream string, data []byte) error {
 			if _, err := o.Log.Write(data); err != nil {
 				return err

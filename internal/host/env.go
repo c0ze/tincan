@@ -1,7 +1,11 @@
 package host
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -57,4 +61,53 @@ func agentEnv() []string {
 		}
 	}
 	return out
+}
+
+// composeEnv applies a preset's account profile on top of the scrubbed
+// environment (spec §5.1): names in unset are removed, then set adds or
+// replaces variables in key order. A value starting with "~/" expands against
+// the home directory; an unknown home directory is an error rather than a
+// literal "~". Names compare case-insensitively on Windows.
+func composeEnv(base, unset []string, set map[string]string) ([]string, error) {
+	if len(unset) == 0 && len(set) == 0 {
+		return base, nil
+	}
+	drop := make(map[string]bool, len(unset)+len(set))
+	for _, k := range unset {
+		drop[envName(k)] = true
+	}
+	for k := range set {
+		drop[envName(k)] = true
+	}
+	out := make([]string, 0, len(base)+len(set))
+	for _, kv := range base {
+		name, _, _ := strings.Cut(kv, "=")
+		if !drop[envName(name)] {
+			out = append(out, kv)
+		}
+	}
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := set[k]
+		if strings.HasPrefix(v, "~/") {
+			home, err := os.UserHomeDir()
+			if err != nil || home == "" {
+				return nil, fmt.Errorf("env %s: cannot expand ~/ because the home directory is unknown", k)
+			}
+			v = filepath.Join(home, v[2:])
+		}
+		out = append(out, k+"="+v)
+	}
+	return out, nil
+}
+
+func envName(name string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(name)
+	}
+	return name
 }

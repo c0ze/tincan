@@ -502,3 +502,12 @@ func TestServeRejectsInvalidName(t *testing.T) {
 		t.Fatal("want error for invalid name")
 	}
 }
+
+func TestServeRunsAgentWithPresetEnv(t *testing.T) {
+	p := Preset{Exec: fakeExec("env", "PROFILE_MODE"), Env: map[string]string{"PROFILE_MODE": "work"}}
+	_, sp, _, done, _ := startServe(t, p, "fake")
+	if reply := askVia(t, sp, "hi"); reply.Body != "PROFILE_MODE=work" {
+		t.Fatalf("reply body = %q", reply.Body)
+	}
+	stopServe(t, sp, done)
+}
