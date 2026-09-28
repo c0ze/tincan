@@ -297,6 +297,14 @@ with `--session persistent`. Persistent adapters manage output/resume flags, so
 remove conflicting `--continue`, `--resume` or session-ID flags from the
 configured command.
 
+Upgrading from a release without account profiles: an aliased preset that runs
+a supported CLI directly (for example `"claude-review": {"exec": ["claude", …]}`)
+used to be stateless and is now persistent by default, so its context carries
+across requests and its reply comes from the structured stream. Add
+`"session": "stateless"` to keep the old behaviour. Restart MCP clients and
+`tincan web` after upgrading: hosts are now launched with a private preset
+file, which listeners started by an older process do not know about.
+
 | Provider | Structured format | Explicit resume argument |
 |---|---|---|
 | Claude | `stream-json` with `--verbose` | `--resume <UUID>` |

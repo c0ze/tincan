@@ -196,6 +196,12 @@ func complete(sp *spool.Spool, o ServeOptions, d *spool.Delivery, body string) e
 func handle(ctx context.Context, o ServeOptions, e *envelope.Envelope) string {
 	started := time.Now()
 	logf(o.Log, "=== %s from=%s started=%s", e.ID, e.From, started.UTC().Format(time.RFC3339))
+	// Check the account environment before preparing a session: a run that
+	// cannot start must not leave a new conversation pending initialization.
+	if _, err := composeEnv(nil, o.Preset.EnvUnset, o.Preset.Env); err != nil {
+		logf(o.Log, "=== exit=error %v", err)
+		return "ERROR exec: " + err.Error()
+	}
 	session, err := PrepareSession(o.Room, o.Name, o.Label, o.Preset)
 	if err != nil {
 		logf(o.Log, "=== exit=error session: %v", err)

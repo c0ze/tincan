@@ -520,3 +520,25 @@ func TestServeKimiCleanupFollowsProviderNotLabel(t *testing.T) {
 	}
 	stopServe(t, sp, done)
 }
+
+func TestServeUnexpandableEnvDoesNotStrandSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("home directory comes from USERPROFILE and the profile API")
+	}
+	p := Preset{Exec: fakeExec("env", "PROFILE_DIR"), Provider: "claude", Env: map[string]string{"PROFILE_DIR": "~/.p"}}
+	room, sp, _, done, _ := startServe(t, p, "claude-personal")
+	t.Setenv("HOME", "")
+	for i := 0; i < 2; i++ {
+		if reply := askVia(t, sp, "hi"); !strings.HasPrefix(reply.Body, "ERROR exec: env PROFILE_DIR") {
+			t.Fatalf("reply %d = %q", i+1, reply.Body)
+		}
+	}
+	canonical, err := canonicalRoom(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sessionPath(canonical, "agent")); !os.IsNotExist(err) {
+		t.Fatalf("session record created for a run that never started: %v", err)
+	}
+	stopServe(t, sp, done)
+}
