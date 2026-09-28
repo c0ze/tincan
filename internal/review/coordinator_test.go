@@ -142,7 +142,7 @@ func TestHappyPathSubmitsCollectsClosesAndSettles(t *testing.T) {
 	clk := &clock{time.Now()}
 	c := &Coordinator{Transport: f, Now: clk.now}
 	ctx := context.Background()
-	c.Reconcile(ctx, room)
+	c.Reconcile(ctx, room, nil)
 	st, _ := ReadState(room, in.ReviewID)
 	if st.Members[0].State != "running" || st.Members[1].State != "running" || f.creates[st.Members[0].JobID] != 1 {
 		t.Fatalf("after submit: %+v", st.Members)
@@ -150,7 +150,7 @@ func TestHappyPathSubmitsCollectsClosesAndSettles(t *testing.T) {
 	f.finish(st.Members[0].JobID, "codex says ok")
 	f.finish(st.Members[1].JobID, "grok says ok")
 	clk.advance(6 * time.Second)
-	c.Reconcile(ctx, room)
+	c.Reconcile(ctx, room, nil)
 	st, _ = ReadState(room, in.ReviewID)
 	if st.Status != "closed" || st.Closure == nil {
 		t.Fatalf("not closed: %+v", st)
@@ -160,12 +160,12 @@ func TestHappyPathSubmitsCollectsClosesAndSettles(t *testing.T) {
 		t.Fatalf("bundle: %q", b)
 	}
 	clk.advance(16 * time.Second)
-	c.Reconcile(ctx, room)
+	c.Reconcile(ctx, room, nil)
 	st, _ = ReadState(room, in.ReviewID)
 	if !st.Settled || f.acks[st.Members[0].JobID] == 0 || f.acks[st.Members[1].JobID] == 0 {
 		t.Fatalf("not settled/acked: %+v acks=%v", st, f.acks)
 	}
-	c.Reconcile(ctx, room) // settled reviews are left alone
+	c.Reconcile(ctx, room, nil) // settled reviews are left alone
 	if f.creates[st.Members[0].JobID] != 1 {
 		t.Fatal("settled review resubmitted")
 	}
@@ -179,7 +179,7 @@ func TestOfflinePeerEndsWithinBounds(t *testing.T) {
 	c := &Coordinator{Transport: f, Now: clk.now}
 	ctx := context.Background()
 	for i := 0; i < 5; i++ {
-		c.Reconcile(ctx, room)
+		c.Reconcile(ctx, room, nil)
 		clk.advance(20 * time.Second)
 	}
 	st, _ := ReadState(room, in.ReviewID)
@@ -188,13 +188,13 @@ func TestOfflinePeerEndsWithinBounds(t *testing.T) {
 	}
 	f.finish(st.Members[0].JobID, "ok")
 	clk.t = in.Deadline.Add(time.Second)
-	c.Reconcile(ctx, room)
+	c.Reconcile(ctx, room, nil)
 	st, _ = ReadState(room, in.ReviewID)
 	if st.Members[1].State != "unreachable" || st.Status != "closed" {
 		t.Fatalf("at deadline: %+v", st)
 	}
 	clk.t = st.Members[1].ExpiresAt.Add(6 * time.Minute)
-	c.Reconcile(ctx, room)
+	c.Reconcile(ctx, room, nil)
 	st, _ = ReadState(room, in.ReviewID)
 	if !st.Settled {
 		t.Fatalf("never settled: %+v", st)
@@ -208,15 +208,15 @@ func TestLostCreateResponseIsAdoptedByPolling(t *testing.T) {
 	c := &Coordinator{Transport: f, Now: clk.now}
 	ctx := context.Background()
 	f.down["cachyos"] = true
-	c.Reconcile(ctx, room)
+	c.Reconcile(ctx, room, nil)
 	// The peer accepted a job whose response was lost, then went quiet.
 	f.jobs[in.ReviewID+"-0"] = &JobStatus{State: "running"}
 	clk.t = in.Deadline.Add(time.Second)
-	c.Reconcile(ctx, room)
+	c.Reconcile(ctx, room, nil)
 	f.down["cachyos"] = false
 	f.finish(in.ReviewID+"-0", "late but real")
 	clk.advance(6 * time.Second)
-	c.Reconcile(ctx, room)
+	c.Reconcile(ctx, room, nil)
 	if r, ok, _ := ReadResult(room, in.ReviewID, 0); !ok || r != "late but real" {
 		t.Fatalf("unreachable member's result not adopted: %q %v", r, ok)
 	}
@@ -228,7 +228,7 @@ func TestPermanentAndGoneCreateErrors(t *testing.T) {
 	f.createErr[in.ReviewID+"-0"] = statusErr(404)
 	f.createErr[in.ReviewID+"-1"] = statusErr(410)
 	c := &Coordinator{Transport: f, Now: time.Now}
-	c.Reconcile(context.Background(), room)
+	c.Reconcile(context.Background(), room, nil)
 	st, _ := ReadState(room, in.ReviewID)
 	if st.Members[0].State != "error" || st.Members[1].State != "expired" {
 		t.Fatalf("%+v", st.Members)
@@ -241,17 +241,17 @@ func TestCrashBetweenClosingAndClosedRerendersIdentically(t *testing.T) {
 	clk := &clock{time.Now()}
 	c := &Coordinator{Transport: f, Now: clk.now}
 	ctx := context.Background()
-	c.Reconcile(ctx, room)
+	c.Reconcile(ctx, room, nil)
 	f.finish(in.ReviewID+"-0", "result")
 	clk.advance(6 * time.Second)
-	c.Reconcile(ctx, room)
+	c.Reconcile(ctx, room, nil)
 	first, _, _ := ReadBundle(room, in.ReviewID)
 	st, _ := ReadState(room, in.ReviewID)
 	st.Status = "closing" // as if the process died before persisting "closed"
 	WriteState(room, in.ReviewID, st)
 	os.Remove(filepath.Join(Dir(room, in.ReviewID), "bundle.md"))
 	clk.advance(time.Hour)
-	c.Reconcile(ctx, room)
+	c.Reconcile(ctx, room, nil)
 	second, _, _ := ReadBundle(room, in.ReviewID)
 	if first == "" || first != second {
 		t.Fatalf("bundle changed:\n%s\n---\n%s", first, second)
@@ -264,17 +264,17 @@ func TestCancelAfterCloseStopsLateMemberButKeepsResults(t *testing.T) {
 	clk := &clock{time.Now()}
 	c := &Coordinator{Transport: f, Now: clk.now}
 	ctx := context.Background()
-	c.Reconcile(ctx, room)
+	c.Reconcile(ctx, room, nil)
 	f.finish(in.ReviewID+"-0", "on time")
 	clk.t = in.Deadline.Add(time.Second)
-	c.Reconcile(ctx, room)
+	c.Reconcile(ctx, room, nil)
 	st, _ := ReadState(room, in.ReviewID)
 	if st.Status != "closed" || !st.Members[1].Late {
 		t.Fatalf("late member: %+v", st)
 	}
 	RequestCancel(ctx, room, in.ReviewID)
 	clk.advance(16 * time.Second)
-	c.Reconcile(ctx, room)
+	c.Reconcile(ctx, room, nil)
 	st, _ = ReadState(room, in.ReviewID)
 	if f.cancels[in.ReviewID+"-1"] == 0 || st.Members[1].State != "cancelled" || st.Members[0].State != "done" {
 		t.Fatalf("cancel after close: %+v cancels=%v", st.Members, f.cancels)
@@ -288,7 +288,7 @@ func TestCancelBeforeSubmitNeverRuns(t *testing.T) {
 	room, in := published(t, []string{"a@macmini"}, 10*time.Minute, false)
 	f := newFake()
 	RequestCancel(context.Background(), room, in.ReviewID)
-	(&Coordinator{Transport: f, Now: time.Now}).Reconcile(context.Background(), room)
+	(&Coordinator{Transport: f, Now: time.Now}).Reconcile(context.Background(), room, nil)
 	st, _ := ReadState(room, in.ReviewID)
 	if st.Members[0].State != "cancelled" || f.creates[in.ReviewID+"-0"] != 0 || !st.Settled {
 		t.Fatalf("%+v creates=%v", st, f.creates)
@@ -299,7 +299,7 @@ func TestSkipExhaustedMembers(t *testing.T) {
 	room, in := published(t, []string{"codex@macmini", "grok@cachyos"}, 10*time.Minute, true)
 	f := newFake()
 	f.exhausted["codex"] = true
-	(&Coordinator{Transport: f, Now: time.Now}).Reconcile(context.Background(), room)
+	(&Coordinator{Transport: f, Now: time.Now}).Reconcile(context.Background(), room, nil)
 	st, _ := ReadState(room, in.ReviewID)
 	if st.Members[0].State != "skipped" || !strings.Contains(st.Members[0].Note, "weekly") || st.Members[1].State != "running" {
 		t.Fatalf("%+v", st.Members)
@@ -312,7 +312,7 @@ func TestStaleStagingRemoved(t *testing.T) {
 	os.MkdirAll(old, 0o700)
 	past := time.Now().Add(-2 * time.Hour)
 	os.Chtimes(old, past, past)
-	(&Coordinator{Transport: newFake(), Now: time.Now}).Reconcile(context.Background(), room)
+	(&Coordinator{Transport: newFake(), Now: time.Now}).Reconcile(context.Background(), room, nil)
 	if _, err := os.Stat(old); !os.IsNotExist(err) {
 		t.Fatal("stale staging kept")
 	}
@@ -357,7 +357,7 @@ func TestUnresponsiveMachineCostsOneCallPerPass(t *testing.T) {
 	room, _ := published(t, []string{"a@slow", "b@slow", "c@slow", "d@macmini"}, 10*time.Minute, false)
 	st := &slowTransport{fakeTransport: newFake()}
 	c := &Coordinator{Transport: st, Now: time.Now}
-	c.Reconcile(context.Background(), room)
+	c.Reconcile(context.Background(), room, nil)
 	if st.calls != 1 {
 		t.Fatalf("calls to the unresponsive machine in one pass: %d", st.calls)
 	}
@@ -374,4 +374,65 @@ func mustState(t *testing.T, room string) State {
 		t.Fatal(err)
 	}
 	return st
+}
+
+type fakeSink struct {
+	posted   map[string]string
+	complete int
+	done     bool
+}
+
+func (f *fakeSink) PostResult(ctx context.Context, in Input, m Member, text string) error {
+	f.posted[m.JobID] = text
+	return nil
+}
+
+func (f *fakeSink) Complete(ctx context.Context, in Input, st State) (bool, error) {
+	f.complete++
+	return f.done, nil
+}
+
+func TestThreadOriginPostsResultsAndCompletesBeforeSettling(t *testing.T) {
+	room, in := published(t, []string{"a@macmini"}, 10*time.Minute, false)
+	in.Origin = "thread:t1:m1"
+	writeJSON(filepath.Join(Dir(room, in.ReviewID), "input.json"), in)
+	f := newFake()
+	sink := &fakeSink{posted: map[string]string{}}
+	clk := &clock{time.Now()}
+	c := &Coordinator{Transport: f, Now: clk.now}
+	ctx := context.Background()
+	c.Reconcile(ctx, room, sink)
+	f.finish(in.ReviewID+"-0", "posted result")
+	clk.advance(20 * time.Second)
+	c.Reconcile(ctx, room, sink)
+	st, _ := ReadState(room, in.ReviewID)
+	if sink.posted[in.ReviewID+"-0"] != "posted result" || !st.Members[0].Posted {
+		t.Fatalf("result not posted: %+v %+v", sink.posted, st.Members[0])
+	}
+	if st.Settled || st.ThreadDone {
+		t.Fatal("settled before the thread completed the committee message")
+	}
+	sink.done = true
+	clk.advance(20 * time.Second)
+	c.Reconcile(ctx, room, sink)
+	st, _ = ReadState(room, in.ReviewID)
+	if !st.ThreadDone || !st.Settled {
+		t.Fatalf("not settled after completion: %+v", st)
+	}
+	n := sink.complete
+	c.Reconcile(ctx, room, sink)
+	if sink.complete != n {
+		t.Fatal("completion called again after thread_done")
+	}
+}
+
+func TestThreadOrigin(t *testing.T) {
+	if tid, mid, ok := ThreadOrigin("thread:t1:m2"); !ok || tid != "t1" || mid != "m2" {
+		t.Fatalf("%q %q %v", tid, mid, ok)
+	}
+	for _, bad := range []string{"mcp", "thread:", "thread:t1", "thread::m"} {
+		if _, _, ok := ThreadOrigin(bad); ok {
+			t.Errorf("accepted %q", bad)
+		}
+	}
 }

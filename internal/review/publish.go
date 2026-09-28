@@ -34,9 +34,12 @@ type PublishRequest struct {
 	Origin         string
 	Machine        string
 	CommitteesFrom *string
-	InCoordinator  bool
-	Registry       *rooms.Registry
-	Now            func() time.Time
+	// Snapshot, when set, is the committee frozen at mention time (thread
+	// reviews); it is used instead of looking the committee up again.
+	Snapshot      *committee.Committee
+	InCoordinator bool
+	Registry      *rooms.Registry
+	Now           func() time.Time
 }
 
 // Publish creates a review in the room (committees §6.3): coordinator check,
@@ -74,9 +77,17 @@ func Publish(ctx context.Context, req PublishRequest) (Input, State, error) {
 	if machine == "" {
 		return Input{}, State{}, errors.New("this machine's name is unknown")
 	}
-	c, err := committee.Lookup(req.StateDir, req.Committee, fromPeer)
-	if err != nil {
-		return Input{}, State{}, err
+	var c committee.Committee
+	if req.Snapshot != nil {
+		c = *req.Snapshot
+		if err := c.Normalize(); err != nil {
+			return Input{}, State{}, err
+		}
+	} else {
+		var err error
+		if c, err = committee.Lookup(req.StateDir, req.Committee, fromPeer); err != nil {
+			return Input{}, State{}, err
+		}
 	}
 	room, err := rooms.Canonical(req.Room)
 	if err != nil {

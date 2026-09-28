@@ -140,3 +140,16 @@ func TestRequestCancelUnknownCreatesNothing(t *testing.T) {
 		t.Fatalf("cancel of an unknown review created %s", Root(room))
 	}
 }
+func TestPublishUsesTheFrozenSnapshot(t *testing.T) {
+	req, _ := publishFixture(t)
+	snap := committee.Committee{Name: "reviewers", Version: 1, Members: []string{"only@macmini"}, DeadlineMinutes: 5}
+	req.Snapshot = &snap
+	req.Origin = "thread:t1:m1"
+	in, st, err := Publish(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Members) != 1 || in.Committee.Members[0] != "only@macmini" || in.Origin != "thread:t1:m1" {
+		t.Fatalf("snapshot ignored: %+v %+v", in, st.Members)
+	}
+}

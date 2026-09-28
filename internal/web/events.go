@@ -251,7 +251,7 @@ func (s *Server) runRoomPass(ctx context.Context, room rooms.Room, janitor bool)
 		s.logOnce(room.ID+"/reconcile", fmt.Sprintf("tincan web: %s: reconcile: %v", room.Name, err))
 	}
 	if s.coord != nil {
-		if err := s.coord.Reconcile(ctx, room.Path); err != nil {
+		if err := s.coord.Reconcile(ctx, room.Path, nil); err != nil {
 			s.logOnce(room.ID+"/reviews", fmt.Sprintf("tincan web: %s: reviews: %v", room.Name, err))
 		}
 	}

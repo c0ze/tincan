@@ -196,3 +196,16 @@ func Lookup(stateDir, name string, fromPeer bool) (Committee, error) {
 	}
 	return Committee{}, fmt.Errorf("committee %q not found %s", name, where)
 }
+
+// List returns the committees this machine sees: the peer cache when it
+// reads committees from a hub, else the hub store.
+func List(stateDir string, fromPeer bool) ([]Committee, error) {
+	if !fromPeer {
+		return NewStore(stateDir).List()
+	}
+	c, ok, err := LoadCache(stateDir)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return c.Committees, nil
+}

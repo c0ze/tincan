@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,24 @@ type JobStatus struct {
 	State  string `json:"state"`
 	Result string `json:"result,omitempty"`
 	Mode   string `json:"mode,omitempty"`
+}
+
+// ThreadSink is how the coordinator reaches the thread a review came from
+// (committees §6.10); the room's dispatcher implements it. It is called
+// with the review lock held (review → thread is the only lock nesting).
+type ThreadSink interface {
+	PostResult(ctx context.Context, in Input, m Member, text string) error
+	Complete(ctx context.Context, in Input, st State) (done bool, err error)
+}
+
+// ThreadOrigin parses "thread:<tid>:<mid>".
+func ThreadOrigin(origin string) (tid, mid string, ok bool) {
+	rest, found := strings.CutPrefix(origin, "thread:")
+	if !found {
+		return "", "", false
+	}
+	tid, mid, found = strings.Cut(rest, ":")
+	return tid, mid, found && tid != "" && mid != ""
 }
 
 type Transport interface {
@@ -119,7 +138,7 @@ func noteFailure(ctx context.Context, machine string, err error) {
 
 // Reconcile advances every unsettled review in room one step and removes
 // stale staging directories.
-func (c *Coordinator) Reconcile(ctx context.Context, room string) error {
+func (c *Coordinator) Reconcile(ctx context.Context, room string, sink ThreadSink) error {
 	ctx = context.WithValue(ctx, passKey{}, &pass{down: map[string]bool{}})
 	c.cleanStaging(room)
 	ids, err := List(room)
@@ -128,7 +147,7 @@ func (c *Coordinator) Reconcile(ctx context.Context, room string) error {
 	}
 	var errs []error
 	for _, id := range ids {
-		if err := c.reconcile(ctx, room, id); err != nil {
+		if err := c.reconcile(ctx, room, id, sink); err != nil {
 			errs = append(errs, fmt.Errorf("review %s: %w", id, err))
 		}
 	}
@@ -145,7 +164,7 @@ func (c *Coordinator) cleanStaging(room string) {
 	}
 }
 
-func (c *Coordinator) reconcile(ctx context.Context, room, id string) error {
+func (c *Coordinator) reconcile(ctx context.Context, room, id string, sink ThreadSink) error {
 	st, err := ReadState(room, id)
 	if err != nil || st.Settled {
 		return err
@@ -170,6 +189,37 @@ func (c *Coordinator) reconcile(ctx context.Context, room, id string) error {
 	}
 	if err := c.close(room, in, &st, save); err != nil {
 		return err
+	}
+	if _, _, ok := ThreadOrigin(in.Origin); ok && sink != nil {
+		for i := range st.Members {
+			m := &st.Members[i]
+			if m.Posted {
+				continue
+			}
+			text, has, _ := ReadResult(room, id, m.Index)
+			if !has {
+				continue
+			}
+			if err := sink.PostResult(ctx, in, *m, text); err != nil {
+				return err
+			}
+			m.Posted = true
+			if err := save(); err != nil {
+				return err
+			}
+		}
+		if (st.Status == "closed" || st.Status == "cancelled") && !st.ThreadDone {
+			done, err := sink.Complete(ctx, in, st)
+			if err != nil {
+				return err
+			}
+			if done {
+				st.ThreadDone = true
+				if err := save(); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	if c.settled(room, in, st) {
 		st.Settled = true
@@ -405,6 +455,16 @@ func (c *Coordinator) close(room string, in Input, st *State, save func() error)
 func (c *Coordinator) settled(room string, in Input, st State) bool {
 	if st.Status != "closed" && st.Status != "cancelled" {
 		return false
+	}
+	if _, _, ok := ThreadOrigin(in.Origin); ok {
+		if !st.ThreadDone {
+			return false
+		}
+		for _, m := range st.Members {
+			if _, has, _ := ReadResult(room, in.ReviewID, m.Index); has && !m.Posted {
+				return false
+			}
+		}
 	}
 	now := c.now()
 	for _, m := range st.Members {

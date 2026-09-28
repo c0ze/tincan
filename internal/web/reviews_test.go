@@ -53,7 +53,7 @@ func TestReviewAcrossTwoMachines(t *testing.T) {
 	deadline := time.Now().Add(40 * time.Second)
 	var st review.State
 	for time.Now().Before(deadline) {
-		hub.coord.Reconcile(context.Background(), room)
+		hub.coord.Reconcile(context.Background(), room, nil)
 		st, _ = review.ReadState(room, in.ReviewID)
 		if st.Status == "closed" {
 			break
