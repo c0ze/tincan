@@ -511,3 +511,12 @@ func TestServeRunsAgentWithPresetEnv(t *testing.T) {
 	}
 	stopServe(t, sp, done)
 }
+
+func TestServeKimiCleanupFollowsProviderNotLabel(t *testing.T) {
+	p := Preset{Exec: fakeExec("stdout", "answer\nTo resume this session: kimi -r x"), Provider: "kimi", Session: "stateless"}
+	_, sp, _, done, _ := startServe(t, p, "kimi-work")
+	if reply := askVia(t, sp, "hi"); reply.Body != "answer" {
+		t.Fatalf("reply body = %q", reply.Body)
+	}
+	stopServe(t, sp, done)
+}

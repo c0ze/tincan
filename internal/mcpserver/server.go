@@ -94,7 +94,8 @@ func (s *service) presetsTool(ctx context.Context, req *mcp.CallToolRequest, in 
 			_, err := host.ResolveExecutable(p.Exec[0], s.Room)
 			available = err == nil
 		}
-		out.Presets = append(out.Presets, PresetView{Name: name, Available: available, SessionSupported: host.SupportsSessions(name)})
+		provider, _ := host.SessionProvider(p, name)
+		out.Presets = append(out.Presets, PresetView{Name: name, Available: available, SessionSupported: provider != ""})
 	}
 	return nil, out, nil
 }

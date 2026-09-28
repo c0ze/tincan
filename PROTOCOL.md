@@ -289,11 +289,13 @@ are trimmed.
 ### Conversations and reset
 
 The `session` field in a preset can be `persistent` or `stateless`. An omitted
-field selects persistent mode only for the native `claude`, `grok`, `agy` and
-`kimi` executables under their respective preset labels. A custom wrapper must
-explicitly opt into a supported adapter; its executable and other arguments are
-preserved. Persistent adapters manage output/resume flags, so remove conflicting
-`--continue`, `--resume` or session-ID flags from the configured command.
+field selects persistent mode when the preset's provider is known: its
+`provider` field, or the base name of its executable (`claude`, `grok`, `agy`,
+`kimi`). So `claude-personal` running `claude` keeps its conversation. A custom
+wrapper stays stateless unless it sets `provider`; an ad hoc `--exec` opts in
+with `--session persistent`. Persistent adapters manage output/resume flags, so
+remove conflicting `--continue`, `--resume` or session-ID flags from the
+configured command.
 
 | Provider | Structured format | Explicit resume argument |
 |---|---|---|
@@ -303,8 +305,10 @@ preserved. Persistent adapters manage output/resume flags, so remove conflicting
 | Kimi | `stream-json` | `--session <session_UUID>` |
 
 Saved pointers in `.tincan/sessions/<name>.json` survive host and MCP restarts.
-Each pointer records its provider and preset identity; changing those requires
-an explicit reset. The adapters never resume a provider's most recent global
+Each pointer records its provider and a fingerprint of the command and account
+profile (`env`, `env_unset`); changing those requires an explicit reset.
+Pointers written before account profiles migrate automatically when nothing
+else changed. The adapters never resume a provider's most recent global
 conversation. If initialization is interrupted before a usable ID is observed,
 the next request fails with a reset instruction. A failed resume preserves the
 saved pointer and error; it never silently starts a replacement conversation.

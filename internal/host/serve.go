@@ -240,7 +240,8 @@ func handle(ctx context.Context, o ServeOptions, e *envelope.Envelope) string {
 	if err != nil {
 		return "ERROR session: " + err.Error()
 	}
-	return PostProcess(o.Label, body)
+	provider, _ := SessionProvider(o.Preset, o.Label)
+	return PostProcess(provider, body)
 }
 
 // Canonicalize the system temporary directory before creating the private

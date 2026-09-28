@@ -310,12 +310,12 @@ func Resolve(presets map[string]Preset, name, presetFlag string, ov Overrides) (
 }
 
 // PostProcess applies the preset-level reply cleanup (spec §5): trailing
-// whitespace is trimmed for every preset; "kimi" additionally drops the
-// trailing "To resume this session: …" line its CLI appends. Nothing else is
-// rewritten.
-func PostProcess(label, body string) string {
+// whitespace is trimmed for every preset; a kimi provider (see
+// SessionProvider) additionally drops the trailing "To resume this session: …"
+// line its CLI appends. Nothing else is rewritten.
+func PostProcess(provider, body string) string {
 	body = strings.TrimRight(body, " \t\r\n")
-	if label == "kimi" {
+	if provider == "kimi" {
 		lines := strings.Split(body, "\n")
 		if strings.HasPrefix(strings.TrimSpace(lines[len(lines)-1]), "To resume this session:") {
 			body = strings.TrimRight(strings.Join(lines[:len(lines)-1], "\n"), " \t\r\n")

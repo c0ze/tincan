@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,36 +28,88 @@ func SupportsSessions(label string) bool {
 	}
 }
 
+// SessionProvider names the persistent-session adapter for a preset (spec
+// §5.3): the explicit provider, else the executable's base name when it is a
+// supported adapter, else a supported label. implicit reports whether the
+// configuration itself identifies the adapter, which makes persistent the
+// default. A label alone (a wrapper under a provider's name) and an ad hoc
+// --exec (label "custom") only permit an explicit opt-in, as in phase 1.
+func SessionProvider(p Preset, label string) (provider string, implicit bool) {
+	if p.Provider != "" {
+		return p.Provider, true
+	}
+	if len(p.Exec) > 0 {
+		if base := strings.TrimSuffix(filepath.Base(p.Exec[0]), ".exe"); SupportsSessions(base) {
+			return base, label != "custom"
+		}
+	}
+	if SupportsSessions(label) {
+		return label, false
+	}
+	return "", false
+}
+
 // WithSession selects a conversation policy without rewriting the executable.
-// Custom commands remain stateless unless their configuration or caller opts in
-// to a known provider adapter explicitly.
+// Custom commands remain stateless unless their configuration names a
+// provider or the caller opts in explicitly.
 func WithSession(p Preset, label, mode string) (Preset, error) {
+	provider, implicit := SessionProvider(p, label)
 	if mode == "" {
 		mode = p.Session
 	}
 	if mode == "" {
 		mode = "stateless"
-		if SupportsSessions(label) && len(p.Exec) > 0 && strings.TrimSuffix(filepath.Base(p.Exec[0]), ".exe") == label {
+		if implicit {
 			mode = "persistent"
 		}
 	}
 	if mode != "persistent" && mode != "stateless" {
 		return Preset{}, fmt.Errorf("session must be persistent or stateless, got %q", mode)
 	}
-	if mode == "persistent" && !SupportsSessions(label) {
-		return Preset{}, fmt.Errorf("preset %q has no supported persistent session adapter", label)
+	if mode == "persistent" && provider == "" {
+		return Preset{}, fmt.Errorf("preset %q has no supported persistent session adapter; set \"provider\" to claude, grok, agy or kimi", label)
 	}
 	p.Session = mode
 	p.Exec = append([]string(nil), p.Exec...)
 	return p, nil
 }
 
+// sessionRecordVersion 2 fingerprints provider and account profile; records
+// without a version are phase 1's (see PrepareSession's migration).
+const sessionRecordVersion = 2
+
 type sessionRecord struct {
+	Version  int       `json:"version,omitempty"`
 	Provider string    `json:"provider"`
 	Preset   string    `json:"preset"`
 	ID       string    `json:"id,omitempty"`
 	Ready    bool      `json:"ready"`
 	Updated  time.Time `json:"updated"`
+}
+
+// sessionFingerprint identifies the conversation's owner: provider, command
+// and account profile. Env values are hashed, never stored.
+func sessionFingerprint(p Preset, provider string) string {
+	unset := append([]string(nil), p.EnvUnset...)
+	sort.Strings(unset)
+	identity, _ := json.Marshal(struct {
+		Version      int
+		Provider     string
+		Exec         []string
+		Stdin, Reply string
+		Env          map[string]string
+		EnvUnset     []string
+	}{sessionRecordVersion, provider, p.Exec, p.Stdin, p.Reply, p.Env, unset})
+	return fmt.Sprintf("%x", sha256.Sum256(identity))
+}
+
+// legacySessionFingerprint is phase 1's fingerprint, kept to migrate records.
+func legacySessionFingerprint(p Preset) string {
+	identity, _ := json.Marshal(struct {
+		Exec         []string
+		Stdin, Reply string
+	}{p.Exec, p.Stdin, p.Reply})
+	return fmt.Sprintf("%x", sha256.Sum256(identity))
 }
 
 func sessionPath(room, name string) string {
@@ -92,43 +145,50 @@ func PrepareSession(room, name, label string, p Preset) (*SessionRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	argv, err := sessionArgs(p.Exec, label)
+	provider, _ := SessionProvider(p, label)
+	argv, err := sessionArgs(p.Exec, provider)
 	if err != nil {
 		return nil, err
 	}
 	s.path = sessionPath(room, name)
-	identity, _ := json.Marshal(struct {
-		Exec         []string
-		Stdin, Reply string
-	}{p.Exec, p.Stdin, p.Reply})
-	fingerprint := fmt.Sprintf("%x", sha256.Sum256(identity))
-	s.record = sessionRecord{Provider: label, Preset: fingerprint}
+	fingerprint := sessionFingerprint(p, provider)
+	s.record = sessionRecord{Version: sessionRecordVersion, Provider: provider, Preset: fingerprint}
 	data, err := fsutil.ReadFile(s.path, 16<<10)
 	resume := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read session: %w", err)
 	}
+	migrated := false
 	if resume {
+		// Decode into a zero record: phase 1 files have no version field, and
+		// a prefilled Version would hide that.
+		s.record = sessionRecord{}
 		if err := json.Unmarshal(data, &s.record); err != nil {
 			return nil, fmt.Errorf("read session: %w", err)
 		}
-		if s.record.Provider != label {
-			return nil, fmt.Errorf("listener session belongs to %q, not %q; stop and reset the listener first", s.record.Provider, label)
+		// Phase 1 records carry no version and fingerprint only the command;
+		// they migrate when nothing an account profile adds has changed.
+		if s.record.Version == 0 && s.record.Provider == provider && s.record.Preset == legacySessionFingerprint(p) &&
+			len(p.Env) == 0 && len(p.EnvUnset) == 0 {
+			s.record.Version, s.record.Preset, migrated = sessionRecordVersion, fingerprint, true
+		}
+		if s.record.Provider != provider {
+			return nil, fmt.Errorf("listener session belongs to %q, not %q; stop and reset the listener first", s.record.Provider, provider)
 		}
 		if s.record.Preset != fingerprint {
 			return nil, errors.New("listener preset changed since its session was created; stop and reset the listener explicitly")
 		}
-		if !s.record.Ready || !validSessionID(label, s.record.ID) {
+		if !s.record.Ready || !validSessionID(provider, s.record.ID) {
 			return nil, errors.New("previous session initialization was interrupted; inspect the previous run, then stop and reset the listener explicitly")
 		}
 		flag := "--resume"
-		if label == "agy" {
+		if provider == "agy" {
 			flag = "--conversation"
-		} else if label == "kimi" {
+		} else if provider == "kimi" {
 			flag = "--session"
 		}
 		argv = appendSessionOptions(argv, flag, s.record.ID)
-	} else if label == "claude" || label == "grok" {
+	} else if provider == "claude" || provider == "grok" {
 		id, err := sessionUUID()
 		if err != nil {
 			return nil, err
@@ -137,9 +197,9 @@ func PrepareSession(room, name, label string, p Preset) (*SessionRun, error) {
 		argv = appendSessionOptions(argv, "--session-id", id)
 	}
 	s.Preset.Exec, s.Preset.Reply = argv, "stdout"
-	s.parser.provider = label
+	s.parser.provider = provider
 	s.parser.onSession = s.observeID
-	if !resume {
+	if !resume || migrated {
 		if err := s.save(); err != nil {
 			return nil, err
 		}
@@ -147,7 +207,7 @@ func PrepareSession(room, name, label string, p Preset) (*SessionRun, error) {
 	return s, nil
 }
 
-func sessionArgs(argv []string, label string) ([]string, error) {
+func sessionArgs(argv []string, provider string) ([]string, error) {
 	if len(argv) == 0 {
 		return nil, errors.New("empty agent command")
 	}
@@ -163,7 +223,7 @@ func sessionArgs(argv []string, label string) ([]string, error) {
 		case "--continue", "-c", "--resume", "-r", "--session-id", "--conversation", "--session", "-S", "--fork-session", "--no-session-persistence":
 			return nil, fmt.Errorf("persistent session adapter owns %s; remove that preset argument or use stateless mode", key)
 		case "-s":
-			if label == "grok" {
+			if provider == "grok" {
 				return nil, errors.New("persistent session adapter owns -s; remove that preset argument")
 			}
 		case "--output-format":
@@ -178,11 +238,11 @@ func sessionArgs(argv []string, label string) ([]string, error) {
 		out = append(out, arg)
 	}
 	format := "stream-json"
-	if label == "grok" {
+	if provider == "grok" {
 		format = "streaming-json"
 	}
 	out = appendSessionOptions(out, "--output-format", format)
-	if label == "claude" && !hasExactArg(out, "--verbose") {
+	if provider == "claude" && !hasExactArg(out, "--verbose") {
 		out = appendSessionOptions(out, "--verbose")
 	}
 	return out, nil

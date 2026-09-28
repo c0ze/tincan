@@ -396,3 +396,141 @@ func TestSessionStderrStaysPrivateButFailuresKeepDetails(t *testing.T) {
 		t.Fatalf("stateless stream behavior changed: %q, %v", progress, err)
 	}
 }
+
+func TestSessionProviderFromExecutableNotLabel(t *testing.T) {
+	for _, c := range []struct {
+		name, label string
+		p           Preset
+		provider    string
+		implicit    bool
+	}{
+		{"native", "claude", Preset{Exec: []string{"claude", "-p", "{body}"}}, "claude", true},
+		{"alias", "claude-personal", Preset{Exec: []string{"claude", "-p", "{body}"}}, "claude", true},
+		{"windows exe", "kimi-work", Preset{Exec: []string{"kimi.exe", "-p", "{body}"}}, "kimi", true},
+		{"absolute path", "grok-2", Preset{Exec: []string{"/opt/bin/grok", "-p", "{body}"}}, "grok", true},
+		{"explicit wrapper", "mine", Preset{Exec: []string{"my-wrapper"}, Provider: "agy"}, "agy", true},
+		{"wrapper under supported label", "claude", Preset{Exec: []string{"custom-wrapper"}}, "claude", false},
+		{"ad hoc exec", "custom", Preset{Exec: []string{"claude", "-p", "{body}"}}, "claude", false},
+		{"unsupported", "codex-gmail", Preset{Exec: []string{"codex", "exec"}}, "", false},
+	} {
+		provider, implicit := SessionProvider(c.p, c.label)
+		if provider != c.provider || implicit != c.implicit {
+			t.Errorf("%s: got (%q, %v), want (%q, %v)", c.name, provider, implicit, c.provider, c.implicit)
+		}
+	}
+}
+
+func TestWithSessionDefaultsFollowProvider(t *testing.T) {
+	claude := Preset{Exec: []string{"claude", "-p", "{body}"}}
+	if p, err := WithSession(claude, "claude-personal", ""); err != nil || p.Session != "persistent" {
+		t.Fatalf("alias not persistent: %+v %v", p, err)
+	}
+	if p, err := WithSession(claude, "custom", ""); err != nil || p.Session != "stateless" {
+		t.Fatalf("ad hoc exec became persistent: %+v %v", p, err)
+	}
+	if p, err := WithSession(claude, "custom", "persistent"); err != nil || p.Session != "persistent" {
+		t.Fatalf("ad hoc exec cannot opt in: %+v %v", p, err)
+	}
+	codex := Preset{Exec: []string{"codex", "exec"}}
+	if _, err := WithSession(codex, "codex-gmail", "persistent"); err == nil || !strings.Contains(err.Error(), "provider") {
+		t.Fatalf("unsupported persistent accepted or unhelpful: %v", err)
+	}
+}
+
+func TestAliasPresetKeepsPersistentSession(t *testing.T) {
+	room := t.TempDir()
+	p := Builtin()["claude"]
+	first, err := PrepareSession(room, "one", "claude-personal", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Preset.Session != "persistent" || first.record.Provider != "claude" || !hasExactArg(first.Preset.Exec, "--session-id") {
+		t.Fatalf("alias did not use the claude adapter: %+v %q", first.record, first.Preset.Exec)
+	}
+	id := first.record.ID
+	feedSession(t, first, sessionFixture("claude", id))
+	if _, err := first.Reply(RunSpec{}, Result{ExitCode: 0}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := PrepareSession(room, "one", "claude-personal", p)
+	if err != nil || !hasExactArg(second.Preset.Exec, "--resume") || !hasExactArg(second.Preset.Exec, id) {
+		t.Fatalf("alias did not resume: %q %v", second.Preset.Exec, err)
+	}
+}
+
+func TestSessionFingerprintCoversAccountProfile(t *testing.T) {
+	room := t.TempDir()
+	p := Builtin()["claude"]
+	p.Env = map[string]string{"CLAUDE_CONFIG_DIR": "~/.claude-a"}
+	first, err := PrepareSession(room, "one", "claude", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedSession(t, first, sessionFixture("claude", first.record.ID))
+	if _, err := first.Reply(RunSpec{}, Result{ExitCode: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := PrepareSession(room, "one", "claude", p); err != nil || !hasExactArg(again.Preset.Exec, first.record.ID) {
+		t.Fatalf("same profile did not resume: %v", err)
+	}
+	otherAccount := p
+	otherAccount.Env = map[string]string{"CLAUDE_CONFIG_DIR": "~/.claude-b"}
+	unset := p
+	unset.EnvUnset = []string{"ANTHROPIC_API_KEY"}
+	for name, changed := range map[string]Preset{"env value": otherAccount, "env_unset": unset} {
+		if _, err := PrepareSession(room, "one", "claude", changed); err == nil || !strings.Contains(err.Error(), "preset changed") {
+			t.Errorf("%s change resumed another account's session: %v", name, err)
+		}
+	}
+	data, err := os.ReadFile(first.path)
+	if err != nil || strings.Contains(string(data), ".claude-a") {
+		t.Fatalf("session record stores an env value: %s", data)
+	}
+}
+
+func TestLegacySessionRecordMigrates(t *testing.T) {
+	const id = "0b8a3f7e-8f5c-4c1e-9a55-3f0e6d2c1b4a"
+	write := func(t *testing.T, room string, rec sessionRecord) string {
+		t.Helper()
+		canonical, err := canonicalRoom(room)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := json.Marshal(rec)
+		path := sessionPath(canonical, "one")
+		if err := fsutil.WriteFileAtomic(path, data); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	p := Builtin()["claude"]
+	wp, err := WithSession(p, "claude", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	room := t.TempDir()
+	path := write(t, room, sessionRecord{Provider: "claude", Preset: legacySessionFingerprint(wp), ID: id, Ready: true})
+	s, err := PrepareSession(room, "one", "claude", p)
+	if err != nil || !hasExactArg(s.Preset.Exec, id) {
+		t.Fatalf("legacy record not resumed: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	var rec sessionRecord
+	if err := json.Unmarshal(data, &rec); err != nil || rec.Version != sessionRecordVersion || rec.Preset != sessionFingerprint(wp, "claude") || rec.ID != id {
+		t.Fatalf("legacy record not upgraded: %s %v", data, err)
+	}
+
+	stale := t.TempDir()
+	write(t, stale, sessionRecord{Provider: "claude", Preset: "not-the-fingerprint", ID: id, Ready: true})
+	if _, err := PrepareSession(stale, "one", "claude", p); err == nil || !strings.Contains(err.Error(), "preset changed") {
+		t.Fatalf("mismatched legacy record accepted: %v", err)
+	}
+
+	profiled := t.TempDir()
+	write(t, profiled, sessionRecord{Provider: "claude", Preset: legacySessionFingerprint(wp), ID: id, Ready: true})
+	withEnv := p
+	withEnv.Env = map[string]string{"CLAUDE_CONFIG_DIR": "~/.claude-b"}
+	if _, err := PrepareSession(profiled, "one", "claude", withEnv); err == nil {
+		t.Fatal("legacy record migrated onto an account profile")
+	}
+}

@@ -56,7 +56,12 @@ func fixture(t *testing.T) host.Preset {
 
 func connect(t *testing.T, room string) *mcp.ClientSession {
 	t.Helper()
-	server, err := mcpserver.New(mcpserver.Options{Room: room, Presets: map[string]host.Preset{"fixture": fixture(t)}})
+	return connectPresets(t, room, map[string]host.Preset{"fixture": fixture(t)})
+}
+
+func connectPresets(t *testing.T, room string, presets map[string]host.Preset) *mcp.ClientSession {
+	t.Helper()
+	server, err := mcpserver.New(mcpserver.Options{Room: room, Presets: presets})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,4 +268,24 @@ func TestStdioTransport(t *testing.T) {
 		t.Fatal(result)
 	}
 	call(t, cs, "tincan_stop", map[string]any{"name": "fixture"})
+}
+
+func TestPresetsReportSessionSupportFromProvider(t *testing.T) {
+	cs := connectPresets(t, t.TempDir(), map[string]host.Preset{
+		"claude-personal": {Exec: []string{"claude", "-p", "{body}"}, Stdin: "none", Reply: "stdout", Env: map[string]string{"CLAUDE_CONFIG_DIR": "/secret"}},
+		"codex-gmail":     {Exec: []string{"codex", "exec"}, Stdin: "none", Reply: "stdout"},
+	})
+	out := call(t, cs, "tincan_presets", map[string]any{})
+	data, _ := json.Marshal(out)
+	if strings.Contains(string(data), "/secret") {
+		t.Fatalf("presets tool leaked an env value: %s", data)
+	}
+	got := map[string]bool{}
+	for _, v := range out["presets"].([]any) {
+		m := v.(map[string]any)
+		got[m["name"].(string)] = m["session_supported"] == true
+	}
+	if !got["claude-personal"] || got["codex-gmail"] {
+		t.Fatalf("session_supported = %v", got)
+	}
 }
