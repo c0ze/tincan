@@ -55,6 +55,9 @@ func (s *Server) apiRoutes() {
 	s.mux.HandleFunc("GET /api/rooms/{rid}/agents/{name}/log", s.agentLog)
 	s.mux.HandleFunc("GET /api/quotas", s.apiQuotas)
 	s.mux.HandleFunc("GET /api/presets", s.apiPresets)
+	s.mux.HandleFunc("GET /api/committees", s.listCommittees)
+	s.mux.HandleFunc("PUT /api/committees/{name}", s.putCommittee)
+	s.mux.HandleFunc("DELETE /api/committees/{name}", s.deleteCommittee)
 }
 
 func (s *Server) apiQuotas(w http.ResponseWriter, r *http.Request) {

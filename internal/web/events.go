@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/c0ze/tincan/v2/internal/committee"
 	"github.com/c0ze/tincan/v2/internal/quota"
 	"github.com/c0ze/tincan/v2/internal/rooms"
 	"github.com/c0ze/tincan/v2/internal/thread"
@@ -21,7 +22,7 @@ import (
 )
 
 type note struct {
-	Kind   string `json:"kind"` // thread | messages | activity | peer | quota
+	Kind   string `json:"kind"` // thread | messages | activity | peer | quota | committees
 	Room   string `json:"room,omitempty"`
 	Thread string `json:"thread,omitempty"`
 	Seq    int64  `json:"seq,omitempty"`
@@ -121,6 +122,9 @@ func (s *Server) scan(list []rooms.Room) {
 		}
 		next["q:"] = fp
 	}
+	if s.cfg.StateDir != "" {
+		next["c:"] = statFP(committee.NewStore(s.cfg.StateDir).Path()) + statFP(committee.CachePath(s.cfg.StateDir))
+	}
 	s.hub.mu.Lock()
 	prev := s.hub.fp
 	s.hub.fp = next
@@ -142,11 +146,23 @@ func (s *Server) scan(list []rooms.Room) {
 			notes = append(notes, note{Kind: "messages", Room: rid, Thread: tid})
 		case 'q':
 			notes = append(notes, note{Kind: "quota"})
+		case 'c':
+			notes = append(notes, note{Kind: "committees"})
 		}
 	}
 	for _, n := range notes {
 		s.hub.publish(n)
 	}
+}
+
+// sortedPeerNames returns the configured peer names in sorted order.
+func sortedPeerNames(m map[string]*peer) []string {
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // sortedKeys returns m's keys in sorted order, for a stable fingerprint.

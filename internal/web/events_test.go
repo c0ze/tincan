@@ -302,3 +302,27 @@ func TestTickWritesHeartbeat(t *testing.T) {
 		t.Fatal("tick did not make the coordinator alive")
 	}
 }
+
+func TestScanPublishesCommitteesNote(t *testing.T) {
+	s := testServer(t)
+	state, _ := filepath.EvalSymlinks(t.TempDir())
+	s.cfg.StateDir = state
+	ch, unsubscribe := s.hub.subscribe()
+	defer unsubscribe()
+	s.scan(nil) // baseline
+	drain(ch)
+	if err := os.WriteFile(filepath.Join(state, "committees.json"), []byte(`{"committees":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.scan(nil)
+	for {
+		select {
+		case n := <-ch:
+			if n.Kind == "committees" {
+				return
+			}
+		default:
+			t.Fatal("no committees note after committees.json changed")
+		}
+	}
+}

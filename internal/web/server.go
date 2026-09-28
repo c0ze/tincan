@@ -64,6 +64,9 @@ type Config struct {
 	// StateDir is the shared tincan state directory (rooms.StateDir()).
 	// Empty disables the heartbeat and committee storage (tests).
 	StateDir string
+	// CommitteesFrom names the peer that hosts committee definitions; ""
+	// makes this machine the hub.
+	CommitteesFrom string
 }
 
 type Server struct {
