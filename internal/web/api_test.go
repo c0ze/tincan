@@ -374,3 +374,11 @@ func fakeAgentName() string {
 	}
 	return "agent"
 }
+
+func TestQuotaStatusEndpoint(t *testing.T) {
+	s, _ := apiServer(t)
+	rec := do(t, s.Handler(), "GET", "/api/presets/claude/quota-status", "", ownerHdr())
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"exhausted":false`) {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+}
