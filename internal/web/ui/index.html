@@ -8,5 +8,38 @@
 <link rel="stylesheet" href="{{.Base}}app.css">
 <script defer src="{{.Base}}app.js"></script>
 </head>
-<body></body>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand"><button id="close-drawer" class="icon" aria-label="Close menu">✕</button>tincan</div>
+    <nav id="machines"></nav>
+    <label class="toggle"><input type="checkbox" id="show-hidden"> show hidden rooms</label>
+  </aside>
+  <main id="main">
+    <header id="top">
+      <button id="open-drawer" class="icon" aria-label="Menu">☰</button>
+      <h1 id="title">Pick a room</h1>
+      <div id="chips"></div>
+      <div class="actions">
+        <button id="archive" class="secondary" hidden>Archive</button>
+        <button id="stop" class="danger" hidden>■ Stop</button>
+      </div>
+    </header>
+    <section id="view"></section>
+    <form id="composer" hidden>
+      <div id="suggest" hidden></div>
+      <textarea id="input" rows="2" placeholder="Message… (@ to mention an agent, Enter to send, Shift+Enter for a new line)"></textarea>
+      <button type="submit">Send</button>
+    </form>
+  </main>
+</div>
+<dialog id="new-thread">
+  <form method="dialog" id="new-thread-form">
+    <h2>New thread</h2>
+    <label>Title <input id="nt-title" required maxlength="120"></label>
+    <label>Primary agent <select id="nt-primary"></select></label>
+    <menu><button value="cancel" formnovalidate class="secondary">Cancel</button><button value="ok">Create</button></menu>
+  </form>
+</dialog>
+</body>
 </html>

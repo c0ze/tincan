@@ -1,0 +1,90 @@
+:root {
+  --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --line: #e2e2e6; --side: #f5f5f7;
+  --accent: #2f6fec; --accent-bg: #e6eefc; --busy: #d99a00; --ok: #2f9e44; --err: #d6336c; --code: #f1f1f4;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #17171a; --fg: #ececf1; --muted: #9a9aa3; --line: #2c2c31; --side: #1e1e22;
+          --accent: #6d9bff; --accent-bg: #22304d; --code: #24242a; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+button { font: inherit; border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+button.danger { color: var(--err); border-color: var(--err); }
+button.secondary { color: var(--muted); }
+button.icon { border: 0; padding: 4px 8px; }
+#app { display: flex; height: 100%; }
+#sidebar { width: 260px; flex-shrink: 0; background: var(--side); border-right: 1px solid var(--line);
+  overflow-y: auto; padding: 12px; }
+.brand { font-weight: 700; margin-bottom: 12px; display: flex; gap: 6px; align-items: center; }
+#close-drawer, #open-drawer { display: none; }
+.machine { margin-bottom: 14px; }
+.machine > .name { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+  display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+.machine.offline { opacity: .5; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--muted); }
+.dot.on { background: var(--ok); } .dot.busy { background: var(--busy); }
+.room > .name { font-weight: 600; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+.item { padding: 3px 6px 3px 18px; border-radius: 6px; cursor: pointer; color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item.on, .room > .name.on { background: var(--accent-bg); }
+.item.new { color: var(--muted); }
+.item .count { color: var(--busy); font-size: 12px; }
+.toggle { font-size: 12px; color: var(--muted); }
+.limits { margin: 2px 0 8px; font-size: 12px; }
+.limit { display: grid; grid-template-columns: 1fr 70px auto; gap: 6px; align-items: center; padding: 1px 6px; }
+.limit .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.limit .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.limit .fill { display: block; height: 100%; background: var(--accent); }
+.limit.hot .fill, .chip.hot { background: var(--err); color: #fff; border-color: var(--err); }
+.limit .val { color: var(--muted); font-variant-numeric: tabular-nums; }
+.limit .short { grid-column: 1 / -1; color: var(--muted); font-size: 11px; padding-left: 8px; }
+.limit.stale, .limit.unknown { opacity: .55; }
+.limit.error .val { color: var(--err); }
+#main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#top { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+#title { font-size: 16px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+.chip { border: 1px solid var(--line); border-radius: 12px; padding: 1px 8px; font-size: 12px;
+  display: inline-flex; align-items: center; gap: 5px; }
+.actions { display: flex; gap: 8px; }
+#view { flex: 1; overflow-y: auto; padding: 16px; }
+.msg { margin: 0 0 14px; max-width: 900px; }
+.msg .who { font-weight: 600; font-size: 13px; }
+.msg .who .when { font-weight: 400; color: var(--muted); margin-left: 6px; }
+.msg.user .who { color: var(--accent); }
+.msg.system { color: var(--muted); font-size: 13px; }
+.msg .body p { margin: 4px 0; }
+.msg .body pre { background: var(--code); padding: 8px 10px; border-radius: 8px; overflow-x: auto; }
+.msg .body code { background: var(--code); padding: 1px 4px; border-radius: 4px; font-size: 13px; }
+.msg .body pre code { padding: 0; background: none; }
+.mention { color: var(--accent); font-weight: 600; }
+.working { color: var(--busy); font-size: 13px; }
+details.live { margin-top: 4px; }
+details.live pre { max-height: 240px; overflow: auto; font-size: 12px; background: var(--code);
+  padding: 8px; border-radius: 8px; white-space: pre-wrap; }
+.msg.error .body { border-left: 3px solid var(--err); padding-left: 10px; color: var(--err); }
+.msg .tools { display: flex; gap: 8px; margin-top: 6px; }
+#composer { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); position: relative; }
+#composer[hidden] { display: none; }
+#input { flex: 1; resize: vertical; font: inherit; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--bg); color: var(--fg); }
+#suggest { position: absolute; bottom: 100%; left: 16px; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 8px; padding: 4px; min-width: 200px; box-shadow: 0 4px 16px rgba(0,0,0,.15); }
+#suggest div { padding: 4px 8px; border-radius: 6px; cursor: pointer; }
+#suggest div.on { background: var(--accent-bg); }
+table.activity { border-collapse: collapse; width: 100%; font-size: 13px; }
+table.activity td, table.activity th { border-bottom: 1px solid var(--line); padding: 6px; text-align: left; vertical-align: top; }
+.muted { color: var(--muted); }
+dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--fg); min-width: 320px; }
+dialog label { display: block; margin: 10px 0; }
+dialog input, dialog select { display: block; width: 100%; margin-top: 4px; font: inherit; padding: 6px;
+  background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; }
+dialog menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; }
+@media (max-width: 768px) {
+  #sidebar { position: fixed; inset: 0 auto 0 0; z-index: 10; transform: translateX(-100%); transition: transform .2s; }
+  #app.drawer #sidebar { transform: none; }
+  #close-drawer, #open-drawer { display: inline-block; }
+  #view { padding: 12px; }
+}
