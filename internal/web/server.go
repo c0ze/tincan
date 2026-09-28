@@ -26,6 +26,7 @@ import (
 	"github.com/c0ze/tincan/v2/internal/dispatch"
 	"github.com/c0ze/tincan/v2/internal/fsutil"
 	"github.com/c0ze/tincan/v2/internal/quota"
+	"github.com/c0ze/tincan/v2/internal/review"
 	"github.com/c0ze/tincan/v2/internal/reviewjob"
 	"github.com/c0ze/tincan/v2/internal/rooms"
 	"github.com/c0ze/tincan/v2/internal/thread"
@@ -101,7 +102,8 @@ type Server struct {
 	// would otherwise both see "not found" and both create one).
 	createMu sync.Mutex
 
-	jobs *reviewjob.Service // reviewer jobs; nil without a state directory
+	jobs  *reviewjob.Service  // reviewer jobs; nil without a state directory
+	coord *review.Coordinator // review coordinator; nil without a state directory
 
 	committeesMu       sync.Mutex // serializes peer committee-cache refreshes
 	committeesAttempt  time.Time  // last hub fetch attempt (guarded by committeesMu)

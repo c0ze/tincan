@@ -16,13 +16,14 @@ import (
 
 	"github.com/c0ze/tincan/v2/internal/committee"
 	"github.com/c0ze/tincan/v2/internal/quota"
+	"github.com/c0ze/tincan/v2/internal/review"
 	"github.com/c0ze/tincan/v2/internal/rooms"
 	"github.com/c0ze/tincan/v2/internal/thread"
 	"github.com/fsnotify/fsnotify"
 )
 
 type note struct {
-	Kind   string `json:"kind"` // thread | messages | activity | peer | quota | committees
+	Kind   string `json:"kind"` // thread | messages | activity | peer | quota | committees | reviews
 	Room   string `json:"room,omitempty"`
 	Thread string `json:"thread,omitempty"`
 	Seq    int64  `json:"seq,omitempty"`
@@ -109,6 +110,13 @@ func (s *Server) scan(list []rooms.Room) {
 		act := statFP(filepath.Join(room.Path, ".tincan", "requests")) + statFP(filepath.Join(room.Path, ".tincan", "hosts")) + statFP(filepath.Join(room.Path, ".tincan", "present"))
 		next["a:"+room.ID] = act
 		next["r:"+room.ID] = statFP(thread.Root(room.Path))
+		rfp := statFP(review.Root(room.Path))
+		if ids, err := review.List(room.Path); err == nil {
+			for _, id := range ids {
+				rfp += statFP(filepath.Join(review.Dir(room.Path, id), "review.json"))
+			}
+		}
+		next["v:"+room.ID] = rfp
 		metas, _ := thread.List(room.Path)
 		for _, m := range metas {
 			dir := filepath.Join(thread.Root(room.Path), m.ID)
@@ -150,6 +158,8 @@ func (s *Server) scan(list []rooms.Room) {
 			notes = append(notes, note{Kind: "quota"})
 		case 'c':
 			notes = append(notes, note{Kind: "committees"})
+		case 'v':
+			notes = append(notes, note{Kind: "reviews", Room: key[2:]})
 		}
 	}
 	for _, n := range notes {
@@ -239,6 +249,11 @@ func (s *Server) runRoomPass(ctx context.Context, room rooms.Room, janitor bool)
 	// A persistent failure repeats every tick; log each distinct error once.
 	if err := d.Reconcile(ctx); err != nil {
 		s.logOnce(room.ID+"/reconcile", fmt.Sprintf("tincan web: %s: reconcile: %v", room.Name, err))
+	}
+	if s.coord != nil {
+		if err := s.coord.Reconcile(ctx, room.Path); err != nil {
+			s.logOnce(room.ID+"/reviews", fmt.Sprintf("tincan web: %s: reviews: %v", room.Name, err))
+		}
 	}
 	if janitor {
 		if err := d.Janitor(ctx, s.cfg.IdleStop); err != nil {
@@ -381,7 +396,7 @@ func (s *Server) loop(ctx context.Context) {
 		if watcher != nil {
 			list, _ := s.cfg.Registry.List()
 			for _, room := range list {
-				dirs := []string{thread.Root(room.Path), filepath.Join(room.Path, ".tincan", "requests"), filepath.Join(room.Path, ".tincan", "hosts"), filepath.Join(room.Path, ".tincan", "present")}
+				dirs := []string{thread.Root(room.Path), review.Root(room.Path), filepath.Join(room.Path, ".tincan", "requests"), filepath.Join(room.Path, ".tincan", "hosts"), filepath.Join(room.Path, ".tincan", "present")}
 				metas, _ := thread.List(room.Path)
 				for _, m := range metas {
 					dirs = append(dirs, filepath.Join(thread.Root(room.Path), m.ID))

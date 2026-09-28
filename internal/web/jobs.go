@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/packet"
+	"github.com/c0ze/tincan/v2/internal/review"
 	"github.com/c0ze/tincan/v2/internal/reviewjob"
 )
 
@@ -32,6 +33,7 @@ func (s *Server) initJobs() {
 		return
 	}
 	s.jobs = &reviewjob.Service{StateDir: s.cfg.StateDir, Registry: s.cfg.Registry, Presets: s.cfg.Dispatch.PresetMap, Executable: s.cfg.Dispatch.Executable}
+	s.coord = &review.Coordinator{Transport: transport{s}}
 }
 
 func (s *Server) jobsReady(w http.ResponseWriter) bool {
