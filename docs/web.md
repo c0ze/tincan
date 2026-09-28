@@ -220,6 +220,37 @@ A committee is a named group of reviewers, each a `preset@machine`, such as
 - **Limits.** 1–8 members, a deadline of 1–240 minutes (default 30),
   instructions up to 8 KiB. Each save increments the version.
 
+### Reviewer jobs
+
+When a review has a member on this machine, the requesting coordinator
+creates a job through `api/review-jobs`. For each job:
+
+- **Workspace.** It gets a private workspace under
+  `<state>/reviews/ws/<job_id>`. If a registered room is a clone of the same
+  repository (same `origin`, not a partial clone) and already has the base
+  commit, the workspace is a disposable clone at that commit with the change
+  staged (`git diff --cached`), verified against the requester's tree. Nothing
+  is ever fetched. Otherwise the workspace holds the packet alone:
+  `packet/manifest.json`, `packet/diff.patch`, `packet/question.md` and
+  post-change contents under `packet/files/`.
+- **What is never sent.** Secret-looking files (`.env*`, `*.pem`, `*.key`,
+  `id_rsa*`, `credentials*`, `*secret*`, …), symlinks, submodules and files over
+  1 MiB. The manifest lists each one with the reason.
+- **Execution.** The member preset runs once, without a session. Its
+  executable is resolved *before* the workspace exists and run by absolute
+  path, so a reviewed change cannot substitute its own binary. The run is
+  bounded by the review's deadline.
+- **Results and cleanup.** A result is kept until the requester acknowledges
+  it. A janitor runs every minute: it resumes jobs interrupted by a restart
+  (adopting a run that already happened), removes workspaces after
+  acknowledgement or cancellation, and forgets records a week after expiry.
+
+**Residual risk.** A reviewer with a permission bypass, or a CLI that honours
+configuration inside the reviewed repository, can still act outside its
+workspace. Use read-only presets for committee members, for example
+`claude -p {body} --permission-mode plan --setting-sources user` or
+`codex exec -s read-only`.
+
 Each machine also serves `api/presets`, its preset catalogue with
 availability, warnings and quota, but never env values. `tincan web` writes
 `<state>/web.json` every 10 s so the CLI and MCP can tell that a coordinator

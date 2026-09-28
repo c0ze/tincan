@@ -26,6 +26,7 @@ import (
 	"github.com/c0ze/tincan/v2/internal/dispatch"
 	"github.com/c0ze/tincan/v2/internal/fsutil"
 	"github.com/c0ze/tincan/v2/internal/quota"
+	"github.com/c0ze/tincan/v2/internal/reviewjob"
 	"github.com/c0ze/tincan/v2/internal/rooms"
 	"github.com/c0ze/tincan/v2/internal/thread"
 )
@@ -100,6 +101,8 @@ type Server struct {
 	// would otherwise both see "not found" and both create one).
 	createMu sync.Mutex
 
+	jobs *reviewjob.Service // reviewer jobs; nil without a state directory
+
 	committeesMu       sync.Mutex // serializes peer committee-cache refreshes
 	committeesAttempt  time.Time  // last hub fetch attempt (guarded by committeesMu)
 	committeesAttempts int        // hub fetch attempts, for tests (guarded by committeesMu)
@@ -171,6 +174,7 @@ func New(cfg Config) (*Server, error) {
 		}
 	}
 	s.routes()
+	s.initJobs()
 	return s, nil
 }
 
@@ -431,6 +435,7 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 	go s.loop(ctx)       // Task 10
 	go s.watchPeers(ctx) // Task 11
 	go s.syncCommittees(ctx)
+	go s.runJobJanitor(ctx)
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()

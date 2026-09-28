@@ -58,6 +58,10 @@ func (s *Server) apiRoutes() {
 	s.mux.HandleFunc("GET /api/committees", s.listCommittees)
 	s.mux.HandleFunc("PUT /api/committees/{name}", s.putCommittee)
 	s.mux.HandleFunc("DELETE /api/committees/{name}", s.deleteCommittee)
+	s.mux.HandleFunc("POST /api/review-jobs", s.createJob)
+	s.mux.HandleFunc("GET /api/review-jobs/{job}", s.getJob)
+	s.mux.HandleFunc("POST /api/review-jobs/{job}/ack", s.ackJob)
+	s.mux.HandleFunc("POST /api/review-jobs/{job}/cancel", s.cancelJob)
 }
 
 func (s *Server) apiQuotas(w http.ResponseWriter, r *http.Request) {
