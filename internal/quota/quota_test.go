@@ -122,4 +122,19 @@ func TestLoadDiscoversFilesAndAppliesMapping(t *testing.T) {
 	}
 }
 
+func TestLoadMalformedConfigReturnsEntriesWithError(t *testing.T) {
+	dir := t.TempDir()
+	good := []byte(`{"percent": 1, "reset_at": ` + ftoa(unix(now.Add(time.Hour))) + `, "fetched_at": ` + ftoa(unix(now.Add(-time.Minute))) + `}`)
+	os.WriteFile(filepath.Join(dir, "claude-quota.json"), good, 0o600)
+	cfg := filepath.Join(t.TempDir(), "quotas.json")
+	os.WriteFile(cfg, []byte(`not json`), 0o600)
+	entries, err := Load(dir, cfg, now)
+	if err == nil {
+		t.Fatal("malformed quotas.json accepted without error")
+	}
+	if len(entries) != 1 || entries[0].ID != "claude" || len(entries[0].Presets) != 1 || entries[0].Presets[0] != "claude" || entries[0].Explicit {
+		t.Fatalf("entries %+v", entries)
+	}
+}
+
 func ftoa(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }

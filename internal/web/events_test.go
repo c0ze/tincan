@@ -142,7 +142,8 @@ func TestTickRunsRoomPassesConcurrentlyAndSkipsInFlight(t *testing.T) {
 	reg := rooms.Open(filepath.Join(t.TempDir(), "rooms.json"))
 	dirA, _ := filepath.EvalSymlinks(t.TempDir())
 	dirB, _ := filepath.EvalSymlinks(t.TempDir())
-	s, err := New(Config{Owner: owner, Machine: "box", Registry: reg, ChainBudget: 6})
+	qdir := t.TempDir()
+	s, err := New(Config{Owner: owner, Machine: "box", Registry: reg, ChainBudget: 6, QuotaDir: qdir, QuotaConfig: filepath.Join(qdir, "quotas.json")})
 	if err != nil {
 		t.Fatal(err)
 	}

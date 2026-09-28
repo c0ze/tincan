@@ -58,9 +58,16 @@ func (s *Server) apiRoutes() {
 
 func (s *Server) apiQuotas(w http.ResponseWriter, r *http.Request) {
 	entries, err := quota.Load(s.cfg.QuotaDir, s.cfg.QuotaConfig, time.Now())
-	if err != nil {
+	if entries == nil {
+		// Load only returns a nil slice when it could not even list
+		// cacheDir; that is a real failure, unlike a malformed
+		// (optional) quotas.json, which Load reports alongside the
+		// entries it could still produce.
 		s.fail(w, http.StatusInternalServerError, err)
 		return
+	}
+	if err != nil {
+		s.logOnce("quota.config", fmt.Sprintf("tincan web: quota config: %v", err))
 	}
 	s.writeJSON(w, http.StatusOK, entries)
 }

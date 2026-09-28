@@ -21,7 +21,8 @@ const owner = "owner@example.com"
 func testServer(t *testing.T) *Server {
 	t.Helper()
 	reg := rooms.Open(filepath.Join(t.TempDir(), "rooms.json"))
-	s, err := New(Config{Owner: owner, PublicPath: "/tincan", Machine: "testbox", Registry: reg, ChainBudget: 6, Dispatch: dispatch.Options{}})
+	qdir := t.TempDir()
+	s, err := New(Config{Owner: owner, PublicPath: "/tincan", Machine: "testbox", Registry: reg, ChainBudget: 6, Dispatch: dispatch.Options{}, QuotaDir: qdir, QuotaConfig: filepath.Join(qdir, "quotas.json")})
 	if err != nil {
 		t.Fatal(err)
 	}

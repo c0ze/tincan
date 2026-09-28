@@ -27,7 +27,8 @@ func apiServer(t *testing.T) (*Server, string) {
 		"claude":  {Exec: []string{bin}, Stdin: "none", Reply: "stdout"},
 		"missing": {Exec: []string{filepath.Join(t.TempDir(), "absent")}},
 	}
-	s, err := New(Config{Owner: owner, Machine: "box", Registry: reg, ChainBudget: 6, Dispatch: dispatch.Options{Presets: presets}})
+	qdir := t.TempDir()
+	s, err := New(Config{Owner: owner, Machine: "box", Registry: reg, ChainBudget: 6, Dispatch: dispatch.Options{Presets: presets}, QuotaDir: qdir, QuotaConfig: filepath.Join(qdir, "quotas.json")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,6 +329,31 @@ func TestQuotasEndpoint(t *testing.T) {
 	now := time.Now()
 	os.WriteFile(filepath.Join(dir, "claude-quota.json"), []byte(fmt.Sprintf(`{"percent": 97, "reset_at": %d, "fetched_at": %d}`, now.Add(time.Hour).Unix(), now.Unix())), 0o600)
 	rec := do(t, s.Handler(), "GET", "/api/quotas", "", ownerHdr())
+	var got []struct {
+		ID      string
+		State   string
+		Percent float64
+	}
+	decode(t, rec.Body.String(), &got)
+	if len(got) != 1 || got[0].ID != "claude" || got[0].State != "ok" || got[0].Percent != 97 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+}
+
+// A malformed quotas.json must not fail the whole endpoint: the mapping is
+// optional, so the entries are still served with their default presentation.
+func TestQuotasEndpointToleratesMalformedConfig(t *testing.T) {
+	s, _ := apiServer(t)
+	dir := t.TempDir()
+	s.cfg.QuotaDir = dir
+	s.cfg.QuotaConfig = filepath.Join(dir, "quotas.json")
+	now := time.Now()
+	os.WriteFile(filepath.Join(dir, "claude-quota.json"), []byte(fmt.Sprintf(`{"percent": 97, "reset_at": %d, "fetched_at": %d}`, now.Add(time.Hour).Unix(), now.Unix())), 0o600)
+	os.WriteFile(s.cfg.QuotaConfig, []byte(`not json`), 0o600)
+	rec := do(t, s.Handler(), "GET", "/api/quotas", "", ownerHdr())
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
 	var got []struct {
 		ID      string
 		State   string

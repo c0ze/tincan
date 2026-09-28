@@ -6,6 +6,7 @@ package quota
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -167,15 +168,21 @@ func Files(dir string) (map[string]string, error) {
 }
 
 // Load reads every cache file in cacheDir and applies the optional mapping.
+// A malformed quotas.json does not fail the whole call: the mapping is
+// optional, so Load falls back to the default (unmapped) presentation for
+// every entry and returns a non-nil error describing the config problem
+// alongside the entries, letting the caller serve them anyway.
 func Load(cacheDir, configPath string, now time.Time) ([]Entry, error) {
 	files, err := Files(cacheDir)
 	if err != nil {
 		return nil, err
 	}
 	maps := map[string]mapping{}
+	var configErr error
 	if data, err := os.ReadFile(configPath); err == nil {
 		if err := json.Unmarshal(data, &maps); err != nil {
-			return nil, err
+			configErr = fmt.Errorf("%s: %w", configPath, err)
+			maps = map[string]mapping{}
 		}
 	}
 	out := []Entry{}
@@ -205,5 +212,5 @@ func Load(cacheDir, configPath string, now time.Time) ([]Entry, error) {
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
-	return out, nil
+	return out, configErr
 }
