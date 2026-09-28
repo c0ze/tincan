@@ -100,7 +100,9 @@ type Server struct {
 	// would otherwise both see "not found" and both create one).
 	createMu sync.Mutex
 
-	committeesMu sync.Mutex // serializes peer committee-cache refreshes
+	committeesMu       sync.Mutex // serializes peer committee-cache refreshes
+	committeesAttempt  time.Time  // last hub fetch attempt (guarded by committeesMu)
+	committeesAttempts int        // hub fetch attempts, for tests (guarded by committeesMu)
 }
 
 func New(cfg Config) (*Server, error) {

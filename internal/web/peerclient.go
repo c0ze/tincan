@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+// peerCallHeader marks a request made by another tincan web over the
+// machine link, so handlers never call back out to a peer while serving it.
+const peerCallHeader = "X-Tincan-Peer"
+
 // PeerError is a non-2xx answer from a peer's machine-link API.
 type PeerError struct {
 	Status int
@@ -54,9 +58,8 @@ func (p *peer) call(ctx context.Context, method, path string, in any, limit int6
 	if err != nil {
 		return err
 	}
-	if method != http.MethodGet && method != http.MethodHead {
-		req.Header.Set("X-Tincan-Request", "1")
-	}
+	req.Header.Set("X-Tincan-Request", "1")
+	req.Header.Set(peerCallHeader, "1")
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

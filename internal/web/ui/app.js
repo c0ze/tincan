@@ -446,7 +446,7 @@ async function showCommittees() {
   await Promise.all(state.machines.filter((m) => m.online).map(async (m) => {
     catalogues[m.name] = { key: m.key, presets: await api(m.key, "presets").catch(() => []) };
   }));
-  if (!state.current || state.current.view !== "committees") return; // navigated away
+  if (!state.current || state.current.view !== "committees" || state.editingCommittee) return; // navigated away or editing
   const box = el("div", "committees");
   if (state.committeeNotice) box.append(el("p", "notice", state.committeeNotice));
   if (data.role === "peer") {
@@ -503,11 +503,29 @@ function editCommittee(hubKey, catalogues, c) {
       const box = el("input");
       box.type = "checkbox";
       box.checked = chosen.has(id);
-      box.disabled = !p.available || p.exec_kind === "relative";
+      box.disabled = !box.checked && (!p.available || p.exec_kind === "relative"); // a chosen member can always be unchecked
       box.onchange = () => { box.checked ? chosen.add(id) : chosen.delete(id); };
       const q = p.quota && p.quota.percent != null ? ` · ${Math.round(p.quota.percent)}%` : "";
       label.append(box, document.createTextNode(` ${p.name}${q}`));
       for (const w of p.warnings || []) label.append(el("span", "warning", ` ⚠ ${w}`));
+      group.append(label);
+    }
+    members.append(group);
+  }
+  // Chosen members that no catalogue lists (preset removed, machine offline
+  // or no longer a peer) stay visible so they can be removed.
+  const listed = new Set(Object.entries(catalogues).flatMap(([machine, cat]) => cat.presets.map((p) => `${p.name}@${machine}`)));
+  const missing = [...chosen].filter((id) => !listed.has(id));
+  if (missing.length) {
+    const group = el("fieldset");
+    group.append(el("legend", "", "no longer available"));
+    for (const id of missing) {
+      const label = el("label", "member unavailable");
+      const box = el("input");
+      box.type = "checkbox";
+      box.checked = true;
+      box.onchange = () => { box.checked ? chosen.add(id) : chosen.delete(id); };
+      label.append(box, document.createTextNode(` ${id}`));
       group.append(label);
     }
     members.append(group);

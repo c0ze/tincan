@@ -123,7 +123,9 @@ func (s *Server) scan(list []rooms.Room) {
 		next["q:"] = fp
 	}
 	if s.cfg.StateDir != "" {
-		next["c:"] = statFP(committee.NewStore(s.cfg.StateDir).Path()) + statFP(committee.CachePath(s.cfg.StateDir))
+		// Only the hub's store: a peer publishes its own note when a refresh
+		// changes its cache (refreshCommittees).
+		next["c:"] = statFP(committee.NewStore(s.cfg.StateDir).Path())
 	}
 	s.hub.mu.Lock()
 	prev := s.hub.fp

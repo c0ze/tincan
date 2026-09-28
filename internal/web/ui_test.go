@@ -43,6 +43,11 @@ func TestUIContract(t *testing.T) {
 		// re-renders over an open editor.
 		"state.committeeNotice",
 		"!state.editingCommittee",
+		// A list refresh that finishes after the editor opened must not
+		// replace it; members that no longer resolve stay removable.
+		`state.current.view !== "committees" || state.editingCommittee`,
+		"box.disabled = !box.checked &&",
+		"no longer available",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("app.js missing %q", want)

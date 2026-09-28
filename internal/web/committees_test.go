@@ -2,6 +2,8 @@ package web
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/committee"
+	"github.com/c0ze/tincan/v2/internal/host"
 	"github.com/c0ze/tincan/v2/internal/rooms"
 )
 
@@ -129,9 +132,7 @@ func TestPeerCachesHubCommittees(t *testing.T) {
 	}
 	// Hub goes away: the cache is kept and the error is reported.
 	peerHTTP.Close()
-	c, _, _ := committee.LoadCache(localState)
-	c.FetchedAt = c.FetchedAt.Add(-time.Minute) // force a refresh attempt
-	committee.SaveCache(localState, c)
+	local.committeesAttempt = time.Time{} // the last attempt is old: refresh on the next GET
 	rec = do(t, local.Handler(), "GET", "/api/committees", "", ownerHdr())
 	decode(t, rec.Body.String(), &view)
 	if len(view.Committees) != 1 || view.Error == "" {
@@ -155,5 +156,95 @@ func TestNewRejectsUnknownCommitteesFrom(t *testing.T) {
 	_, err := New(Config{Owner: owner, Registry: rooms.Open(filepath.Join(t.TempDir(), "rooms.json")), CommitteesFrom: "nowhere"})
 	if err == nil || !strings.Contains(err.Error(), "nowhere") {
 		t.Fatalf("unknown hub accepted: %v", err)
+	}
+}
+
+// Two machines each started with --committees-from the other: the call from
+// one arrives over the machine link and must be answered from the cache, so
+// the page reports "not a committees hub" promptly instead of both handlers
+// waiting on each other until the peer timeout.
+func TestMutualPeersReportNotAHubQuickly(t *testing.T) {
+	var a, b *Server
+	aHTTP := httptest.NewServer(servedLike(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { a.Handler().ServeHTTP(w, r) }), owner))
+	defer aHTTP.Close()
+	bHTTP := httptest.NewServer(servedLike(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { b.Handler().ServeHTTP(w, r) }), owner))
+	defer bHTTP.Close()
+	mk := func(machine, peer, url string) *Server {
+		state, _ := filepath.EvalSymlinks(t.TempDir())
+		qdir := t.TempDir()
+		s, err := New(Config{Owner: owner, AllowedHosts: testHosts, Machine: machine, Registry: rooms.Open(filepath.Join(t.TempDir(), "rooms.json")),
+			Peers: []Peer{{Name: peer, URL: url + "/tincan/"}}, StateDir: state, CommitteesFrom: peer, QuotaDir: qdir, QuotaConfig: filepath.Join(qdir, "quotas.json")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	a = mk("cachyos", "macmini", bHTTP.URL)
+	b = mk("macmini", "cachyos", aHTTP.URL)
+	start := time.Now()
+	rec := do(t, a.Handler(), "GET", "/api/committees", "", ownerHdr())
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("mutual peers took %v", d)
+	}
+	if !strings.Contains(rec.Body.String(), "not a committees hub") {
+		t.Fatalf("mutual peers: %s", rec.Body)
+	}
+}
+
+// While the hub is down, repeated failed refreshes must not rewrite the cache
+// or publish committees notes, or a peer's open page reloads itself forever.
+func TestFailedRefreshIsQuiet(t *testing.T) {
+	local, _, peerHTTP, _ := peerPair(t)
+	state, _ := filepath.EvalSymlinks(t.TempDir())
+	local.cfg.StateDir, local.cfg.CommitteesFrom = state, "macmini"
+	peerHTTP.Close()
+	local.refreshCommittees(true)
+	first, err := os.ReadFile(committee.CachePath(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, unsubscribe := local.hub.subscribe()
+	defer unsubscribe()
+	local.refreshCommittees(true)
+	second, _ := os.ReadFile(committee.CachePath(state))
+	if string(first) != string(second) {
+		t.Fatalf("identical failure rewrote the cache:\n%s\n%s", first, second)
+	}
+	select {
+	case n := <-ch:
+		t.Fatalf("identical failure published %+v", n)
+	default:
+	}
+	// A GET right after a failed attempt does not try again.
+	start := time.Now()
+	do(t, local.Handler(), "GET", "/api/committees", "", ownerHdr())
+	if local.committeesAttempts != 2 {
+		t.Fatalf("GET within 10 s of a failed attempt refreshed again (attempts=%d, %v)", local.committeesAttempts, time.Since(start))
+	}
+}
+
+// The preset-name check never waits on a peer that the health check reports
+// offline; it warns instead. Members on that peer are still validated.
+func TestNameCheckSkipsOfflinePeers(t *testing.T) {
+	hub, last, _, _ := peerPair(t)
+	state, _ := filepath.EvalSymlinks(t.TempDir())
+	hub.cfg.StateDir = state
+	bin := filepath.Join(t.TempDir(), fakeAgentName())
+	os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755)
+	hub.cfg.Dispatch.Presets = map[string]host.Preset{"claude": {Exec: []string{bin}, Stdin: "none", Reply: "stdout"}}
+	hub.peers["macmini"].online.Store(false)
+	rec := do(t, hub.Handler(), "PUT", "/api/committees/reviewers", `{"members":["claude@cachyos"]}`, mut())
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "macmini is offline") {
+		t.Fatalf("offline peer: %d %s", rec.Code, rec.Body)
+	}
+	if last.URL != nil {
+		t.Fatalf("contacted an offline peer: %s", last.URL)
+	}
+	hub.peers["macmini"].online.Store(true)
+	if rec := do(t, hub.Handler(), "PUT", "/api/committees/reviewers", `{"members":["claude@cachyos"]}`, mut()); rec.Code != 200 {
+		t.Fatalf("online peer: %d %s", rec.Code, rec.Body)
+	}
+	if last.URL == nil || !strings.HasSuffix(last.URL.Path, "/api/presets") {
+		t.Fatalf("online peer not checked: %v", last.URL)
 	}
 }

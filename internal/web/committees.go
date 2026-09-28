@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -28,7 +29,7 @@ func (s *Server) listCommittees(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.cfg.CommitteesFrom != "" {
-		s.writeJSON(w, http.StatusOK, s.peerCommittees(r.Context())) // Task 6
+		s.writeJSON(w, http.StatusOK, s.peerCommittees(r.Header.Get(peerCallHeader) == ""))
 		return
 	}
 	list, err := committee.NewStore(s.cfg.StateDir).List()
@@ -170,6 +171,11 @@ func (s *Server) validateCommittee(ctx context.Context, c committee.Committee) (
 	machines := append([]string{s.cfg.Machine}, sortedPeerNames(s.peers)...)
 	for _, machine := range machines {
 		list, ok := catalogues[machine]
+		if p := s.peers[machine]; !ok && p != nil && !p.online.Load() {
+			// Never wait on a peer the health check reports down.
+			warnings = append(warnings, fmt.Sprintf("preset names on %s not checked: %s is offline", machine, machine))
+			continue
+		}
 		if !ok {
 			var err error
 			if list, err = s.catalogueOf(ctx, machine); err != nil {
@@ -186,16 +192,17 @@ func (s *Server) validateCommittee(ctx context.Context, c committee.Committee) (
 	return warnings, nil
 }
 
-// peerCommittees serves the cached copy, refreshing it first when it is more
-// than 10 s old (committees §6.7); a failed refresh keeps the last valid copy
-// and reports the error.
-func (s *Server) peerCommittees(ctx context.Context) committeesView {
-	c, ok, err := committee.LoadCache(s.cfg.StateDir)
-	if err != nil || !ok || time.Since(c.FetchedAt) > 10*time.Second {
-		s.refreshCommittees(ctx)
-		c, ok, err = committee.LoadCache(s.cfg.StateDir)
+// peerCommittees serves the cached copy (committees §6.7). With refresh set
+// it first refreshes a copy whose last fetch *attempt* is more than 10 s old,
+// so a failing hub is asked at most every 10 s. Calls arriving over the
+// machine link never refresh: two machines misconfigured as each other's
+// peer would otherwise call back into each other until the peer timeout.
+func (s *Server) peerCommittees(refresh bool) committeesView {
+	if refresh {
+		s.refreshCommittees(false)
 	}
 	view := committeesView{Role: "peer", From: s.cfg.CommitteesFrom, Committees: []committee.Committee{}}
+	c, ok, err := committee.LoadCache(s.cfg.StateDir)
 	if err != nil {
 		view.Error = err.Error()
 		return view
@@ -210,19 +217,31 @@ func (s *Server) peerCommittees(ctx context.Context) committeesView {
 	return view
 }
 
-// refreshCommittees fetches the hub's committees into the cache. Concurrent
-// callers share one fetch at a time.
-func (s *Server) refreshCommittees(ctx context.Context) error {
+// refreshCommittees fetches the hub's committees into the cache; unless force
+// is set it does nothing when the last attempt (successful or not) is under
+// 10 s old. Callers share one fetch at a time and re-check freshness after
+// waiting, and the fetch uses its own deadline rather than a browser
+// request's context. The cache file is rewritten, and a committees note
+// published, only when its content changes.
+func (s *Server) refreshCommittees(force bool) error {
 	s.committeesMu.Lock()
 	defer s.committeesMu.Unlock()
+	if !force && time.Since(s.committeesAttempt) < 10*time.Second {
+		return nil
+	}
+	s.committeesAttempt = time.Now()
+	s.committeesAttempts++
 	old, _, _ := committee.LoadCache(s.cfg.StateDir)
-	old.From, old.AttemptedAt = s.cfg.CommitteesFrom, time.Now().UTC()
+	next := old
+	next.From = s.cfg.CommitteesFrom
 	var view committeesView
 	var err error
 	if p := s.peers[s.cfg.CommitteesFrom]; p == nil {
 		err = fmt.Errorf("%s is not a configured peer", s.cfg.CommitteesFrom)
 	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err = p.call(ctx, "GET", "committees", nil, 1<<20, &view)
+		cancel()
 	}
 	if err == nil && view.Role != "hub" {
 		err = fmt.Errorf("%s is not a committees hub (it reads committees from %q)", s.cfg.CommitteesFrom, view.From)
@@ -236,17 +255,30 @@ func (s *Server) refreshCommittees(ctx context.Context) error {
 		}
 	}
 	if err != nil {
-		old.Error = err.Error()
+		next.Error = err.Error()
 	} else {
-		old.Error, old.FetchedAt, old.Committees = "", old.AttemptedAt, view.Committees
+		next.Error, next.Committees = "", view.Committees
+		next.FetchedAt, next.AttemptedAt = s.committeesAttempt.UTC(), s.committeesAttempt.UTC()
 	}
-	if old.Committees == nil {
-		old.Committees = []committee.Committee{}
+	if next.Committees == nil {
+		next.Committees = []committee.Committee{}
 	}
-	if serr := committee.SaveCache(s.cfg.StateDir, old); serr != nil {
-		return serr
+	changed := next.Error != old.Error || next.From != old.From || !sameCommittees(next.Committees, old.Committees)
+	if changed || !next.FetchedAt.Equal(old.FetchedAt) {
+		if serr := committee.SaveCache(s.cfg.StateDir, next); serr != nil {
+			return serr
+		}
+	}
+	if changed {
+		s.hub.publish(note{Kind: "committees"})
 	}
 	return err
+}
+
+func sameCommittees(a, b []committee.Committee) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return string(x) == string(y)
 }
 
 // syncCommittees refreshes the peer cache every 60 s.
@@ -257,7 +289,7 @@ func (s *Server) syncCommittees(ctx context.Context) {
 	t := time.NewTicker(60 * time.Second)
 	defer t.Stop()
 	for {
-		if err := s.refreshCommittees(ctx); err != nil {
+		if err := s.refreshCommittees(true); err != nil {
 			s.logOnce("committees.refresh", fmt.Sprintf("tincan web: committees from %s: %v", s.cfg.CommitteesFrom, err))
 		}
 		select {
