@@ -169,7 +169,10 @@ Phase 1's `quotas.json` maps entries to presets and may declare `blocking`
 - `name`: `[A-Za-z0-9][A-Za-z0-9_-]{0,63}` (no `.`, which is reserved for
   thread listeners); not `you`, and not a preset name on any known machine.
 - `members`: 1–8 unique `preset@machine`; `machine` is this machine or a
-  configured peer. Each must resolve on its machine at save time, checked
+  configured peer. A machine's name is its `--machine` flag, by default the
+  first label of its Tailscale DNS name (`macmini` for
+  `macmini.<tailnet>.ts.net`, falling back to the host name), so it matches
+  the names peers use for it in `--peer name=url`. Each must resolve on its machine at save time, checked
   against that machine's `api/presets` catalogue (§6.7). The preset's
   executable must be a bare name or an absolute path (§6.6). Members whose argv
   contains a known permission bypass (`--dangerously-skip-permissions`,
@@ -226,7 +229,8 @@ Storage and sync:
 ### 6.3 Publication
 
 1. **Coordinator present.** `tincan web` writes `<state>/web.json`
-   (`pid`, `started`, `updated`) every tick. MCP and CLI entry points refuse
+   (`pid`, `machine`, `started`, `updated`) at least every 10 s and removes it
+   on a clean shutdown. MCP and CLI entry points refuse
    with "tincan web is not running on this machine; start it (see
    docs/web.md)" unless `updated` is under 30 s old. They register the room
    (`rooms.Touch`), confirm the registry now lists it — an excluded path (e.g.
