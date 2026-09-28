@@ -257,7 +257,7 @@ func (s *Server) runRoomPass(ctx context.Context, room rooms.Room, janitor bool)
 func (s *Server) tick(ctx context.Context) {
 	if s.cfg.StateDir != "" && time.Since(s.lastHeartbeat) >= 10*time.Second {
 		now := time.Now()
-		if err := rooms.WriteHeartbeat(s.cfg.StateDir, rooms.Heartbeat{PID: os.Getpid(), Machine: s.cfg.Machine, Started: s.started, Updated: now}); err != nil {
+		if err := rooms.WriteHeartbeat(s.cfg.StateDir, rooms.Heartbeat{PID: os.Getpid(), Machine: s.cfg.Machine, CommitteesFrom: s.cfg.CommitteesFrom, Started: s.started, Updated: now}); err != nil {
 			s.logOnce("heartbeat", fmt.Sprintf("tincan web: heartbeat: %v", err))
 		} else {
 			s.lastHeartbeat = now

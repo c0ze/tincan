@@ -167,3 +167,32 @@ func SaveCache(stateDir string, c Cache) error {
 	}
 	return fsutil.WriteFileAtomic(CachePath(stateDir), data)
 }
+
+// Lookup finds a committee on this machine: in the peer cache when this
+// machine reads committees from a hub, else in the hub store.
+func Lookup(stateDir, name string, fromPeer bool) (Committee, error) {
+	var list []Committee
+	where := "on this machine (the committees hub)"
+	if fromPeer {
+		c, ok, err := LoadCache(stateDir)
+		if err != nil {
+			return Committee{}, err
+		}
+		if !ok {
+			return Committee{}, fmt.Errorf("committee %q not found: no committees fetched from the hub yet", name)
+		}
+		list = c.Committees
+		where = fmt.Sprintf("in the copy fetched from %s at %s", c.From, c.FetchedAt.Format(time.RFC3339))
+	} else {
+		var err error
+		if list, err = NewStore(stateDir).List(); err != nil {
+			return Committee{}, err
+		}
+	}
+	for _, c := range list {
+		if c.Name == name {
+			return c, nil
+		}
+	}
+	return Committee{}, fmt.Errorf("committee %q not found %s", name, where)
+}

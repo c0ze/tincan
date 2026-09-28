@@ -39,3 +39,11 @@ func TestHeartbeatFreshness(t *testing.T) {
 		t.Fatal("garbage heartbeat counted as alive")
 	}
 }
+func TestHeartbeatCarriesCommitteeSource(t *testing.T) {
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	WriteHeartbeat(dir, Heartbeat{PID: 1, Machine: "cachyos", CommitteesFrom: "macmini", Updated: time.Now()})
+	hb, err := ReadHeartbeat(dir)
+	if err != nil || hb.CommitteesFrom != "macmini" || hb.Machine != "cachyos" {
+		t.Fatalf("%+v %v", hb, err)
+	}
+}

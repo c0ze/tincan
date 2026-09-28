@@ -116,3 +116,17 @@ func stateDir(t *testing.T) string {
 	}
 	return dir
 }
+func TestLookupHubAndPeer(t *testing.T) {
+	dir := stateDir(t)
+	NewStore(dir).Put(context.Background(), Committee{Name: "hubbed", Members: []string{"x@m"}})
+	SaveCache(dir, Cache{From: "macmini", FetchedAt: time.Now(), Committees: []Committee{{Name: "cached", Version: 4, Members: []string{"y@m"}, DeadlineMinutes: 30}}})
+	if c, err := Lookup(dir, "hubbed", false); err != nil || c.Version != 1 {
+		t.Fatalf("hub lookup: %+v %v", c, err)
+	}
+	if c, err := Lookup(dir, "cached", true); err != nil || c.Version != 4 {
+		t.Fatalf("peer lookup: %+v %v", c, err)
+	}
+	if _, err := Lookup(dir, "hubbed", true); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("peer must not read the hub store: %v", err)
+	}
+}

@@ -16,10 +16,12 @@ const HeartbeatFresh = 30 * time.Second
 
 // Heartbeat is <state>/web.json, written by `tincan web`.
 type Heartbeat struct {
-	PID     int       `json:"pid"`
-	Machine string    `json:"machine"`
-	Started time.Time `json:"started"`
-	Updated time.Time `json:"updated"`
+	PID     int    `json:"pid"`
+	Machine string `json:"machine"`
+	// CommitteesFrom is the peer this machine reads committees from ("" = hub).
+	CommitteesFrom string    `json:"committees_from,omitempty"`
+	Started        time.Time `json:"started"`
+	Updated        time.Time `json:"updated"`
 }
 
 func HeartbeatPath(stateDir string) string { return filepath.Join(stateDir, "web.json") }
@@ -35,7 +37,8 @@ func WriteHeartbeat(stateDir string, hb Heartbeat) error {
 	return fsutil.WriteFileAtomic(HeartbeatPath(stateDir), data)
 }
 
-func readHeartbeat(stateDir string) (Heartbeat, error) {
+// ReadHeartbeat reads <state>/web.json.
+func ReadHeartbeat(stateDir string) (Heartbeat, error) {
 	var hb Heartbeat
 	data, err := fsutil.ReadFile(HeartbeatPath(stateDir), 4096)
 	if err != nil {
@@ -48,7 +51,7 @@ func readHeartbeat(stateDir string) (Heartbeat, error) {
 // RemoveHeartbeat deletes web.json on a clean shutdown, but only if it is
 // still this process's (a newer daemon may have replaced it).
 func RemoveHeartbeat(stateDir string, pid int) error {
-	hb, err := readHeartbeat(stateDir)
+	hb, err := ReadHeartbeat(stateDir)
 	if errors.Is(err, os.ErrNotExist) || (err == nil && hb.PID != pid) {
 		return nil
 	}
@@ -61,6 +64,6 @@ func RemoveHeartbeat(stateDir string, pid int) error {
 // CoordinatorAlive reports whether web.json was updated within
 // HeartbeatFresh of now. A missing or unreadable file means no coordinator.
 func CoordinatorAlive(stateDir string, now time.Time) bool {
-	hb, err := readHeartbeat(stateDir)
+	hb, err := ReadHeartbeat(stateDir)
 	return err == nil && !hb.Updated.IsZero() && now.Sub(hb.Updated) < HeartbeatFresh
 }
