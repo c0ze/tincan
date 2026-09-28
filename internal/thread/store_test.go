@@ -227,9 +227,21 @@ func TestJournalMetaSurvivesMetaWriteCrash(t *testing.T) {
 
 func TestUppercaseThreadIDRejected(t *testing.T) {
 	r := room(t)
-	th, err := Create(r, "t", "claude", "", 6)
-	if err != nil {
-		t.Fatal(err)
+	// About 2.3% of random IDs are all digits and uppercase to themselves;
+	// keep creating threads until one has a letter a-f.
+	var th *Thread
+	for i := 0; i < 50; i++ {
+		var err error
+		th, err = Create(r, "t", "claude", "", 6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.ToUpper(th.ID) != th.ID {
+			break
+		}
+	}
+	if strings.ToUpper(th.ID) == th.ID {
+		t.Fatalf("no thread ID with a letter after 50 tries (last %q)", th.ID)
 	}
 	if _, err := Open(r, strings.ToUpper(th.ID)); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("uppercase id accepted: %v", err)
