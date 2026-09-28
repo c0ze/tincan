@@ -180,32 +180,32 @@ func envSummary(v host.PublicPreset) string {
 
 func cmdServe(args []string, stdout, stderr io.Writer) int {
 	var daemon bool
-	var owner, resolved, label string
+	var owner, presetFile, label string
 	h, code := parseHostFlags("serve", args, stderr, func(fs *flag.FlagSet) {
 		fs.BoolVar(&daemon, "daemon", false, "started by `up`: stdio already points at the host log; print no banner")
 		fs.StringVar(&owner, "owner", "", "internal host lifetime identity")
-		fs.StringVar(&resolved, "resolved-preset", "", "internal resolved preset JSON")
+		fs.StringVar(&presetFile, "resolved-preset-file", "", "internal: private file holding the resolved preset")
 		fs.StringVar(&label, "resolved-label", "", "internal resolved preset label")
 	})
 	if code != ExitOK {
 		return code
 	}
+	room, err := filepath.Abs(h.room)
+	if err != nil {
+		fmt.Fprintf(stderr, "tincan serve: %v\n", err)
+		return ExitError
+	}
 	var p host.Preset
-	if resolved != "" {
-		if err := json.Unmarshal([]byte(resolved), &p); err != nil {
-			fmt.Fprintf(stderr, "tincan serve: invalid resolved preset: %v\n", err)
-			return ExitUsage
+	if presetFile != "" {
+		if p, err = host.ReadPresetFile(room, h.name, presetFile); err != nil {
+			fmt.Fprintf(stderr, "tincan serve: %v\n", err)
+			return ExitError
 		}
 	} else {
 		label, p, code = resolveHost("serve", h, stderr)
 		if code != ExitOK {
 			return code
 		}
-	}
-	room, err := filepath.Abs(h.room)
-	if err != nil {
-		fmt.Fprintf(stderr, "tincan serve: %v\n", err)
-		return ExitError
 	}
 	if w := roomRootWarning(room); w != "" {
 		fmt.Fprintln(stderr, w)

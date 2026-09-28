@@ -7,7 +7,9 @@ import (
 	"unicode/utf8"
 )
 
-func msg(author, text string) Message { return Message{Author: author, Role: RoleAgent, Text: text, State: StateDone} }
+func msg(author, text string) Message {
+	return Message{Author: author, Role: RoleAgent, Text: text, State: StateDone}
+}
 
 func TestPromptContainsHeaderTranscriptAndTrigger(t *testing.T) {
 	p := BuildPrompt(PromptInput{

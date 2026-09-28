@@ -12,6 +12,7 @@ import (
 
 	"github.com/c0ze/tincan/v2/internal/envelope"
 	"github.com/c0ze/tincan/v2/internal/filelock"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
@@ -112,12 +113,18 @@ func Up(ctx context.Context, o UpOptions) (UpResult, error) {
 			return UpResult{}, err
 		}
 	}
-	data, err := json.Marshal(o.Preset)
+	owner := envelope.NewID()
+	if err := removeStalePresetFiles(room, o.Name); err != nil {
+		return UpResult{}, err
+	}
+	presetFile, err := writePresetFile(room, o.Name, owner, o.Preset)
 	if err != nil {
 		return UpResult{}, err
 	}
-	owner := envelope.NewID()
-	args := []string{"serve", o.Name, "--room", room, "--daemon", "--owner", owner, "--resolved-label", o.Label, "--resolved-preset", string(data)}
+	// serve removes the file once it has read it; this covers a daemon that
+	// never got that far.
+	defer os.Remove(presetFile)
+	args := []string{"serve", o.Name, "--room", room, "--daemon", "--owner", owner, "--resolved-label", o.Label, "--resolved-preset-file", presetFile}
 	_, exited, err := StartDetached(exe, args, room, LogPath(room, o.Name))
 	if err != nil {
 		return UpResult{}, err
@@ -142,6 +149,76 @@ func Up(ctx context.Context, o UpOptions) (UpResult, error) {
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
+}
+
+// presetFileDir holds the private hand-off of a launch's resolved preset from
+// Up to the daemon it starts (spec §5.2). One directory per listener, because
+// listener names may contain dots.
+func presetFileDir(room, name string) string { return filepath.Join(Dir(room), "config", name) }
+
+// writePresetFile stores p for the daemon of lifetime owner: 0700 directory,
+// 0600 file, written atomically. The argv carries only the path.
+func writePresetFile(room, name, owner string, p Preset) (string, error) {
+	data, err := json.Marshal(p)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(presetFileDir(room, name), owner+".json")
+	if err := fsutil.WriteFileAtomic(path, data); err != nil {
+		return "", fmt.Errorf("write preset hand-off: %w", err)
+	}
+	return path, nil
+}
+
+// ReadPresetFile loads and removes the hand-off file at path, which must be in
+// listener name's hand-off directory of room.
+func ReadPresetFile(room, name, path string) (Preset, error) {
+	if err := spool.ValidName(name); err != nil {
+		return Preset{}, err
+	}
+	room, err := canonicalRoom(room)
+	if err != nil {
+		return Preset{}, err
+	}
+	dir := presetFileDir(room, name)
+	if filepath.Dir(filepath.Clean(path)) != dir {
+		return Preset{}, fmt.Errorf("preset hand-off %s is not in %s", path, dir)
+	}
+	data, err := fsutil.ReadFile(path, 1<<20)
+	if err != nil {
+		return Preset{}, fmt.Errorf("read preset hand-off: %w", err)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Preset{}, err
+	}
+	_ = fsutil.SyncDir(dir)
+	var p Preset
+	if err := json.Unmarshal(data, &p); err != nil {
+		return Preset{}, fmt.Errorf("read preset hand-off: %w", err)
+	}
+	if err := p.normalize(); err != nil {
+		return Preset{}, err
+	}
+	return p, nil
+}
+
+// removeStalePresetFiles empties name's hand-off directory. Callers hold the
+// launch lock with the lifetime lock free, so no daemon is reading one.
+func removeStalePresetFiles(room, name string) error {
+	dir := presetFileDir(room, name)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func existingResult(st State, o UpOptions) (UpResult, error) {

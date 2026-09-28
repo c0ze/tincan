@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -50,6 +51,10 @@ func fakeAgent(args []string) int {
 	}
 	if len(args) > 0 && args[0] == "echo" {
 		fmt.Printf("echo: %s\n", strings.Join(args[1:], " "))
+		return 0
+	}
+	if len(args) > 1 && args[0] == "env" {
+		fmt.Printf("%s=%s\n", args[1], os.Getenv(args[1]))
 		return 0
 	}
 	fmt.Fprintln(os.Stderr, "fake-agent: unknown mode")
@@ -434,5 +439,41 @@ func TestPresetsViewsWithholdEnvValues(t *testing.T) {
 		if strings.Contains(out, "/secret/profile") || !strings.Contains(out, "CODEX_HOME") || !strings.Contains(out, "OPENAI_API_KEY") {
 			t.Fatalf("%s view:\n%s", format, out)
 		}
+	}
+}
+
+func TestUpHandsPresetEnvPrivately(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("detached up unsupported")
+	}
+	fakeAgentConfig(t)
+	exe, _ := os.Executable()
+	writeAgentsConfig(t, os.Getenv("HOME"), fmt.Sprintf(
+		`{"fake":{"exec":[%q,"fake-agent","env","PROFILE_TOKEN"],"env":{"PROFILE_TOKEN":"s3cret-value"},"env_unset":[]}}`, exe))
+	room := t.TempDir()
+	t.Cleanup(func() { run("down", "fake", "--room", room, "--wait", "5") })
+	if code, out, errOut := run("up", "fake", "--room", room, "--wait", "10"); code != ExitOK {
+		t.Fatalf("up: %d %q %q", code, out, errOut)
+	}
+	st, ok, err := host.ReadState(room, "fake")
+	if err != nil || !ok {
+		t.Fatalf("state: %v %v", ok, err)
+	}
+	args, err := exec.Command("ps", "-o", "args=", "-p", strconv.Itoa(st.PID)).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(args), "s3cret-value") || strings.Contains(string(args), "--resolved-preset ") {
+		t.Fatalf("serve argv exposes the preset: %s", args)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(host.Dir(room), "config", "fake")); len(entries) != 0 {
+		t.Fatalf("hand-off file left behind: %v", entries)
+	}
+	if code, out, errOut := run("up", "fake", "--room", room, "--wait", "10"); code != ExitOK || !strings.HasPrefix(out, "already up") {
+		t.Fatalf("identical relaunch: %d %q %q", code, out, errOut)
+	}
+	code, out, errOut := run("ask", "--room", room, "--to", "fake", "--from", "orch", "--body", "hi", "--timeout", "20", "--format", "body")
+	if code != ExitOK || !strings.Contains(out, "PROFILE_TOKEN=s3cret-value") {
+		t.Fatalf("ask: %d %q %q", code, out, errOut)
 	}
 }
