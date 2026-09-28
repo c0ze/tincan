@@ -413,3 +413,67 @@ func readInput(path string) (CreateRequest, error) {
 	}
 	return req, json.Unmarshal(data, &req)
 }
+
+// Janitor is one maintenance pass (committees §6.6): resume creations whose
+// creator died, import finished results, clean up acknowledged, cancelled
+// or long-expired jobs, and forget records 7 days after expiry.
+func (s *Service) Janitor(ctx context.Context) error {
+	st := s.store()
+	jobs, err := st.List()
+	if err != nil {
+		return err
+	}
+	now := s.now()
+	for _, j := range jobs {
+		if now.After(j.ExpiresAt.Add(TombstoneKeep)) {
+			s.cleanup(ctx, j)
+			st.Remove(j.ID)
+			os.Remove(s.packetPath(j.ID))
+			continue
+		}
+		lock, err := st.TryLock(j.ID)
+		if err != nil {
+			continue // creation or another operation holds it
+		}
+		cur, ok, err := st.Get(j.ID)
+		if err != nil || !ok {
+			lock.Close()
+			continue
+		}
+		if cur.State == "creating" {
+			lock.Close()
+			s.start(cur.ID)
+			continue
+		}
+		if s.refresh(&cur) {
+			st.Save(cur)
+		}
+		due := cur.Acked || cur.State == "cancelled" || now.After(cur.ExpiresAt.Add(time.Hour))
+		if due && !cur.Cleaned {
+			s.cleanup(ctx, cur)
+			cur.Cleaned = true
+			st.Save(cur)
+		}
+		lock.Close()
+	}
+	return nil
+}
+
+// cleanup stops the job's listener and removes its workspace; the
+// workspace must lie under <state>/reviews/ws.
+func (s *Service) cleanup(ctx context.Context, j Job) {
+	if j.Workspace == "" {
+		return
+	}
+	root := filepath.Join(s.StateDir, "reviews", "ws") + string(filepath.Separator)
+	if !strings.HasPrefix(j.Workspace, root) {
+		return
+	}
+	if _, err := os.Stat(j.Workspace); err != nil {
+		return
+	}
+	if err := host.Down(ctx, j.Workspace, j.Preset, 10*time.Second); err != nil {
+		return // try again next pass
+	}
+	os.RemoveAll(j.Workspace)
+}
