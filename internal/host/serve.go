@@ -236,6 +236,9 @@ func handle(ctx context.Context, o ServeOptions, e *envelope.Envelope) string {
 		vars.Out = spec.OutFile
 	}
 	spec.Argv = Render(p.Exec, vars)
+	if p.Pinned {
+		spec.Argv[0], spec.Pinned = p.Exec[0], true
+	}
 	if p.Stdin == "body" {
 		body := e.Body
 		spec.Stdin = &body

@@ -542,3 +542,20 @@ func TestServeUnexpandableEnvDoesNotStrandSession(t *testing.T) {
 	}
 	stopServe(t, sp, done)
 }
+
+// A pinned preset's argv[0] is never template-expanded, and a file named like
+// the executable inside the room is never what runs (committees §6.6).
+func TestServePinnedPresetIgnoresRoomExecutables(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script decoy")
+	}
+	exe, _ := os.Executable()
+	p := Preset{Exec: []string{exe, "echo", "{body}"}, Pinned: true}
+	room, sp, _, done, _ := startServe(t, p, "fake")
+	decoy := filepath.Join(room, filepath.Base(exe))
+	os.WriteFile(decoy, []byte("#!/bin/sh\necho decoy\n"), 0o755)
+	if reply := askVia(t, sp, "hi"); reply.Body != "echo: hi" {
+		t.Fatalf("reply = %q", reply.Body)
+	}
+	stopServe(t, sp, done)
+}

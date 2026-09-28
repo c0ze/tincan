@@ -5,7 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +23,7 @@ type RunSpec struct {
 	Stdin    *string           // body to pipe to stdin, or nil for no stdin at all
 	Env      map[string]string // preset env, applied after EnvUnset (spec §5.1)
 	EnvUnset []string          // inherited variables to remove
+	Pinned   bool              // Argv[0] is a pinned absolute path: no resolution or fallback
 	OutFile  string            // the {out} path when the preset replies via file, else ""
 	Timeout  time.Duration     // 0 = unbounded
 	// Output receives stdout/stderr chunks as they arrive. Calls are serialized.
@@ -90,7 +94,13 @@ func Run(ctx context.Context, spec RunSpec) Result {
 		runCtx, cancel = context.WithTimeout(runCtx, spec.Timeout)
 		defer cancel()
 	}
-	path, err := ResolveExecutable(spec.Argv[0], spec.Dir)
+	var path string
+	var err error
+	if spec.Pinned {
+		path, err = spec.Argv[0], PinnedExecutable(spec.Argv[0])
+	} else {
+		path, err = ResolveExecutable(spec.Argv[0], spec.Dir)
+	}
 	if err != nil {
 		return Result{ExitCode: -1, Err: err, Duration: time.Since(start)}
 	}
@@ -194,4 +204,20 @@ func tail(b []byte, n int) []byte {
 		return b
 	}
 	return b[len(b)-n:]
+}
+
+// PinnedExecutable checks a pinned executable: an absolute path to an
+// existing regular file, executable on Unix.
+func PinnedExecutable(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("pinned executable %q is not an absolute path", path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("pinned executable %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0) {
+		return fmt.Errorf("pinned executable %s is not an executable file", path)
+	}
+	return nil
 }

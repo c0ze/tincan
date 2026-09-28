@@ -281,3 +281,31 @@ func TestComposeEnvWithoutProfileKeepsBase(t *testing.T) {
 		t.Fatalf("composeEnv changed base: %v %v", got, err)
 	}
 }
+func TestPinnedRunUsesTheExactPath(t *testing.T) {
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	exe, _ := os.Executable()
+	res := Run(context.Background(), RunSpec{Argv: []string{exe, "echo", "pinned"}, Dir: t.TempDir(), Pinned: true})
+	if res.Err != nil || string(res.Stdout) != "echo: pinned\n" {
+		t.Fatalf("pinned run: %+v", res)
+	}
+	missing := filepath.Join(t.TempDir(), filepath.Base(exe))
+	res = Run(context.Background(), RunSpec{Argv: []string{missing, "echo", "x"}, Dir: t.TempDir(), Pinned: true})
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "pinned executable") {
+		t.Fatalf("vanished pinned executable fell back: %+v", res)
+	}
+	if res := Run(context.Background(), RunSpec{Argv: []string{"relative/tool"}, Dir: t.TempDir(), Pinned: true}); res.Err == nil {
+		t.Fatal("relative pinned executable accepted")
+	}
+}
+
+func TestPinnedExecutable(t *testing.T) {
+	exe, _ := os.Executable()
+	if err := PinnedExecutable(exe); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"", "codex", "./codex", filepath.Join(t.TempDir(), "absent"), t.TempDir()} {
+		if PinnedExecutable(bad) == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}

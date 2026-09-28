@@ -37,6 +37,10 @@ type Preset struct {
 	// Provider names the persistent-session adapter explicitly, for wrappers
 	// and executables whose base name is not the adapter's (spec §5.3).
 	Provider string `json:"provider,omitempty"`
+	// Pinned marks Exec[0] as an absolute path resolved before the room
+	// existed (reviewer jobs, committees §6.6): it is run exactly, never
+	// re-resolved, never template-expanded. Not settable from agents.json.
+	Pinned bool `json:"pinned,omitempty"`
 }
 
 // configPreset is the on-disk shape of one ~/.config/tincan/agents.json
