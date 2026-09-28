@@ -257,6 +257,26 @@ file ← command-line flags:
 }
 ```
 
+**Account profiles.** One CLI can serve several accounts: `env` sets
+variables for the agent process, `env_unset` removes inherited ones, and
+`provider` names the session adapter for wrappers. Keys match
+`^[A-Z_][A-Z0-9_]{0,63}$`; `PATH`, the `TINCAN_` prefix and the parent-session
+variables tincan always scrubs are rejected. A value starting with `~/` expands
+to the home directory at launch.
+
+```json
+{
+  "codex-gmail":     { "exec": ["codex", "exec", "-s", "read-only", "--skip-git-repo-check", "-o", "{out}", "-"],
+                       "stdin": "body", "reply": "file", "env": {"CODEX_HOME": "~/.codex-gmail"} },
+  "claude-personal": { "exec": ["claude", "-p", "{body}", "--permission-mode", "plan"],
+                       "env": {"CLAUDE_CONFIG_DIR": "~/.claude-personal"}, "env_unset": ["ANTHROPIC_API_KEY"] }
+}
+```
+
+Env values stay private: `tincan presets`, MCP `tincan_presets` and `status`
+show keys only, and a hosted listener receives its resolved preset through a
+0600 file rather than its command line.
+
 Persistent adapters use structured output and return only the final assistant
 answer. Assistant text becomes progress; startup inventories, thoughts and
 provider stderr remain in the private host log. Empty, invalid, incomplete or

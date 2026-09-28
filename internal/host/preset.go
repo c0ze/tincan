@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -27,17 +28,29 @@ type Preset struct {
 	ExecTimeoutSec int `json:"exec_timeout_sec"`
 	// Session is persistent or stateless. Empty selects supported provider defaults.
 	Session string `json:"session,omitempty"`
+	// Env sets variables for the agent process, after EnvUnset (spec §5.1).
+	// Values are private: public views show keys only (see Public).
+	Env map[string]string `json:"env,omitempty"`
+	// EnvUnset removes inherited variables, e.g. ANTHROPIC_API_KEY so a
+	// profile's own login is used.
+	EnvUnset []string `json:"env_unset,omitempty"`
+	// Provider names the persistent-session adapter explicitly, for wrappers
+	// and executables whose base name is not the adapter's (spec §5.3).
+	Provider string `json:"provider,omitempty"`
 }
 
 // configPreset is the on-disk shape of one ~/.config/tincan/agents.json
 // entry: the same fields, but an absent exec_timeout_sec must mean "default"
 // rather than 0 ("no bound"), hence the pointer.
 type configPreset struct {
-	Exec           []string `json:"exec"`
-	Stdin          string   `json:"stdin"`
-	Reply          string   `json:"reply"`
-	ExecTimeoutSec *int     `json:"exec_timeout_sec"`
-	Session        string   `json:"session,omitempty"`
+	Exec           []string          `json:"exec"`
+	Stdin          string            `json:"stdin"`
+	Reply          string            `json:"reply"`
+	ExecTimeoutSec *int              `json:"exec_timeout_sec"`
+	Session        string            `json:"session,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	EnvUnset       []string          `json:"env_unset,omitempty"`
+	Provider       string            `json:"provider,omitempty"`
 }
 
 // Builtin returns the presets that ship with tincan: the headless
@@ -92,7 +105,8 @@ func LoadConfig(path string) (map[string]Preset, error) {
 	}
 	out := make(map[string]Preset, len(raw))
 	for name, c := range raw {
-		p := Preset{Exec: c.Exec, Stdin: c.Stdin, Reply: c.Reply, ExecTimeoutSec: DefaultExecTimeoutSec, Session: c.Session}
+		p := Preset{Exec: c.Exec, Stdin: c.Stdin, Reply: c.Reply, ExecTimeoutSec: DefaultExecTimeoutSec, Session: c.Session,
+			Env: c.Env, EnvUnset: c.EnvUnset, Provider: c.Provider}
 		if c.ExecTimeoutSec != nil {
 			p.ExecTimeoutSec = *c.ExecTimeoutSec
 		}
@@ -132,6 +146,36 @@ func (p *Preset) normalize() error {
 	if p.Reply == "file" && !hasPlaceholder(p.Exec, "{out}") {
 		return errors.New(`reply "file" requires an {out} placeholder in exec`)
 	}
+	if len(p.Env) == 0 {
+		p.Env = nil
+	}
+	if len(p.EnvUnset) == 0 {
+		p.EnvUnset = nil
+	}
+	for k, v := range p.Env {
+		if err := validEnvKey(k); err != nil {
+			return err
+		}
+		if strings.ContainsRune(v, 0) {
+			return fmt.Errorf("env %s: value contains a NUL byte", k)
+		}
+	}
+	seen := map[string]bool{}
+	for _, k := range p.EnvUnset {
+		if err := validEnvKey(k); err != nil {
+			return err
+		}
+		if seen[k] {
+			return fmt.Errorf("env_unset lists %s twice", k)
+		}
+		if _, ok := p.Env[k]; ok {
+			return fmt.Errorf("%s is both set in env and removed by env_unset", k)
+		}
+		seen[k] = true
+	}
+	if p.Provider != "" && !SupportsSessions(p.Provider) {
+		return fmt.Errorf("provider must be claude, grok, agy or kimi, got %q", p.Provider)
+	}
 	return nil
 }
 
@@ -142,6 +186,50 @@ func hasPlaceholder(exec []string, ph string) bool {
 		}
 	}
 	return false
+}
+
+var envKeyPattern = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}$`)
+
+// validEnvKey applies the spec §5.1 key rules to env and env_unset names.
+func validEnvKey(k string) error {
+	switch {
+	case !envKeyPattern.MatchString(k):
+		return fmt.Errorf("env key %q must match %s", k, envKeyPattern)
+	case k == "PATH":
+		return errors.New("env cannot change PATH; tincan resolves agent executables itself")
+	case strings.HasPrefix(k, "TINCAN_"):
+		return fmt.Errorf("env key %s uses the reserved TINCAN_ prefix", k)
+	case parentSessionEnv[k]:
+		return fmt.Errorf("env key %s is a parent-session variable tincan always removes", k)
+	}
+	return nil
+}
+
+// PublicPreset is a preset as shown by `tincan presets` and other public
+// views: env values are withheld, only their keys are listed (spec §5.2).
+type PublicPreset struct {
+	Exec           []string `json:"exec"`
+	Stdin          string   `json:"stdin"`
+	Reply          string   `json:"reply"`
+	ExecTimeoutSec int      `json:"exec_timeout_sec"`
+	Session        string   `json:"session,omitempty"`
+	Provider       string   `json:"provider,omitempty"`
+	EnvKeys        []string `json:"env_keys,omitempty"`
+	EnvUnset       []string `json:"env_unset,omitempty"`
+}
+
+// Public returns the redacted view of p.
+func (p Preset) Public() PublicPreset {
+	keys := make([]string, 0, len(p.Env))
+	for k := range p.Env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		keys = nil
+	}
+	return PublicPreset{Exec: p.Exec, Stdin: p.Stdin, Reply: p.Reply, ExecTimeoutSec: p.ExecTimeoutSec,
+		Session: p.Session, Provider: p.Provider, EnvKeys: keys, EnvUnset: p.EnvUnset}
 }
 
 // Effective returns the built-in presets overlaid with the user config at

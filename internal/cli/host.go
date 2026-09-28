@@ -135,7 +135,11 @@ func cmdPresets(args []string, stdout, stderr io.Writer) int {
 		return ExitError
 	}
 	if *format == "json" {
-		data, err := json.MarshalIndent(presets, "", "  ")
+		views := make(map[string]host.PublicPreset, len(presets))
+		for name, p := range presets {
+			views[name] = p.Public()
+		}
+		data, err := json.MarshalIndent(views, "", "  ")
 		if err != nil {
 			fmt.Fprintf(stderr, "tincan presets: %v\n", err)
 			return ExitError
@@ -144,7 +148,7 @@ func cmdPresets(args []string, stdout, stderr io.Writer) int {
 		return ExitOK
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSTDIN\tREPLY\tTIMEOUT\tBINARY\tEXEC")
+	fmt.Fprintln(tw, "NAME\tSTDIN\tREPLY\tTIMEOUT\tBINARY\tENV\tEXEC")
 	for _, n := range host.Names(presets) {
 		p := presets[n]
 		timeout := "none"
@@ -155,10 +159,23 @@ func cmdPresets(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			binary = "missing"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", n, p.Stdin, p.Reply, timeout, binary, strings.Join(p.Exec, " "))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", n, p.Stdin, p.Reply, timeout, binary, envSummary(p.Public()), strings.Join(p.Exec, " "))
 	}
 	tw.Flush()
 	return ExitOK
+}
+
+// envSummary lists a preset's env keys and, prefixed with "-", its removed
+// variables; values are never shown.
+func envSummary(v host.PublicPreset) string {
+	parts := append([]string(nil), v.EnvKeys...)
+	for _, k := range v.EnvUnset {
+		parts = append(parts, "-"+k)
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ",")
 }
 
 func cmdServe(args []string, stdout, stderr io.Writer) int {

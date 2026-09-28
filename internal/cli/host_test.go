@@ -422,3 +422,17 @@ func TestUpAskStatusDownRoundTrip(t *testing.T) {
 		t.Fatalf("host log missing the run: %v\n%s", err, log)
 	}
 }
+
+func TestPresetsViewsWithholdEnvValues(t *testing.T) {
+	fakeAgentConfig(t)
+	writeAgentsConfig(t, os.Getenv("HOME"), `{"acct":{"exec":["codex","exec"],"env":{"CODEX_HOME":"/secret/profile"},"env_unset":["OPENAI_API_KEY"]}}`)
+	for _, format := range []string{"json", "table"} {
+		code, out, errOut := run("presets", "--format", format)
+		if code != ExitOK {
+			t.Fatalf("%s: %d %s", format, code, errOut)
+		}
+		if strings.Contains(out, "/secret/profile") || !strings.Contains(out, "CODEX_HOME") || !strings.Contains(out, "OPENAI_API_KEY") {
+			t.Fatalf("%s view:\n%s", format, out)
+		}
+	}
+}

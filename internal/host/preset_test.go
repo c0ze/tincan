@@ -1,6 +1,8 @@
 package host
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -174,5 +176,74 @@ func TestNamesSorted(t *testing.T) {
 	got := Names(map[string]Preset{"b": {}, "a": {}, "c": {}})
 	if !sort.StringsAreSorted(got) || len(got) != 3 {
 		t.Fatalf("Names = %v", got)
+	}
+}
+
+func TestLoadConfigAccountProfileFields(t *testing.T) {
+	path := writeConfig(t, `{"claude-personal":{"exec":["claude","-p","{body}"],
+		"env":{"CLAUDE_CONFIG_DIR":"~/.claude-personal"},"env_unset":["ANTHROPIC_API_KEY"],"provider":"claude"}}`)
+	got, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := got["claude-personal"]
+	if p.Env["CLAUDE_CONFIG_DIR"] != "~/.claude-personal" || !reflect.DeepEqual(p.EnvUnset, []string{"ANTHROPIC_API_KEY"}) || p.Provider != "claude" {
+		t.Fatalf("profile fields lost: %+v", p)
+	}
+}
+
+func TestLoadConfigRejectsBadProfiles(t *testing.T) {
+	for name, entry := range map[string]string{
+		"lowercase key":    `{"exec":["x"],"env":{"home":"y"}}`,
+		"leading digit":    `{"exec":["x"],"env":{"1A":"y"}}`,
+		"PATH":             `{"exec":["x"],"env":{"PATH":"/bin"}}`,
+		"reserved prefix":  `{"exec":["x"],"env":{"TINCAN_ROOM":"/"}}`,
+		"scrubbed key":     `{"exec":["x"],"env":{"CLAUDECODE":"1"}}`,
+		"too long":         fmt.Sprintf(`{"exec":["x"],"env":{"A%s":"y"}}`, strings.Repeat("B", 64)),
+		"NUL value":        `{"exec":["x"],"env":{"A":"b\u0000c"}}`,
+		"unset PATH":       `{"exec":["x"],"env_unset":["PATH"]}`,
+		"unset reserved":   `{"exec":["x"],"env_unset":["TINCAN_ROOM"]}`,
+		"set and unset":    `{"exec":["x"],"env":{"A":"1"},"env_unset":["A"]}`,
+		"duplicate unset":  `{"exec":["x"],"env_unset":["A","A"]}`,
+		"unknown provider": `{"exec":["x"],"provider":"codex"}`,
+	} {
+		if _, err := LoadConfig(writeConfig(t, `{"p":`+entry+`}`)); err == nil {
+			t.Errorf("%s: accepted %s", name, entry)
+		}
+	}
+}
+
+func TestNormalizeDropsEmptyProfileCollections(t *testing.T) {
+	got, err := LoadConfig(writeConfig(t, `{"p":{"exec":["x"],"env":{},"env_unset":[]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["p"].Env != nil || got["p"].EnvUnset != nil {
+		t.Fatalf("empty collections kept: %#v", got["p"])
+	}
+	data, _ := json.Marshal(got["p"])
+	var back Preset
+	if err := json.Unmarshal(data, &back); err != nil || !reflect.DeepEqual(back, got["p"]) {
+		t.Fatalf("round trip changed preset: %#v vs %#v (%v)", back, got["p"], err)
+	}
+}
+
+func TestPublicPresetWithholdsEnvValues(t *testing.T) {
+	p := Preset{Exec: []string{"codex", "exec"}, Stdin: "none", Reply: "stdout", ExecTimeoutSec: 60,
+		Env:      map[string]string{"CODEX_HOME": "~/.codex-gmail", "B_TOKEN": "s3cret"},
+		EnvUnset: []string{"OPENAI_API_KEY"}}
+	v := p.Public()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "s3cret") || strings.Contains(string(data), ".codex-gmail") {
+		t.Fatalf("public view leaked a value: %s", data)
+	}
+	if !reflect.DeepEqual(v.EnvKeys, []string{"B_TOKEN", "CODEX_HOME"}) || !reflect.DeepEqual(v.EnvUnset, []string{"OPENAI_API_KEY"}) {
+		t.Fatalf("public view keys: %+v", v)
+	}
+	if !reflect.DeepEqual(v.Exec, p.Exec) || v.ExecTimeoutSec != 60 {
+		t.Fatalf("public view lost fields: %+v", v)
 	}
 }
