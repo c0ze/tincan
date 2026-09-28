@@ -170,3 +170,6 @@ func (s Store) Remove(id string) error {
 	}
 	return nil
 }
+
+// HTTPStatus lets callers classify the error (committees §6.4).
+func (e *Error) HTTPStatus() int { return e.Status }

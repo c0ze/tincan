@@ -92,3 +92,6 @@ func (p *peer) call(ctx context.Context, method, path string, in any, limit int6
 	}
 	return nil
 }
+
+// HTTPStatus lets the review coordinator classify the answer.
+func (e *PeerError) HTTPStatus() int { return e.Status }
