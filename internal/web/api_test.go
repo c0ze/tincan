@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,7 +22,7 @@ func apiServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	reg := rooms.Open(filepath.Join(t.TempDir(), "rooms.json"))
 	room, _ := filepath.EvalSymlinks(t.TempDir())
-	bin := filepath.Join(t.TempDir(), "agent")
+	bin := filepath.Join(t.TempDir(), fakeAgentName())
 	os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755)
 	presets := map[string]host.Preset{
 		"claude":  {Exec: []string{bin}, Stdin: "none", Reply: "stdout"},
@@ -363,4 +364,13 @@ func TestQuotasEndpointToleratesMalformedConfig(t *testing.T) {
 	if len(got) != 1 || got[0].ID != "claude" || got[0].State != "ok" || got[0].Percent != 97 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
+}
+
+// fakeAgentName is a file name the platform treats as a program: Windows
+// resolves executables by extension (PATHEXT), not by mode bits.
+func fakeAgentName() string {
+	if runtime.GOOS == "windows" {
+		return "agent.exe"
+	}
+	return "agent"
 }

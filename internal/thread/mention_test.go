@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -33,7 +34,7 @@ func TestParseMentions(t *testing.T) {
 func testResolver(t *testing.T, alive map[string]host.State) Resolver {
 	t.Helper()
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "agent")
+	bin := filepath.Join(dir, fakeAgentName())
 	os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755)
 	return Resolver{
 		Room: dir,
@@ -68,4 +69,13 @@ func TestResolveIgnoresInteractiveListeners(t *testing.T) {
 	if len(got) != 0 || !reflect.DeepEqual(unresolved, []string{"alice"}) {
 		t.Fatalf("got %+v unresolved %q", got, unresolved)
 	}
+}
+
+// fakeAgentName is a file name the platform treats as a program: Windows
+// resolves executables by extension (PATHEXT), not by mode bits.
+func fakeAgentName() string {
+	if runtime.GOOS == "windows" {
+		return "agent.exe"
+	}
+	return "agent"
 }

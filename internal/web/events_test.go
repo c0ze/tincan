@@ -246,11 +246,14 @@ func TestRoomPassErrorsAreLoggedOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, ".tincan"), 0o700); err != nil {
+	// A complete but corrupt journal line makes Snapshot fail the same way on
+	// every platform, so both Reconcile and Janitor report an error.
+	th, err := thread.Create(dir, "broken", "claude", "", 6)
+	if err != nil {
 		t.Fatal(err)
 	}
-	// A file where the threads directory belongs makes thread.List fail.
-	if err := os.WriteFile(thread.Root(dir), nil, 0o600); err != nil {
+	journal := filepath.Join(thread.Root(dir), th.ID, "events.jsonl")
+	if err := os.WriteFile(journal, []byte("not json\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.dropDispatcher(room.ID) })
