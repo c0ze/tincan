@@ -377,7 +377,9 @@ bounded request progress, with at most a 1 MiB in-memory tail per stream.
   return `ERROR exit=<code>` and the last 4 KiB of stderr; stateless commands also
   include captured stdout. Raw structured startup metadata is excluded.
 - `--exec-timeout` elapsed (default 3600 s; `0` = none) → the agent's whole
-  process group is killed; reply `ERROR timeout after <sec>s`.
+  process group is killed; reply `ERROR timeout after <sec>s`, the last 4 KiB of
+  stderr, and — stateless commands — captured stdout, so partial work is not
+  discarded. Structured startup metadata is still excluded.
 - Agent binary missing at run time (removed after `up`) → reply
   `ERROR exec: <message>`; the listener keeps running.
 - The listener is stopped (`down`/SIGTERM) mid-run → the agent is killed and

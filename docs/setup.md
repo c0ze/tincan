@@ -40,6 +40,23 @@ its full command and input/output settings. Custom wrappers default to stateless
 execution unless they explicitly select a supported session adapter. See
 [preset configuration](../PROTOCOL.md#presets-and-configtincanagentsjson).
 
+Example: Tencent CodeBuddy (`codebuddy`) as one stateless agent per model. Its
+`--effort` flag takes `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; the
+model IDs come from the CodeBuddy `/model` list or its `models.json`.
+
+```json
+{
+  "cbhy4": {
+    "exec": ["codebuddy", "-p", "{body}", "--model", "hy4-preview",
+             "--effort", "high", "--add-dir", "{room}", "-y"],
+    "stdin": "none",
+    "reply": "stdout",
+    "session": "stateless",
+    "exec_timeout_sec": 3600
+  }
+}
+```
+
 ## Connect an MCP client
 
 Register one user-level stdio server. `./install.sh --mcp` does this for Claude

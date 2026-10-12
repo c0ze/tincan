@@ -147,6 +147,22 @@ func TestRunTimeoutKillsProcessGroup(t *testing.T) {
 	}
 }
 
+func TestRunTimeoutKeepsPartialOutput(t *testing.T) {
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	spec := RunSpec{Argv: fakeExec("progress"), Dir: t.TempDir(), Timeout: time.Second}
+	res := Run(context.Background(), spec)
+	if !res.TimedOut {
+		t.Fatalf("want TimedOut, got %+v", res)
+	}
+	body := ReplyBody(spec, res)
+	if !strings.HasPrefix(body, "ERROR timeout after 1s\n") {
+		t.Fatalf("ReplyBody = %q", body)
+	}
+	if !strings.Contains(body, "first chunk") {
+		t.Fatalf("ReplyBody dropped stdout on timeout: %q", body)
+	}
+}
+
 func TestRunContextCancelKillsAndReportsInterrupted(t *testing.T) {
 	t.Setenv("TINCAN_FAKE_AGENT", "1")
 	pidfile := filepath.Join(t.TempDir(), "pid")

@@ -172,7 +172,17 @@ func ReplyBody(spec RunSpec, res Result) string {
 	case res.Killed:
 		return "ERROR interrupted: hosted listener was stopped while running"
 	case res.TimedOut:
-		return fmt.Sprintf("ERROR timeout after %ds", int(spec.Timeout/time.Second))
+		var b strings.Builder
+		fmt.Fprintf(&b, "ERROR timeout after %ds", int(spec.Timeout/time.Second))
+		if s := bytes.TrimRight(tail(res.Stderr, 4096), " \t\r\n"); len(s) > 0 {
+			b.WriteString("\n")
+			b.Write(s)
+		}
+		if out := bytes.TrimSpace(res.Stdout); len(out) > 0 {
+			b.WriteString("\n")
+			b.Write(out)
+		}
+		return b.String()
 	case res.Err != nil:
 		return "ERROR exec: " + strings.TrimPrefix(res.Err.Error(), "exec: ")
 	case res.ExitCode != 0:
