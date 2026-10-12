@@ -57,6 +57,25 @@ model IDs come from `~/.codebuddy/models.json`. Prefix them with `custom-local:`
 }
 ```
 
+Example: Meta Muse Code (`muse`), one stateless agent per model. Use the full
+catalog ID with its version (`muse-wonder-1.0`, `muse-spark-1.3`); a bare
+`muse-wonder` is refused as "does not exist or you lack access". The IDs your
+account can use are in `~/.local/share/muse/model-catalog/*.json`.
+
+```json
+{
+  "muse-wonder": {
+    "exec": ["muse", "exec", "--model", "muse-wonder-1.0", "--workspace", "{room}",
+             "--trust-workspace", "--no-foreign-personal-context",
+             "--max-model-steps", "200", "--disable-approval", "{body}"],
+    "stdin": "none",
+    "reply": "stdout",
+    "session": "stateless",
+    "exec_timeout_sec": 3600
+  }
+}
+```
+
 ## Connect an MCP client
 
 Register one user-level stdio server. `./install.sh --mcp` does this for Claude
