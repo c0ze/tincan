@@ -42,12 +42,12 @@ execution unless they explicitly select a supported session adapter. See
 
 Example: Tencent CodeBuddy (`codebuddy`) as one stateless agent per model. Its
 `--effort` flag takes `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; the
-model IDs come from the CodeBuddy `/model` list or its `models.json`.
+model IDs come from `~/.codebuddy/models.json`. Prefix them with `custom-local:` to use your own endpoint and key; a bare ID uses CodeBuddy's built-in plan.
 
 ```json
 {
   "cbhy4": {
-    "exec": ["codebuddy", "-p", "{body}", "--model", "hy4-preview",
+    "exec": ["codebuddy", "-p", "{body}", "--model", "custom-local:hy4-preview",
              "--effort", "high", "--add-dir", "{room}", "-y"],
     "stdin": "none",
     "reply": "stdout",
