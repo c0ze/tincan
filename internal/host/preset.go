@@ -76,6 +76,7 @@ func Builtin() map[string]Preset {
 		"agy":    stdout("agy", "-p", "{body}", "--dangerously-skip-permissions", "--model", "gemini-3.8-flash-high", "--print-timeout", "150m"),
 		"gemini": stdout("gemini", "-p", "{body}"),
 		"claude": stdout("claude", "-p", "{body}", "--dangerously-skip-permissions"),
+		"cursor": stdout("cursor-agent", "-p", "{body}", "--force", "--trust"),
 	}
 }
 
@@ -178,7 +179,7 @@ func (p *Preset) normalize() error {
 		seen[k] = true
 	}
 	if p.Provider != "" && !SupportsSessions(p.Provider) {
-		return fmt.Errorf("provider must be claude, grok, agy or kimi, got %q", p.Provider)
+		return fmt.Errorf("provider must be claude, grok, agy, kimi or cursor, got %q", p.Provider)
 	}
 	return nil
 }

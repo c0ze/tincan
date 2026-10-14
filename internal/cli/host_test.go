@@ -248,7 +248,7 @@ func TestPresetsJSONParses(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("not JSON: %v\n%s", err, stdout)
 	}
-	if len(got) != 7 || got["fake"].Exec[1] != "fake-agent" || got["codex"].Reply != "file" {
+	if len(got) != 8 || got["fake"].Exec[1] != "fake-agent" || got["codex"].Reply != "file" {
 		t.Fatalf("unexpected presets: %+v", got)
 	}
 }

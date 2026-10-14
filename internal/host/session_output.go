@@ -194,7 +194,9 @@ func (p *sessionParser) event(line []byte) (string, error) {
 		p.failure = providerError(m)
 	}
 	switch p.provider {
-	case "claude":
+	case "claude", "cursor":
+		// Cursor's stream-json follows Claude Code's events; its thinking
+		// deltas are ignored like Claude's thinking blocks.
 		if err := p.identify(fieldString(m, "session_id")); err != nil {
 			return "", err
 		}

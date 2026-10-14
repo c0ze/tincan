@@ -21,7 +21,7 @@ import (
 // SupportsSessions identifies adapters with tested command and output formats.
 func SupportsSessions(label string) bool {
 	switch label {
-	case "claude", "grok", "agy", "kimi":
+	case "claude", "grok", "agy", "kimi", "cursor":
 		return true
 	default:
 		return false
@@ -39,7 +39,12 @@ func SessionProvider(p Preset, label string) (provider string, implicit bool) {
 		return p.Provider, true
 	}
 	if len(p.Exec) > 0 {
-		if base := strings.TrimSuffix(filepath.Base(p.Exec[0]), ".exe"); SupportsSessions(base) {
+		base := strings.TrimSuffix(filepath.Base(p.Exec[0]), ".exe")
+		if base == "cursor-agent" {
+			// Cursor's CLI executable is named after the product's agent.
+			base = "cursor"
+		}
+		if SupportsSessions(base) {
 			return base, label != "custom"
 		}
 	}
@@ -67,7 +72,7 @@ func WithSession(p Preset, label, mode string) (Preset, error) {
 		return Preset{}, fmt.Errorf("session must be persistent or stateless, got %q", mode)
 	}
 	if mode == "persistent" && provider == "" {
-		return Preset{}, fmt.Errorf("preset %q has no supported persistent session adapter; set \"provider\" to claude, grok, agy or kimi", label)
+		return Preset{}, fmt.Errorf("preset %q has no supported persistent session adapter; set \"provider\" to claude, grok, agy, kimi or cursor", label)
 	}
 	p.Session = mode
 	p.Exec = append([]string(nil), p.Exec...)

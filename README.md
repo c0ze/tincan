@@ -146,7 +146,7 @@ Desktop and CLI clients can use the same MCP tools when they support local stdio
 servers. The workers are installed provider executables; tincan does not launch
 or control desktop application windows. See [client and provider setup](docs/setup.md).
 
-Claude, Grok, Agy and Kimi use persistent conversations by default with their
+Claude, Grok, Agy, Kimi and Cursor use persistent conversations by default with their
 native executable presets. Their saved conversation survives calls, reconnects
 and host restarts. Codex, Gemini and custom executables default to stateless
 runs. Select `session_mode: "stateless"` on launch for independent requests;
@@ -178,7 +178,7 @@ tincan status --room "$(git rev-parse --show-toplevel)"        # MODE hosted:cod
 tincan down codex --room "$(git rev-parse --show-toplevel)"    # when you are done
 ```
 
-Built-in presets: `codex`, `grok`, `kimi`, `agy`, `gemini`, `claude` (`tincan
+Built-in presets: `codex`, `grok`, `kimi`, `agy`, `gemini`, `claude`, `cursor` (`tincan
 presets` lists them; `~/.config/tincan/agents.json` adds or overrides). Every
 completed run gets a reply, including agent failures (`ERROR exit=…`) and timeouts.
 Interrupted work is recorded for inspection and is never automatically replayed;

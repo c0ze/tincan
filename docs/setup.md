@@ -24,6 +24,7 @@ authenticate its corresponding command-line provider.
 | `agy` | `agy` | Persistent |
 | `kimi` | `kimi` | Persistent |
 | `gemini` | `gemini` | Stateless |
+| `cursor` | `cursor-agent` | Persistent |
 
 `tincan_presets` reports executable availability and adapter support. Finding an
 executable is not an authentication test; send a small task to verify the whole
@@ -72,6 +73,24 @@ account can use are in `~/.local/share/muse/model-catalog/*.json`.
     "reply": "stdout",
     "session": "stateless",
     "exec_timeout_sec": 3600
+  }
+}
+```
+
+Example: Cursor (`cursor-agent`) pinned to one model. The built-in `cursor`
+preset uses the account's default model (`auto`); `cursor-agent models` lists
+the IDs your account can use. Some models (Gemini 4 Argon among them) bill
+Cursor credits rather than the plan's weekly usage, and without credits a run
+fails with `ActionRequiredError: This model uses credits`. An entry whose
+executable is `cursor-agent` keeps a persistent conversation by default.
+
+```json
+{
+  "argon": {
+    "exec": ["cursor-agent", "-p", "{body}", "--force", "--trust",
+             "--model", "gemini-4-argon-high"],
+    "stdin": "none",
+    "reply": "stdout"
   }
 }
 ```

@@ -68,6 +68,12 @@ func sessionFixture(provider, id string) string {
 		return fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q,\"init\":{\"tools\":[\"PRIVATE_PLUGIN_INVENTORY\"]}}\n"+
 			"{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"text_delta\":\"ANSWER\"}}\n"+
 			"{\"event\":\"result\",\"result\":{\"conversation_id\":%q,\"status\":\"SUCCESS\",\"response\":\"ANSWER\\n\"}}\n", id, id)
+	case "cursor":
+		return fmt.Sprintf("{\"type\":\"system\",\"subtype\":\"init\",\"apiKeySource\":\"login\",\"session_id\":%q,\"model\":\"PRIVATE_PLUGIN_INVENTORY\"}\n"+
+			"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"PRIVATE_PROMPT\"}]},\"session_id\":%q}\n"+
+			"{\"type\":\"thinking\",\"subtype\":\"delta\",\"text\":\"PRIVATE_THOUGHT\",\"session_id\":%q}\n"+
+			"{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ANSWER\"}]},\"session_id\":%q}\n"+
+			"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ANSWER\",\"session_id\":%q}\n", id, id, id, id, id)
 	case "kimi":
 		return fmt.Sprintf("{\"role\":\"meta\",\"type\":\"system.version\",\"version\":\"PRIVATE_PLUGIN_INVENTORY\"}\n"+
 			"{\"role\":\"assistant\",\"content\":\"ANSWER\"}\n"+
@@ -101,7 +107,7 @@ func feedSession(t *testing.T, s *SessionRun, fixture string) string {
 }
 
 func TestSessionProviderFormatsResumeAndIsolation(t *testing.T) {
-	for _, label := range []string{"claude", "grok", "agy", "kimi"} {
+	for _, label := range []string{"claude", "grok", "agy", "kimi", "cursor"} {
 		t.Run(label, func(t *testing.T) {
 			room := t.TempDir()
 			p := Builtin()[label]
@@ -367,7 +373,7 @@ func TestSessionNonzeroErrorFinalLineWithoutNewline(t *testing.T) {
 }
 
 func TestSessionIDsCannotSelectTitlesOrMostRecent(t *testing.T) {
-	for _, provider := range []string{"claude", "grok", "agy", "kimi"} {
+	for _, provider := range []string{"claude", "grok", "agy", "kimi", "cursor"} {
 		if !validSessionID(provider, fixtureSessionID(provider)) {
 			t.Fatalf("rejected valid %s ID", provider)
 		}

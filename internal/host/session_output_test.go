@@ -87,7 +87,7 @@ func TestSessionClaudeDiagnosticDoesNotHideFailures(t *testing.T) {
 			t.Fatalf("invalid output after a successful result was accepted: %q", trailing)
 		}
 	}
-	for _, provider := range []string{"claude", "grok", "agy", "kimi"} {
+	for _, provider := range []string{"claude", "grok", "agy", "kimi", "cursor"} {
 		s, err := PrepareSession(t.TempDir(), "worker", provider, Builtin()[provider])
 		if err != nil {
 			t.Fatal(err)

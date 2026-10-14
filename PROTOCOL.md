@@ -195,7 +195,7 @@ a detached `tincan serve` process that
 4. loops. A `kind == "stop"` message (`tincan stop`), authenticated shutdown
    (`tincan down`), or SIGTERM/SIGINT ends the loop.
 
-Each request runs one provider CLI process. Claude, Grok, Agy and Kimi native
+Each request runs one provider CLI process. Claude, Grok, Agy, Kimi and Cursor native
 executable presets resume a conversation scoped to the room and listener name by
 default. Codex, Gemini and custom executables default to stateless runs and need
 self-contained briefs. One hosted process is one serial worker; run `up` with
@@ -246,6 +246,7 @@ described below):
 | `agy`    | `agy -p {body} --dangerously-skip-permissions --model gemini-3.8-flash-high --print-timeout 150m` | none | stdout |
 | `gemini` | `gemini -p {body}` | none | stdout |
 | `claude` | `claude -p {body} --dangerously-skip-permissions` | none | stdout |
+| `cursor` | `cursor-agent -p {body} --force --trust` | none | stdout |
 
 Placeholders: `{body}` (the message body, passed as **one argv element** —
 never through a shell), `{out}` (a per-message temp file whose contents become

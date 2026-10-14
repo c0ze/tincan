@@ -14,7 +14,7 @@ import (
 func TestBuiltinPresetsMatchSpec(t *testing.T) {
 	b := Builtin()
 	got := Names(b)
-	want := []string{"agy", "claude", "codex", "gemini", "grok", "kimi"}
+	want := []string{"agy", "claude", "codex", "cursor", "gemini", "grok", "kimi"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Names = %v, want %v", got, want)
 	}
@@ -28,6 +28,11 @@ func TestBuiltinPresetsMatchSpec(t *testing.T) {
 	agy := b["agy"]
 	if !reflect.DeepEqual(agy.Exec, []string{"agy", "-p", "{body}", "--dangerously-skip-permissions", "--model", "gemini-3.8-flash-high", "--print-timeout", "150m"}) {
 		t.Fatalf("agy exec = %q", agy.Exec)
+	}
+	cursor := b["cursor"]
+	if !reflect.DeepEqual(cursor.Exec, []string{"cursor-agent", "-p", "{body}", "--force", "--trust"}) ||
+		cursor.Stdin != "none" || cursor.Reply != "stdout" || cursor.ExecTimeoutSec != DefaultExecTimeoutSec {
+		t.Fatalf("cursor preset = %+v", cursor)
 	}
 	for _, n := range []string{"agy", "claude", "gemini", "grok", "kimi"} {
 		p := b[n]
@@ -101,8 +106,8 @@ func TestEffectiveConfigReplacesBuiltinWholesale(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 7 {
-		t.Fatalf("want 6 built-ins + fake = 7 presets, got %d: %v", len(got), Names(got))
+	if len(got) != 8 {
+		t.Fatalf("want 7 built-ins + fake = 8 presets, got %d: %v", len(got), Names(got))
 	}
 	if !reflect.DeepEqual(got["kimi"].Exec, []string{"kimi", "--print", "{body}"}) {
 		t.Fatalf("kimi not overridden: %+v", got["kimi"])
