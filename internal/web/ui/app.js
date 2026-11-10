@@ -28,6 +28,7 @@ const state = {
   committeeNotice: "", // outcome of the last committee save/delete, shown above the list
   editingCommittee: false, // the committee editor is open: notes must not re-render over it
   reviewOpen: null,    // {key, rid, id} while a review's detail is shown
+  reviewGen: 0,        // bumped per showReview call; drops stale responses
   reviewDraft: {},     // key/rid -> {committee, scope, question} typed into "Start a review"
 };
 
@@ -500,10 +501,11 @@ function reviewForm(key, rid) {
   const go = el("button", "", "Request review");
   go.type = "button";
   go.onclick = async () => {
+    const cur = state.current;
     try {
       const r = await api(key, `rooms/${encodeURIComponent(rid)}/reviews`, { method: "POST", body: { committee: committee.value, scope: scope.value, question: question.value, request_id: clientId() } });
       delete state.reviewDraft[key + "/" + rid];
-      showReview(key, rid, r.review_id);
+      if (state.current === cur) showReview(key, rid, r.review_id); // not after navigating away
     } catch (e) { status.textContent = e.message; }
   };
   const label = (t, i) => { const l = el("label", "", t + " "); l.append(i); return l; };
@@ -512,8 +514,13 @@ function reviewForm(key, rid) {
 }
 
 async function showReview(key, rid, id, from) {
-  from = from || (state.reviewOpen && state.reviewOpen.id === id ? state.reviewOpen.from : "activity");
+  const refresh = !!(state.reviewOpen && state.reviewOpen.id === id);
+  from = from || (refresh ? state.reviewOpen.from : "activity");
+  const cur = state.current, gen = ++state.reviewGen;
   const d = await api(key, `rooms/${encodeURIComponent(rid)}/reviews/${encodeURIComponent(id)}`);
+  // Drop a response that a newer showReview, navigation or (for a refresh
+  // of the open review) Back has overtaken.
+  if (gen !== state.reviewGen || state.current !== cur || (refresh && !state.reviewOpen)) return;
   const view = $("view");
   const box = el("div", "review");
   box.append(el("h3", "", `${d.committee} · ${d.status}${d.settled ? "" : " …"}`), el("p", "muted", d.question));

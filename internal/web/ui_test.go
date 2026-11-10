@@ -51,6 +51,9 @@ func TestUIContract(t *testing.T) {
 		// A review opened from a thread is not re-rendered over by thread notes.
 		"n.thread === cur.tid && !state.reviewOpen",
 		"function renderThread() {\n  if (state.reviewOpen) return;",
+		// A review response that arrives after navigation, a newer
+		// showReview or Back must not take over the view.
+		"gen !== state.reviewGen || state.current !== cur || (refresh && !state.reviewOpen)",
 		// The Activity page re-renders on every activity note; a question being
 		// typed into "Start a review" must survive it.
 		"state.reviewDraft",
