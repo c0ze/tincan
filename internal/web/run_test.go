@@ -3,6 +3,10 @@ package web
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -12,6 +16,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c0ze/tincan/v2/internal/dispatch"
+	"github.com/c0ze/tincan/v2/internal/host"
+	"github.com/c0ze/tincan/v2/internal/packet"
+	"github.com/c0ze/tincan/v2/internal/reviewjob"
 	"github.com/c0ze/tincan/v2/internal/rooms"
 )
 
@@ -130,6 +138,64 @@ func TestRunWaitsForShutdown(t *testing.T) {
 	}
 	if _, err := os.Stat(rooms.HeartbeatPath(state)); !os.IsNotExist(err) {
 		t.Fatalf("heartbeat left behind: %v", err)
+	}
+}
+
+// A job creation whose request body arrives after shutdown began would
+// start a background creation that nothing joins: it is refused instead.
+func TestRunRefusesJobsOnceShuttingDown(t *testing.T) {
+	reg := rooms.Open(filepath.Join(t.TempDir(), "rooms.json"))
+	state, _ := filepath.EvalSymlinks(t.TempDir())
+	qdir := t.TempDir()
+	// An executable that does not exist: a creation fails before launching.
+	presets := map[string]host.Preset{"reviewer": {Exec: []string{filepath.Join(t.TempDir(), "absent")}, Stdin: "none", Reply: "stdout"}}
+	s, err := New(Config{Owner: owner, Machine: "box", Registry: reg, QuotaDir: qdir, QuotaConfig: filepath.Join(qdir, "quotas.json"), StateDir: state,
+		Dispatch: dispatch.Options{Presets: presets}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := "look"
+	sum := sha256.Sum256([]byte(prompt))
+	body, _ := json.Marshal(reviewjob.CreateRequest{JobID: "rv-3333333333333333-0", ReviewID: "rv-3333333333333333", Requester: "hub", Preset: "reviewer",
+		ExpiresAt: time.Now().Add(time.Hour).UTC(), Prompt: prompt, PromptSHA: hex.EncodeToString(sum[:]),
+		Packet: &packet.Packet{Question: "q", Manifest: packet.Manifest{Scope: "none", BaseKind: "none", Changes: []packet.Change{}}}})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, ln) }()
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "POST /api/review-jobs HTTP/1.1\r\nHost: 127.0.0.1\r\nTailscale-User-Login: %s\r\nX-Tincan-Request: 1\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", owner, len(body))
+	conn.Write(body[:10])
+	time.Sleep(200 * time.Millisecond) // the handler is reading the body
+	cancel()
+	time.Sleep(200 * time.Millisecond) // shutdown has begun
+	conn.Write(body[10:])
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("job created during shutdown: %d", resp.StatusCode)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
+	if _, ok, _ := (reviewjob.Store{Dir: filepath.Join(state, "reviews")}).Get("rv-3333333333333333-0"); ok {
+		t.Error("a job was recorded during shutdown")
 	}
 }
 

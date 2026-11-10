@@ -105,6 +105,10 @@ type Server struct {
 	jobs  *reviewjob.Service  // reviewer jobs; nil without a state directory
 	coord *review.Coordinator // review coordinator; nil without a state directory
 
+	jobsMu     sync.Mutex     // guards jobsClosed and creating.Add
+	jobsClosed bool           // Run is shutting down: job creations are refused
+	creating   sync.WaitGroup // admitted job creations still inside Create
+
 	committeesMu       sync.Mutex // serializes peer committee-cache refreshes
 	committeesAttempt  time.Time  // last hub fetch attempt (guarded by committeesMu)
 	committeesAttempts int        // hub fetch attempts, for tests (guarded by committeesMu)
@@ -472,8 +476,10 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 		cancel()
 	}
 	// Event streams never end on their own and would hold Shutdown for its
-	// whole grace; a request still running at the grace is cut off.
+	// whole grace; a request still running at the grace is cut off. A job
+	// creation admitted from now on would start work nothing joins.
 	s.stopStreams()
+	s.closeJobs()
 	shutdown, cancelShutdown := context.WithTimeout(context.Background(), shutdownGrace)
 	if srv.Shutdown(shutdown) != nil {
 		srv.Close()
@@ -487,6 +493,7 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 	joined := make(chan struct{})
 	go func() {
 		bg.Wait()
+		s.joinJobs()
 		close(joined)
 	}()
 	select {

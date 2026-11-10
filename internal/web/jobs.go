@@ -62,6 +62,11 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		s.failBody(w, err)
 		return
 	}
+	if !s.admitJob() {
+		s.fail(w, http.StatusServiceUnavailable, errors.New("tincan web is shutting down"))
+		return
+	}
+	defer s.creating.Done()
 	j, err := s.jobs.Create(r.Context(), req)
 	if err != nil {
 		s.failJob(w, err)
@@ -122,13 +127,42 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{"job": viewJob(j), "acked": acked})
 }
 
-// runJobJanitor runs the reviewer job janitor every minute until ctx ends,
-// then waits for background creations.
+// admitJob lets a job creation in unless Run has begun shutting down; an
+// admitted creation calls s.creating.Done once Create has returned.
+func (s *Server) admitJob() bool {
+	s.jobsMu.Lock()
+	defer s.jobsMu.Unlock()
+	if s.jobsClosed {
+		return false
+	}
+	s.creating.Add(1)
+	return true
+}
+
+// closeJobs refuses job creations from now on.
+func (s *Server) closeJobs() {
+	s.jobsMu.Lock()
+	s.jobsClosed = true
+	s.jobsMu.Unlock()
+}
+
+// joinJobs waits, after closeJobs and once the janitor has stopped, for the
+// admitted creations to return from Create and then for the background
+// creations they and the janitor started.
+func (s *Server) joinJobs() {
+	if s.jobs == nil {
+		return
+	}
+	s.creating.Wait()
+	s.jobs.Wait()
+}
+
+// runJobJanitor runs the reviewer job janitor every minute until ctx ends;
+// Run joins the background creations (joinJobs).
 func (s *Server) runJobJanitor(ctx context.Context) {
 	if s.jobs == nil {
 		return
 	}
-	defer s.jobs.Wait()
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
 	for {
