@@ -461,7 +461,10 @@ submitting, materialize it, submit through `dispatch.Send` with request ID
 launch failure) cancels that saved request, then records a permanent `error`.
 A replay of an identical create that finds `creating` with the job lock free
 (the creator died) first inspects the recorded workspace: a request record
-there is adopted (terminal → its result is imported; otherwise → `running`);
+there is adopted (terminal → its result is imported; otherwise → `running`,
+after resubmitting it under the same request ID to launch its listener when
+no host is running it — the creator may have died between saving and
+launching);
 only when none exists is creation restarted in a fresh workspace — the one
 place a member can run twice (§6.4).
 

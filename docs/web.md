@@ -379,6 +379,12 @@ can be retried again.
 When a listener fails to launch after its request was saved, the saved
 request is cancelled at once (and Stop/Archive cancel any such leftovers), so
 a later launch of that listener never runs the stale prompt.
+If a running turn's hosted listener disappears (a reboot, a killed process),
+tincan web relaunches it under the same request: a queued turn then runs,
+and one that was mid-run ends as interrupted (it is never replayed). After
+three relaunches spaced 30 s apart fail, the turn ends with an error saying
+the listener could not be restarted. Interactive listeners are never
+relaunched.
 
 ## Rooms in the sidebar
 

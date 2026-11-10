@@ -169,7 +169,8 @@ func (s *Service) start(id string) {
 // create materializes the workspace and launches the member, holding the job
 // lock throughout. It resumes a job left in "creating" by a dead process:
 // a request already saved in the recorded workspace is adopted, so a member
-// that ran is never run again (committees §6.6, round 5 #1).
+// that ran is never run again (committees §6.6, round 5 #1), and its
+// listener is launched if no host is running it.
 func (s *Service) create(id string) {
 	st := s.store()
 	lock, err := st.Lock(context.Background(), id)
@@ -219,6 +220,20 @@ func (s *Service) create(id string) {
 	}
 	if j.Workspace != "" {
 		if r, err := request.Get(j.Workspace, j.ID); err == nil {
+			// The creator may have died between saving the request and
+			// launching its listener: launch it now, or nothing ever runs
+			// the saved request.
+			if !r.Terminal() && !r.Interactive && !st.cancelRequested(id) {
+				if _, alive := host.Existing(ctx, j.Workspace, j.Preset); !alive {
+					if err := s.relaunch(ctx, j, r); err != nil {
+						cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
+						request.Cancel(cctx, j.Workspace, j.ID)
+						ccancel()
+						fail("launch: " + err.Error())
+						return
+					}
+				}
+			}
 			j.State = "running"
 			importRequest(&j, r)
 			st.Save(j)
@@ -304,6 +319,30 @@ func (s *Service) create(id string) {
 	j.State = "running"
 	importRequest(&j, r)
 	st.Save(j)
+}
+
+// relaunch starts the listener of a saved request with the job's pinned
+// preset; resubmitting under the same request ID only launches the host
+// (and waits for one that is just starting).
+func (s *Service) relaunch(ctx context.Context, j Job, r request.Record) error {
+	presets, err := s.Presets()
+	if err != nil {
+		return err
+	}
+	preset, ok := presets[j.Preset]
+	if !ok {
+		return fmt.Errorf("preset %s no longer exists", j.Preset)
+	}
+	pinned, err := pin(preset)
+	if err != nil {
+		return err
+	}
+	if pinned.ExecTimeoutSec, err = s.launchTimeout(j); err != nil {
+		return err
+	}
+	o := dispatch.Options{Room: j.Workspace, Executable: s.Executable, Presets: map[string]host.Preset{j.Preset: pinned}}
+	_, err = dispatch.Send(ctx, o, dispatch.SendSpec{Agent: j.Preset, Preset: j.Preset, From: r.Envelope.From, Body: r.Envelope.Body, RequestID: j.ID})
+	return err
 }
 
 // launchTimeout is the member's exec timeout: the time left until expiry,

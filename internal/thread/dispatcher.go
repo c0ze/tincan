@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/c0ze/tincan/v2/internal/committee"
 	"github.com/c0ze/tincan/v2/internal/dispatch"
@@ -39,7 +40,20 @@ type Dispatcher struct {
 
 	mu   sync.Mutex
 	lock *filelock.Lock
+	// redrives tracks relaunches of running turns whose host is gone, by
+	// request ID (guarded by mu); redriveEvery spaces them (0 = 30 s).
+	redrives     map[string]*redriveState
+	redriveEvery time.Duration
 }
+
+type redriveState struct {
+	next     time.Time // no host probe before then
+	attempts int
+	err      error // the last relaunch error
+}
+
+// redriveMax relaunches are tried for one turn before it fails.
+const redriveMax = 3
 
 func New(o dispatch.Options) *Dispatcher { return &Dispatcher{Opts: o, From: "web"} }
 
@@ -399,8 +413,13 @@ func (d *Dispatcher) collect(ctx context.Context, t *Thread, m Message) error {
 		return err
 	}
 	if !r.Terminal() {
-		return nil
+		if r, err = d.redrive(ctx, r, m.Preset); err != nil || !r.Terminal() {
+			return err
+		}
 	}
+	d.mu.Lock()
+	delete(d.redrives, m.RequestID)
+	d.mu.Unlock()
 	state, text := outcome(r)
 	if err := t.Update(ctx, func(tx *Tx) error {
 		if cur, _ := tx.Snap.Message(m.ID); cur.State != StateRunning {
@@ -412,6 +431,58 @@ func (d *Dispatcher) collect(ctx context.Context, t *Thread, m Message) error {
 		return err
 	}
 	return d.hook("after-terminal")
+}
+
+// redrive restarts the hosted listener of a running turn whose host is gone
+// (a reboot, a killed listener): a hosted request becomes terminal only
+// through a live host, whose start-up recovery also settles a run the dead
+// host left uncertain. It resubmits under the same request ID, which only
+// launches the host (dispatch.Send serializes with a host that is just
+// starting). Probes and relaunches are spaced; after redriveMax relaunches
+// the request is finished as interrupted. Interactive receivers answer
+// through Poll and are never relaunched.
+func (d *Dispatcher) redrive(ctx context.Context, r request.Record, preset string) (request.Record, error) {
+	if r.Interactive {
+		return r, nil
+	}
+	every := d.redriveEvery
+	if every == 0 {
+		every = 30 * time.Second
+	}
+	now := time.Now()
+	d.mu.Lock()
+	if d.redrives == nil {
+		d.redrives = map[string]*redriveState{}
+	}
+	rs := d.redrives[r.ID]
+	if rs == nil {
+		rs = &redriveState{}
+		d.redrives[r.ID] = rs
+	}
+	due := !now.Before(rs.next)
+	if due {
+		rs.next = now.Add(every)
+	}
+	attempts, lastErr := rs.attempts, rs.err
+	d.mu.Unlock()
+	if !due {
+		return r, nil
+	}
+	if _, alive := host.Existing(ctx, d.Opts.Room, r.Agent); alive {
+		return r, nil
+	}
+	if attempts >= redriveMax {
+		text := "ERROR interrupted: hosted listener " + r.Agent + " is not running and could not be restarted"
+		if lastErr != nil {
+			text += ": " + lastErr.Error()
+		}
+		return request.Finish(d.Opts.Room, r.Envelope, text)
+	}
+	_, err := dispatch.Send(ctx, d.Opts, dispatch.SendSpec{Agent: r.Agent, Preset: preset, From: r.Envelope.From, Body: r.Envelope.Body, RequestID: r.ID})
+	d.mu.Lock()
+	rs.attempts, rs.err = rs.attempts+1, err
+	d.mu.Unlock()
+	return r, nil
 }
 
 func (d *Dispatcher) handoffs(ctx context.Context, t *Thread, m Message) error {
