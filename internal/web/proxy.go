@@ -102,6 +102,13 @@ func (s *Server) proxyPeer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "peers are not chained", http.StatusBadRequest)
 		return
 	}
+	if rest == "events" {
+		// A proxied event stream ends with ours when Run shuts down.
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		defer context.AfterFunc(s.streams, cancel)()
+		r = r.WithContext(ctx)
+	}
 	p.proxy.ServeHTTP(w, r)
 }
 

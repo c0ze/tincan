@@ -80,6 +80,8 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-s.streams.Done(): // shutting down; the client reconnects
+			return
 		case n := <-ch:
 			data, _ := json.Marshal(n)
 			fmt.Fprintf(w, "data: %s\n\n", data)
