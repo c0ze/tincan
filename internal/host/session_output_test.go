@@ -122,27 +122,49 @@ func TestSessionSkippedEventNeverYieldsPartialAnswer(t *testing.T) {
 			"{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", false},
 		{"grok", "{\"type\":\"text\",\"data\":\"" + big + "\"}\n{\"type\":\"tool_call\"}\n{\"type\":\"text\",\"data\":\"ANSWER\"}\n" +
 			"{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", true},
+		// Events that never contribute to the answer (tool results, progress)
+		// may be skipped; answer events and unidentifiable lines may not.
 		{"agy", "{\"event\":\"init\",\"conversation_id\":\"%ID%\"}\n{\"event\":\"result\",\"result\":{\"conversation_id\":\"%ID%" +
-			"\",\"status\":\"SUCCESS\",\"response\":\"ANSWER\"}}\n{\"event\":\"step_update\",\"pad\":\"" + big + "\"}\n", false},
+			"\",\"status\":\"SUCCESS\",\"response\":\"ANSWER\"}}\n{\"event\":\"step_update\",\"pad\":\"" + big + "\"}\n", true},
+		{"agy", "{\"event\":\"init\",\"conversation_id\":\"%ID%\"}\n{\"event\":\"result\",\"result\":{\"conversation_id\":\"%ID%" +
+			"\",\"status\":\"SUCCESS\",\"response\":\"ANSWER\"}}\n{\"event\":\"result\",\"pad\":\"" + big + "\"}\n", false},
+		{"grok", "{\"type\":\"tool_call\",\"data\":{\"name\":\"read\"}}\n{\"type\":\"tool_call_update\",\"data\":{\"output\":\"" + big + "\"}}\n" +
+			"{\"type\":\"text\",\"data\":\"ANS\"}\n{\"type\":\"text\",\"data\":\"WER\"}\n{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", true},
+		{"grok", "{\"type\":\"text\",\"data\":\"ANSWER\"}\n" + big + "\n{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", false},
+		{"grok", "{\"type\":\"text\",\"data\":\"ANSWER\"}\n{\"data\":\"" + big + "\",\"type\":\"tool_call_update\"}\n" +
+			"{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", false},
+		{"kimi", "{\"role\":\"assistant\",\"content\":\"ANSWER\"}\n{\"role\":\"tool\",\"content\":\"" + big + "\"}\n" +
+			"{\"role\":\"meta\",\"type\":\"session.resume_hint\",\"session_id\":\"%ID%\"}\n", true},
+		{"claude", "{\"type\":\"system\",\"session_id\":\"%ID%\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"%ID%\",\"is_error\":false,\"result\":\"ANSWER\"}\n" +
+			"{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"" + big + "\"}]}}\n", true},
+		{"claude", "{\"type\":\"system\",\"session_id\":\"%ID%\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"%ID%\",\"is_error\":false,\"result\":\"ANSWER\"}\n" +
+			"{\"type\":\"error\",\"message\":\"" + big + "\"}\n", false},
 	}
-	for i, c := range cases {
-		s, err := PrepareSession(t.TempDir(), "worker", c.provider, Builtin()[c.provider])
-		if err != nil {
-			t.Fatal(err)
-		}
-		id := s.record.ID
-		if id == "" {
-			id = fixtureSessionID(c.provider)
-		}
-		if _, err := s.Output("stdout", []byte(strings.ReplaceAll(c.fixture, "%ID%", id))); err != nil {
-			t.Fatalf("case %d: %v", i, err)
-		}
-		body, err := s.Reply(RunSpec{}, Result{ExitCode: 0})
-		if c.ok && (err != nil || body != "ANSWER") {
-			t.Errorf("case %d (%s): reply = %q, %v", i, c.provider, body, err)
-		}
-		if !c.ok && (err == nil || !strings.Contains(err.Error(), "output limit")) {
-			t.Errorf("case %d (%s): partial answer accepted: %q, %v", i, c.provider, body, err)
+	// Whole writes and pipe-sized chunks reach the oversized line differently.
+	for _, chunk := range []int{1 << 30, 64 << 10} {
+		for i, c := range cases {
+			s, err := PrepareSession(t.TempDir(), "worker", c.provider, Builtin()[c.provider])
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := s.record.ID
+			if id == "" {
+				id = fixtureSessionID(c.provider)
+			}
+			for fixture := strings.ReplaceAll(c.fixture, "%ID%", id); len(fixture) > 0; {
+				n := min(chunk, len(fixture))
+				if _, err := s.Output("stdout", []byte(fixture[:n])); err != nil {
+					t.Fatalf("case %d: %v", i, err)
+				}
+				fixture = fixture[n:]
+			}
+			body, err := s.Reply(RunSpec{}, Result{ExitCode: 0})
+			if c.ok && (err != nil || body != "ANSWER") {
+				t.Errorf("case %d (%s, chunk %d): reply = %q, %v", i, c.provider, chunk, body, err)
+			}
+			if !c.ok && (err == nil || !strings.Contains(err.Error(), "output limit")) {
+				t.Errorf("case %d (%s, chunk %d): partial answer accepted: %q, %v", i, c.provider, chunk, body, err)
+			}
 		}
 	}
 }

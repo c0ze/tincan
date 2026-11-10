@@ -95,9 +95,17 @@ func (p *sessionParser) write(data []byte) ([]byte, error) {
 		}
 		if p.discarding || len(p.pending)+n > MaxCapturedOutput {
 			// An event too large to hold (a huge tool result, say) is skipped
-			// and parsing goes on. It may have carried answer text, so Reply
-			// fails unless a later event replaces the answer whole.
-			p.discarding, p.skipped, p.stale = i < 0, true, true
+			// and parsing goes on. Unless its head identifies an event that
+			// never feeds the answer, Reply fails until a later event
+			// replaces the answer whole.
+			if !p.discarding {
+				head := p.pending
+				if len(head) < skipHeadBytes {
+					head = append(head, data[:min(n, skipHeadBytes-len(head))]...)
+				}
+				p.stale = p.stale || p.mayCarryAnswer(head[:min(len(head), skipHeadBytes)])
+			}
+			p.discarding, p.skipped = i < 0, true
 			p.pending = p.pending[:0]
 			if i < 0 {
 				break
@@ -119,6 +127,75 @@ func (p *sessionParser) write(data []byte) ([]byte, error) {
 		data = data[n+1:]
 	}
 	return progress.Bytes(), nil
+}
+
+// skipHeadBytes is how much of a skipped event is read for its type.
+const skipHeadBytes = 4096
+
+// mayCarryAnswer reports whether a skipped event, known only by its head,
+// could have changed the answer: answer text, a final result, a Grok body
+// reset or a failure. It mirrors event; an event whose type the head does
+// not show counts as one that could.
+func (p *sessionParser) mayCarryAnswer(head []byte) bool {
+	f := headFields(head)
+	kind, event, role := f["type"], f["event"], f["role"]
+	if kind == "error" || event == "error" {
+		return true
+	}
+	switch p.provider {
+	case "claude", "cursor":
+		// Assistant messages are progress only; the answer is the result.
+		return kind == "" || kind == "result"
+	case "grok":
+		switch kind {
+		case "", "text", "tool_call", "tool_use", "end":
+			return true
+		}
+		return false
+	case "agy":
+		return event == "" || event == "result"
+	case "kimi":
+		return (kind == "" && role == "") || role == "assistant" || kind == "session.resume_hint"
+	}
+	return true
+}
+
+// headFields returns the top-level string fields that appear in a possibly
+// truncated JSON object, stopping at the first token it cannot read.
+func headFields(head []byte) map[string]string {
+	fields := map[string]string{}
+	dec := json.NewDecoder(bytes.NewReader(head))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return fields
+	}
+	key, expectKey := "", true
+	for depth := 1; depth > 0; {
+		t, err := dec.Token()
+		if err != nil {
+			return fields
+		}
+		if d, ok := t.(json.Delim); ok {
+			if d == '{' || d == '[' {
+				depth++
+			} else if depth--; depth == 1 {
+				expectKey = true
+			}
+			continue
+		}
+		if depth != 1 {
+			continue
+		}
+		if expectKey {
+			key, _ = t.(string)
+			expectKey = false
+			continue
+		}
+		if s, ok := t.(string); ok {
+			fields[key] = s
+		}
+		expectKey = true
+	}
+	return fields
 }
 
 func (p *sessionParser) flush() error {
