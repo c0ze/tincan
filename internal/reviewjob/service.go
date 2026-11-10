@@ -226,16 +226,16 @@ func (s *Service) create(id string) {
 		st.Save(j)
 		return true
 	}
-	// failAfterCancel records msg once the saved request can no longer run;
-	// while its journal is busy it persists msg as pending instead, so the
-	// next pass retries only the cancellation, never a launch.
-	failAfterCancel := func(msg string) {
-		if s.cancelSaved(j) {
-			fail(msg)
+	// failAfterCancel keeps msg as the job's pending error, so no later pass
+	// launches it, and settles the job: it records msg once the saved
+	// request can no longer run, and until then later passes retry only
+	// the cancellation.
+	failAfterCancel := func(msg string, cancelIntent bool) {
+		j.PendingError = msg
+		if err := st.Save(j); err != nil {
 			return
 		}
-		j.PendingError = msg
-		st.Save(j)
+		s.settle(j, cancelIntent)
 	}
 	// A job with cancel intent or a pending launch failure is never launched
 	// again: only the cancellation of a saved request is retried, and the
@@ -253,7 +253,7 @@ func (s *Service) create(id string) {
 				// The job expired (its context with it): nothing may launch
 				// any more, and every probe would fail. Settle it as the
 				// launch-time expiry check does, with a fresh bounded context.
-				failAfterCancel("expired before launch")
+				failAfterCancel("expired before launch", false)
 				return
 			}
 			if !r.Terminal() && !r.Interactive {
@@ -281,7 +281,7 @@ func (s *Service) create(id string) {
 							return
 						}
 						if err != nil {
-							failAfterCancel("launch: " + err.Error())
+							failAfterCancel("launch: "+err.Error(), false)
 							return
 						}
 					}
@@ -291,6 +291,8 @@ func (s *Service) create(id string) {
 			importRequest(&j, r)
 			st.Save(j)
 			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return // unreadable, not absent: never restart over it; retried next pass
 		}
 		os.RemoveAll(j.Workspace)
 	}
@@ -355,21 +357,8 @@ func (s *Service) create(id string) {
 	s.at("launch")
 	r, err := dispatch.Send(ctx, o, dispatch.SendSpec{Agent: j.Preset, Preset: j.Preset, From: "review", Body: body, RequestID: j.ID})
 	if err != nil {
-		// A launch failure after the request was saved must never run later:
-		// the job settles once its cancellation is recorded, and until then
-		// the failure stays pending (see failAfterCancel).
-		msg := "launch: " + err.Error()
-		if !s.cancelSaved(j) {
-			j.PendingError = msg
-			st.Save(j)
-			return
-		}
-		if st.cancelRequested(id) {
-			j.State, j.Result, j.Tombstone = "cancelled", "ERROR canceled during launch", true
-			st.Save(j)
-			return
-		}
-		fail(msg)
+		// A launch failure after the request was saved must never run later.
+		failAfterCancel("launch: "+err.Error(), st.cancelRequested(id))
 		return
 	}
 	j.State = "running"
@@ -391,37 +380,91 @@ func (s *Service) at(point string) {
 // job adopted as running as Cancel leaves it.
 func (s *Service) settle(j Job, cancelIntent bool) {
 	st := s.store()
-	if !s.cancelSaved(j) {
-		return
+	if cancelIntent {
+		j.Tombstone = true
 	}
 	if j.Workspace != "" {
 		r, err := request.Get(j.Workspace, j.ID)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			os.RemoveAll(j.Workspace) // nothing was launched in it
-		case err != nil:
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return // unreadable: retried next pass
-		case r.Status == "completed":
-			importRequest(&j, r) // it ran before the cancel: keep its result
+		}
+		if err == nil && r.Terminal() {
+			importRequest(&j, r) // it ended before any cancel: keep its outcome
 			st.Save(j)
 			return
-		case !r.Terminal():
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			host.Cancel(ctx, j.Workspace, j.Preset, j.ID)
-			if _, alive := host.Existing(ctx, j.Workspace, j.Preset); alive {
-				j.State = "running"
-				st.Save(j)
-				return
-			}
 		}
 	}
-	if cancelIntent {
-		j.State, j.Result, j.Tombstone = "cancelled", "ERROR canceled before launch", true
-	} else {
+	if !s.cancelSaved(j) {
+		return // busy journal: retried next pass
+	}
+	if j.Workspace != "" {
+		if r, err := request.Get(j.Workspace, j.ID); err == nil && r.Terminal() {
+			importRequest(&j, r) // the cancel ended it (a queued request)
+			st.Save(j)
+			return
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.cancelTimeout())
+	defer cancel()
+	if j.Workspace != "" {
+		host.Cancel(ctx, j.Workspace, j.Preset, j.ID) // best effort
+	}
+	r, ran, err := s.finishUnowned(ctx, j)
+	switch {
+	case err != nil:
+		return // ownership unknown: retried next pass
+	case !ran:
+		// A host owns the listener (perhaps busy and not answering): it may
+		// still be running the request, so the job is not terminal. It
+		// finishes as cancelled; Status and Cancel import that.
+		j.State = "running"
+		st.Save(j)
+		return
+	case r.ID != "":
+		importRequest(&j, r)
+	case cancelIntent:
+		j.State, j.Result = "cancelled", "ERROR canceled before launch"
+	default:
 		j.State, j.Result = "error", "ERROR "+j.PendingError
 	}
+	if r.ID == "" && j.Workspace != "" {
+		os.RemoveAll(j.Workspace) // no request: nothing was launched in it
+	}
 	st.Save(j)
+}
+
+// finishUnowned makes the job's request terminal while no host can own its
+// listener (inside host.WithoutHost), finishing a non-terminal one as
+// cancelled. ran is false when a host owns the listener: that host still
+// has the request. An absent request yields a zero record. An error means
+// the answer is unknown.
+func (s *Service) finishUnowned(ctx context.Context, j Job) (request.Record, bool, error) {
+	if j.Workspace == "" {
+		return request.Record{}, true, nil
+	}
+	var r request.Record
+	ran, err := host.WithoutHost(ctx, j.Workspace, j.Preset, func() error {
+		cur, err := request.Get(j.Workspace, j.ID)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		r = cur
+		if !cur.Terminal() {
+			r, err = request.FinishContext(ctx, j.Workspace, cur.Envelope, "ERROR canceled: the reviewer's host is not running")
+		}
+		return err
+	})
+	return r, ran, err
+}
+
+func (s *Service) cancelTimeout() time.Duration {
+	if s.cancelWait != 0 {
+		return s.cancelWait
+	}
+	return 10 * time.Second
 }
 
 // cancelSaved cancels the job's saved request with a fresh bounded context
@@ -433,11 +476,7 @@ func (s *Service) cancelSaved(j Job) bool {
 		return true // nothing was saved
 	}
 	s.at("cancel")
-	wait := s.cancelWait
-	if wait == 0 {
-		wait = 10 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	ctx, cancel := context.WithTimeout(context.Background(), s.cancelTimeout())
 	defer cancel()
 	_, err := request.Cancel(ctx, j.Workspace, j.ID)
 	return err == nil || errors.Is(err, os.ErrNotExist)
@@ -519,6 +558,9 @@ func importRequest(j *Job, r request.Record) {
 	switch {
 	case r.Status == "completed" && !strings.HasPrefix(r.Result, "ERROR"):
 		j.State = "done"
+	case r.Status == "canceled" && j.PendingError != "" && !j.Tombstone:
+		// Cancelled because its launch failed: report that failure.
+		j.State, res = "error", "ERROR "+j.PendingError
 	case r.Status == "canceled":
 		j.State = "cancelled"
 	default:
@@ -643,7 +685,15 @@ func (s *Service) Cancel(ctx context.Context, id string, expiresAt time.Time) (J
 		if !j.Terminal() {
 			host.Cancel(ctx, j.Workspace, j.Preset, j.ID)
 			if _, alive := host.Existing(ctx, j.Workspace, j.Preset); !alive && recorded {
-				j.State, j.Result = "cancelled", "ERROR canceled: the reviewer's host is not running"
+				// Existing also misses a host that is busy but not answering,
+				// whose agent may still run: the job is cancelled only while
+				// no host owns the listener (or the request is terminal).
+				if r, ran, err := s.finishUnowned(ctx, j); err == nil && ran {
+					importRequest(&j, r)
+					if !j.Terminal() { // no request was saved
+						j.State, j.Result = "cancelled", "ERROR canceled: the reviewer's host is not running"
+					}
+				}
 			}
 		}
 	}

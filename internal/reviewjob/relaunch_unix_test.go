@@ -70,3 +70,77 @@ func TestResumeAdoptsARequestOwnedByAnUnresponsiveHost(t *testing.T) {
 		t.Fatalf("result: %+v", done)
 	}
 }
+
+// A job with cancel intent whose request is running under a host that owns
+// its listener but does not answer is not terminal, and its cancel is not
+// acknowledged, however Existing sees it; once the host answers it observes
+// the cancel and the job ends cancelled.
+func TestCancelWaitsForAnUnresponsiveOwner(t *testing.T) {
+	s := testService(t, "gate")
+	s.cancelWait = time.Second
+	ctx := context.Background()
+	// Requesters' cancels are bounded (the web transport allows 10 s): a
+	// stopped host may hold the request journal it was writing to.
+	cancelJob := func() (Job, bool, error) {
+		cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		return s.Cancel(cctx, "rv-0000000000000000-r", time.Time{})
+	}
+	req := jobRequest("rv-0000000000000000-r", "p", time.Now().Add(time.Hour).UTC().Truncate(time.Second))
+	s.Create(ctx, req)
+	s.Wait()
+	j, _ := s.Status(req.JobID)
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if r, _ := request.Get(j.Workspace, j.ID); r.Status == "running" {
+			break // the host is busy with it, held at the gate
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the host never started the request")
+		}
+	}
+	hs, ok, _ := host.ReadState(j.Workspace, j.Preset)
+	if !ok || hs.PID == 0 {
+		t.Fatalf("host state: %+v %v", hs, ok)
+	}
+	if err := syscall.Kill(hs.PID, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	resumed := false
+	resume := func() {
+		if !resumed {
+			syscall.Kill(hs.PID, syscall.SIGCONT)
+			resumed = true
+		}
+	}
+	t.Cleanup(resume)
+	st := s.store()
+	j, _, _ = st.Get(req.JobID)
+	j.State = "creating" // the creator died before recording "running"
+	st.Save(j)
+	st.requestCancel(req.JobID) // and a cancel arrived meanwhile
+	s.Janitor(ctx)
+	s.Wait()
+	if j, _, _ = st.Get(req.JobID); j.Terminal() {
+		t.Fatalf("job recorded terminal while its host may still run it: %+v", j)
+	}
+	if j, acked, _ := cancelJob(); acked || j.Terminal() {
+		t.Fatalf("cancel acknowledged while its host may still run it: %+v", j)
+	}
+	resume()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		s.Janitor(ctx)
+		s.Wait()
+		j, acked, err := cancelJob()
+		if err == nil && acked {
+			if j.State != "cancelled" {
+				t.Fatalf("job: %+v", j)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("never cancelled: %+v", j)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}

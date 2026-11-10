@@ -473,7 +473,10 @@ records `error` — once that cancellation is recorded; while the request's
 journal is busy the job stays `creating` with the error kept as
 `pending_error`. A job with a pending error or with cancel intent (its
 tombstone or `<job_id>.cancel`) is never launched again: later passes only
-retry the cancellation, then record the error or `cancelled`);
+retry the cancellation, then record the error or `cancelled`. A request
+that already ended keeps its outcome; one a host still owns the listener of
+(even one not answering) leaves the job `running` until that host finishes
+it; and an unreadable request record is retried, never restarted over);
 only when none exists is creation restarted in a fresh workspace — the one
 place a member can run twice (§6.4).
 
@@ -487,8 +490,11 @@ one — a job that already finished stays `done` with its result, and the
 cancel is acknowledged. Otherwise record the tombstone (a launch is now
 refused), cancel the request (importing the result it returns if it had just
 finished), ask the host to stop it, and acknowledge once the request is
-terminal or the host has exited with the cancellation recorded (a busy
-request journal defers the acknowledgement to a later cancel). A cancel that finds the job lock held
+terminal, or once its cancellation is recorded and no host owns the
+listener (`host.WithoutHost`, which then finishes the request as
+cancelled). A busy request journal, a host that owns the listener (even one
+not answering), or an unknown answer defers the acknowledgement to a later
+cancel. A cancel that finds the job lock held
 (creation holds it through clone and checkout) does not wait: it records
 `<job_id>.cancel` beside the record and is not acknowledged yet; creation
 watches for it, aborts materializing, and right before launch refuses to

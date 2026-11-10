@@ -351,6 +351,48 @@ func TestPendingSendFailureIsNeverRelaunched(t *testing.T) {
 	}
 }
 
+// A request that already ended keeps its outcome when the job is settled
+// for a cancel: its failure is recorded, not "canceled before launch".
+func TestSettleKeepsAnEndedRequestsOutcome(t *testing.T) {
+	s := testService(t, "echo")
+	ctx := context.Background()
+	exp := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	_, ws := savedCreatingJob(t, s, "rv-0000000000000000-s", exp)
+	r, _ := request.Get(ws, "rv-0000000000000000-s")
+	if fin, err := request.Finish(ws, r.Envelope, "ERROR exit=3: reviewer crashed"); err != nil || fin.Status != "failed" {
+		t.Fatalf("fixture: %+v %v", fin, err)
+	}
+	s.store().requestCancel("rv-0000000000000000-s")
+	launches := countLaunches(s)
+	s.Janitor(ctx)
+	s.Wait()
+	j, _, _ := s.store().Get("rv-0000000000000000-s")
+	if j.State != "error" || j.Result != "ERROR exit=3: reviewer crashed" || *launches != 0 {
+		t.Fatalf("job: %+v (launches %d)", j, *launches)
+	}
+}
+
+// A saved request that cannot be read is not "no request": the workspace is
+// kept and nothing is launched over it (a fresh creation would run the
+// member a second time).
+func TestUnreadableRequestIsNeverRestartedOver(t *testing.T) {
+	s := testService(t, "echo")
+	ctx := context.Background()
+	_, ws := savedCreatingJob(t, s, "rv-0000000000000000-t", time.Now().Add(time.Hour).UTC().Truncate(time.Second))
+	if err := os.WriteFile(filepath.Join(request.Dir(ws), "rv-0000000000000000-t.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launches := countLaunches(s)
+	s.Janitor(ctx)
+	s.Wait()
+	if j, _, _ := s.store().Get("rv-0000000000000000-t"); j.State != "creating" || *launches != 0 {
+		t.Fatalf("job: %+v (launches %d)", j, *launches)
+	}
+	if _, err := os.Stat(filepath.Join(request.Dir(ws), "rv-0000000000000000-t.json")); err != nil {
+		t.Fatalf("workspace wiped: %v", err)
+	}
+}
+
 // A relaunch that times out before launching anything (here on the route
 // lock another submitter holds) proves nothing about a host: the job stays
 // creating, the request untouched, and the next janitor pass runs it.
