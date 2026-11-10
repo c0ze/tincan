@@ -434,7 +434,7 @@ func cmdAsk(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := sp.RemoveInbox(channel); err != nil {
 		// Non-fatal: the answer is already delivered; a leaked r-<id> channel
-		// is reclaimed by the Phase-2 gc sweep.
+		// is reclaimed by `tincan gc`.
 		fmt.Fprintf(stderr, "tincan ask: cleanup warning: %v\n", err)
 	}
 	return code

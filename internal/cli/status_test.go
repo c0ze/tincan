@@ -84,6 +84,25 @@ func TestStatusCountsInFlightClaims(t *testing.T) {
 	}
 }
 
+// A timed-out ask leaves an empty reply channel behind; status does not list
+// it as if it were a participant.
+func TestStatusHidesAbandonedReplyChannel(t *testing.T) {
+	room := t.TempDir()
+	code, stdout, stderr := run("ask", "--room", room, "--to", "worker", "--from", "orch", "--body", "q", "--timeout", "1")
+	if code != ExitTimeout || !strings.HasPrefix(stdout, "pending channel=r-") {
+		t.Fatalf("ask: exit %d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	rows := statusJSON(t, room)
+	for name := range rows {
+		if strings.HasPrefix(name, "r-") {
+			t.Fatalf("status lists empty reply channel %s: %+v", name, rows)
+		}
+	}
+	if rows["worker"].Queued != 1 {
+		t.Fatalf("status rows = %+v, want worker with one queued request", rows)
+	}
+}
+
 func TestStatusHostedParked(t *testing.T) {
 	room := t.TempDir()
 	writePresenceFile(t, room, "codex", os.Getpid(), time.Now())

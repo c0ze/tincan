@@ -383,7 +383,35 @@ func (s *Spool) RemoveInbox(name string) error {
 	if err := os.RemoveAll(s.InboxDir(name)); err != nil {
 		return err
 	}
-	return os.RemoveAll(s.presentNameDir(name))
+	if err := os.RemoveAll(s.presentNameDir(name)); err != nil {
+		return err
+	}
+	// The in-flight and owner directories go only when empty: a claim that
+	// is still unacknowledged must never be discarded with its channel.
+	for _, dir := range []string{s.ownerDir(name), s.inFlightDir(name)} {
+		if err := removeEmptyDir(dir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeEmptyDir removes dir if it exists and is empty.
+func removeEmptyDir(dir string) error {
+	if err := fsutil.CheckDir(dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) > 0 {
+		return err
+	}
+	if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // Presence describes one name's listener state, as reported by `status`/`ping`.
@@ -460,7 +488,8 @@ func (s *Spool) removePresence(name, token string) {
 
 // ListPresence returns Presence for the union of names that have an inbox
 // directory and/or a present/<name>/ dir (regardless of whether any token in
-// it is currently live), sorted by name.
+// it is currently live), sorted by name. Reply channels (r-<hex>) with nothing
+// queued, nothing in flight and no live receiver are left out.
 func (s *Spool) ListPresence() ([]Presence, error) {
 	names := map[string]bool{}
 	inboxRoot := filepath.Join(s.root, "inbox")
@@ -493,6 +522,9 @@ func (s *Spool) ListPresence() ([]Presence, error) {
 		p, err := s.presenceFor(name)
 		if err != nil {
 			return nil, err
+		}
+		if replyChannel(name) && p.Queued == 0 && p.InFlight == 0 && !p.Alive {
+			continue // an exhausted or abandoned reply channel; gc removes it
 		}
 		list = append(list, p)
 	}

@@ -438,9 +438,14 @@ to do next.
 and progress once they are no longer needed by a queued/in-flight delivery, plus
 old consumed-message audit logs and quarantine entries; their age counts from
 when they were logged or quarantined, not from when the message was sent. The
-default age is seven days; the minimum is one hour. It retains active work, queued messages, claims,
-session pointers and host logs. After a request record is collected, its result
-and idempotency protection are gone; do not reuse old request IDs for new work.
+default age is seven days; the minimum is one hour. It also deletes presence
+files of receivers that provably exited, reply channels (`r-<hex>`) that are
+empty, unowned and unchanged for that long (a timed-out `ask` leaves one;
+`status` already hides them), and temporary files of writes interrupted that
+long ago (`tmp/send-*`, `tmp/present-*`, `.write-*`, `.owner-*`). It retains
+active work, queued messages, claims, session pointers and host logs. After a
+request record is collected, its result and idempotency protection are gone; do
+not reuse old request IDs for new work.
 
 ## MCP stdio
 
