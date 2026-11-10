@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -133,8 +134,20 @@ func TestSessionSkippedEventNeverYieldsPartialAnswer(t *testing.T) {
 		{"grok", "{\"type\":\"text\",\"data\":\"ANSWER\"}\n" + big + "\n{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", false},
 		{"grok", "{\"type\":\"text\",\"data\":\"ANSWER\"}\n{\"data\":\"" + big + "\",\"type\":\"tool_call_update\"}\n" +
 			"{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", false},
-		{"kimi", "{\"role\":\"assistant\",\"content\":\"ANSWER\"}\n{\"role\":\"tool\",\"content\":\"" + big + "\"}\n" +
+		{"kimi", "{\"role\":\"assistant\",\"content\":\"ANSWER\"}\n{\"role\":\"tool\",\"type\":\"tool_result\",\"content\":\"" + big + "\"}\n" +
 			"{\"role\":\"meta\",\"type\":\"session.resume_hint\",\"session_id\":\"%ID%\"}\n", true},
+		// Kimi decides on role and type: one of them unseen in the head is unknown.
+		{"kimi", "{\"role\":\"assistant\",\"content\":\"COMMENTARY\"}\n{\"role\":\"tool\",\"content\":\"" + big + "\"}\n" +
+			"{\"role\":\"meta\",\"type\":\"session.resume_hint\",\"session_id\":\"%ID%\"}\n", false},
+		{"kimi", "{\"role\":\"assistant\",\"content\":\"COMMENTARY\"}\n{\"role\":\"meta\",\"content\":\"" + big + "\",\"type\":\"error\"}\n" +
+			"{\"role\":\"meta\",\"type\":\"session.resume_hint\",\"session_id\":\"%ID%\"}\n", false},
+		{"kimi", "{\"role\":\"assistant\",\"content\":\"COMMENTARY\"}\n{\"type\":\"system.version\",\"content\":\"" + big + "\",\"role\":\"assistant\"}\n" +
+			"{\"role\":\"meta\",\"type\":\"session.resume_hint\",\"session_id\":\"%ID%\"}\n", false},
+		// A definite syntax error in the head is not a harmless event.
+		{"claude", "{\"type\":\"system\",\"session_id\":\"%ID%\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"%ID%\",\"is_error\":false,\"result\":\"ANSWER\"}\n" +
+			"{\"type\":\"user\",BROKEN" + big + "\n", false},
+		{"claude", "{\"type\":\"system\",\"session_id\":\"%ID%\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"%ID%\",\"is_error\":false,\"result\":\"ANSWER\"}\n" +
+			"{\"type\":\"user\"} " + big + "\n", false},
 		{"claude", "{\"type\":\"system\",\"session_id\":\"%ID%\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"%ID%\",\"is_error\":false,\"result\":\"ANSWER\"}\n" +
 			"{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"" + big + "\"}]}}\n", true},
 		{"claude", "{\"type\":\"system\",\"session_id\":\"%ID%\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"%ID%\",\"is_error\":false,\"result\":\"ANSWER\"}\n" +
@@ -165,6 +178,28 @@ func TestSessionSkippedEventNeverYieldsPartialAnswer(t *testing.T) {
 			if !c.ok && (err == nil || !strings.Contains(err.Error(), "output limit")) {
 				t.Errorf("case %d (%s, chunk %d): partial answer accepted: %q, %v", i, c.provider, chunk, body, err)
 			}
+		}
+	}
+}
+
+func TestHeadFieldsSeparatesTruncationFromSyntaxErrors(t *testing.T) {
+	for head, want := range map[string]struct {
+		ok     bool
+		fields string
+	}{
+		`{"type":"user","message":{"content":"xx`: {true, `map[message: type:user]`},
+		`{"role":"tool","type":"tool_res`:         {true, `map[role:tool]`},
+		`{"role":"tool","ty`:                      {true, `map[role:tool]`},
+		`{"role":"tool","type":`:                  {true, `map[role:tool]`},
+		`{"n":5,"t":null,"a":[1,`:                 {true, `map[a: n: t:]`},
+		`{"type":"user",BROKEN`:                   {false, `map[type:user]`},
+		`{"type":"user"} xxxx`:                    {false, `map[type:user]`},
+		`[{"type":"user"`:                         {false, `map[]`},
+		`not json`:                                {false, `map[]`},
+	} {
+		fields, ok := headFields([]byte(head))
+		if ok != want.ok || fmt.Sprint(fields) != want.fields {
+			t.Errorf("headFields(%q) = %v, %v; want %s, %v", head, fields, ok, want.fields, want.ok)
 		}
 	}
 }

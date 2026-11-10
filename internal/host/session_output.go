@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -134,48 +135,64 @@ const skipHeadBytes = 4096
 
 // mayCarryAnswer reports whether a skipped event, known only by its head,
 // could have changed the answer: answer text, a final result, a Grok body
-// reset or a failure. It mirrors event; an event whose type the head does
-// not show counts as one that could.
+// reset or a failure. It mirrors event and exempts an event only when the
+// head shows every field event decides on, each with a harmless value. A
+// field beyond the head, or a head that is not valid JSON so far, counts as
+// one that could.
 func (p *sessionParser) mayCarryAnswer(head []byte) bool {
-	f := headFields(head)
-	kind, event, role := f["type"], f["event"], f["role"]
-	if kind == "error" || event == "error" {
+	f, ok := headFields(head)
+	if !ok {
 		return true
 	}
+	seen := func(keys ...string) bool {
+		for _, k := range keys {
+			if _, ok := f[k]; !ok {
+				return false
+			}
+		}
+		return true
+	}
+	kind, event, role := f["type"], f["event"], f["role"]
 	switch p.provider {
 	case "claude", "cursor":
 		// Assistant messages are progress only; the answer is the result.
-		return kind == "" || kind == "result"
+		return !seen("type") || kind == "error" || kind == "result"
 	case "grok":
 		switch kind {
-		case "", "text", "tool_call", "tool_use", "end":
+		case "error", "text", "tool_call", "tool_use", "end":
 			return true
 		}
-		return false
+		return !seen("type")
 	case "agy":
-		return event == "" || event == "result"
+		return !seen("event") || event == "error" || event == "result"
 	case "kimi":
-		return (kind == "" && role == "") || role == "assistant" || kind == "session.resume_hint"
+		return !seen("role", "type") || kind == "error" || role == "assistant" || kind == "session.resume_hint"
 	}
 	return true
 }
 
-// headFields returns the top-level string fields that appear in a possibly
-// truncated JSON object, stopping at the first token it cannot read.
-func headFields(head []byte) map[string]string {
-	fields := map[string]string{}
+// headFields returns the top-level fields of a possibly truncated JSON object,
+// string values as they are and other values as "" (as fieldString reads
+// them). ok is false unless head is a valid prefix of a JSON object: running
+// off its end is expected, a syntax error or data after a complete object
+// (in a line too long to be that object) is not.
+func headFields(head []byte) (fields map[string]string, ok bool) {
+	fields = map[string]string{}
 	dec := json.NewDecoder(bytes.NewReader(head))
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
-		return fields
+		return fields, false
 	}
 	key, expectKey := "", true
 	for depth := 1; depth > 0; {
 		t, err := dec.Token()
 		if err != nil {
-			return fields
+			return fields, errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 		}
 		if d, ok := t.(json.Delim); ok {
 			if d == '{' || d == '[' {
+				if depth == 1 {
+					fields[key] = ""
+				}
 				depth++
 			} else if depth--; depth == 1 {
 				expectKey = true
@@ -190,12 +207,12 @@ func headFields(head []byte) map[string]string {
 			expectKey = false
 			continue
 		}
-		if s, ok := t.(string); ok {
-			fields[key] = s
-		}
+		s, _ := t.(string)
+		fields[key] = s
 		expectKey = true
 	}
-	return fields
+	_, err := dec.Token()
+	return fields, errors.Is(err, io.EOF)
 }
 
 func (p *sessionParser) flush() error {
@@ -284,7 +301,9 @@ func (p *sessionParser) event(line []byte) (string, error) {
 		return "", errors.New("provider emitted invalid JSON output")
 	}
 	kind := fieldString(m, "type")
-	if kind == "error" || fieldString(m, "event") == "error" {
+	// Each provider marks failure events with its own discriminator (agy's
+	// events have no "type"); mayCarryAnswer relies on exactly these fields.
+	if p.provider == "agy" && fieldString(m, "event") == "error" || p.provider != "agy" && kind == "error" {
 		p.failure = providerError(m)
 	}
 	switch p.provider {
