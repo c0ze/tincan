@@ -488,6 +488,53 @@ func TestMutationRestrictsLegacySpoolRootWithoutChangingRoom(t *testing.T) {
 	}
 }
 
+// Retention counts from when a message was logged or quarantined, not from
+// when it was written: a message that waited in its queue longer than the
+// retention must survive the next gc.
+func TestGCRetentionStartsWhenLoggedOrQuarantined(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	e := msg("a", "b", "waited a long time", 1)
+	if err := sp.Send(e); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sp.InboxDir("b"), "00000000000000000002-bad.json"), []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	entries, _ := os.ReadDir(sp.InboxDir("b"))
+	for _, ent := range entries {
+		if err := os.Chtimes(filepath.Join(sp.InboxDir("b"), ent.Name()), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := sp.Recv("b", time.Second, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sp.Recv("b", 50*time.Millisecond, false); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("corrupt message delivered: %v", err)
+	}
+	// Queued duplicates and stray in-flight files are quarantined as files.
+	stray := filepath.Join(sp.InboxDir("b"), "stray")
+	if err := os.WriteFile(stray, []byte("evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(stray, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.quarantine(stray); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := sp.GC(time.Now().Add(-time.Hour))
+	if err != nil || stats.Logs != 0 || stats.Quarantined != 0 {
+		t.Fatalf("GC=%+v, err=%v; want nothing collected right after logging", stats, err)
+	}
+	for kind, want := range map[string]int{"log": 1, "quarantine": 2} {
+		if entries, _ := os.ReadDir(filepath.Join(sp.root, kind)); len(entries) != want {
+			t.Fatalf("%s holds %v, want %d entries", kind, entries, want)
+		}
+	}
+}
+
 func TestGCOnlyRemovesOldTerminalArtifacts(t *testing.T) {
 	sp, _ := Open(t.TempDir())
 	for i := 0; i < 3; i++ {

@@ -15,6 +15,8 @@ type GCStats struct {
 }
 
 // GC removes log and quarantine artifacts last modified before the cutoff.
+// Moving an entry into log/ or quarantine/ stamps its mtime, so retention
+// counts from when it was logged or quarantined.
 // It never visits inboxes, in-flight claims, temporary writes, presence tokens,
 // or host state: those may contain queued/active work, regardless of age.
 func (s *Spool) GC(before time.Time) (GCStats, error) {

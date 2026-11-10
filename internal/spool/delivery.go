@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/c0ze/tincan/v2/internal/envelope"
 	"github.com/c0ze/tincan/v2/internal/filelock"
@@ -60,6 +61,7 @@ func (d *Delivery) Ack(logConsumed bool) error {
 			return err
 		}
 		d.finished = true
+		stampMoved(logPath)
 		if err := fsutil.SyncDir(d.spool.logDir()); err != nil {
 			return err
 		}
@@ -245,13 +247,24 @@ func (s *Spool) quarantine(path string) error {
 	if err := fsutil.MkdirPrivate(dir); err != nil {
 		return err
 	}
-	if err := retryClaimOp(func() error { return os.Rename(path, filepath.Join(dir, envelope.NewID())) }); err != nil {
+	dest := filepath.Join(dir, envelope.NewID())
+	if err := retryClaimOp(func() error { return os.Rename(path, dest) }); err != nil {
 		return err
 	}
+	stampMoved(dest)
 	if err := fsutil.SyncDir(dir); err != nil {
 		return err
 	}
 	return fsutil.SyncDir(filepath.Dir(path))
+}
+
+// stampMoved sets a just-moved log or quarantine entry's mtime to now. Rename
+// keeps the original mtime, and GC ages these entries by mtime, so without it
+// a message that waited longer than the retention would be collected by the
+// very next gc. Best-effort: the move has already committed.
+func stampMoved(path string) {
+	now := time.Now()
+	os.Chtimes(path, now, now)
 }
 
 func (s *Spool) quarantineQueuedDuplicate(name, filename string) error {

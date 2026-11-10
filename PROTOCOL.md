@@ -404,8 +404,9 @@ to do next.
 
 `tincan gc --room "$ROOM" --older-than 168h` removes old terminal request records
 and progress once they are no longer needed by a queued/in-flight delivery, plus
-old consumed-message audit logs and quarantine entries. The default age is seven
-days; the minimum is one hour. It retains active work, queued messages, claims,
+old consumed-message audit logs and quarantine entries; their age counts from
+when they were logged or quarantined, not from when the message was sent. The
+default age is seven days; the minimum is one hour. It retains active work, queued messages, claims,
 session pointers and host logs. After a request record is collected, its result
 and idempotency protection are gone; do not reuse old request IDs for new work.
 
