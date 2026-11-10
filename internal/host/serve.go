@@ -196,11 +196,23 @@ func complete(sp *spool.Spool, o ServeOptions, d *spool.Delivery, body string) e
 func handle(ctx context.Context, o ServeOptions, e *envelope.Envelope) string {
 	started := time.Now()
 	logf(o.Log, "=== %s from=%s started=%s", e.ID, e.From, started.UTC().Format(time.RFC3339))
-	// Check the account environment before preparing a session: a run that
-	// cannot start must not leave a new conversation pending initialization.
+	// Check the account environment and the executable before preparing a
+	// session: a run that cannot start must not leave a new conversation
+	// pending initialization.
 	if _, err := composeEnv(nil, o.Preset.EnvUnset, o.Preset.Env); err != nil {
 		logf(o.Log, "=== exit=error %v", err)
 		return "ERROR exec: " + err.Error()
+	}
+	vars := Vars{Body: e.Body, Room: o.Room, Name: o.Name, ID: e.ID}
+	var err error
+	if o.Preset.Pinned {
+		err = PinnedExecutable(o.Preset.Exec[0])
+	} else {
+		_, err = ResolveExecutable(Render(o.Preset.Exec[:1], vars)[0], o.Room)
+	}
+	if err != nil {
+		logf(o.Log, "=== exit=error %v", err)
+		return ReplyBody(RunSpec{}, Result{ExitCode: -1, Err: err})
 	}
 	session, err := PrepareSession(o.Room, o.Name, o.Label, o.Preset)
 	if err != nil {
@@ -223,7 +235,6 @@ func handle(ctx context.Context, o ServeOptions, e *envelope.Envelope) string {
 			return nil
 		},
 	}
-	vars := Vars{Body: e.Body, Room: o.Room, Name: o.Name, ID: e.ID}
 	if p.Reply == "file" {
 		f, err := newReplyFile()
 		if err != nil {
@@ -245,6 +256,12 @@ func handle(ctx context.Context, o ServeOptions, e *envelope.Envelope) string {
 	}
 	res := Run(ctx, spec)
 	logf(o.Log, "=== exit=%s duration=%.1fs", exitLabel(res), res.Duration.Seconds())
+	if !res.Started {
+		// A start failure (argument list too long, say) ran nothing.
+		if err := session.Discard(); err != nil {
+			logf(o.Log, "--- %s pending session record not removed: %v", e.ID, err)
+		}
+	}
 	body, err := session.Reply(spec, res)
 	if err != nil {
 		return "ERROR session: " + err.Error()

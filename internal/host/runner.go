@@ -72,6 +72,7 @@ type Result struct {
 	Stderr          []byte
 	ExitCode        int   // -1 when the process never started or was killed
 	Err             error // start failure, or the ctx/timeout error
+	Started         bool  // the agent process was created
 	TimedOut        bool  // Timeout elapsed; the process group was killed
 	Killed          bool  // the parent ctx was cancelled (serve shutting down)
 	Duration        time.Duration
@@ -140,6 +141,7 @@ func Run(ctx context.Context, spec RunSpec) Result {
 
 	res := Result{ExitCode: -1}
 	err = runProcess(runCtx, cmd)
+	res.Started = cmd.Process != nil
 	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil {
 		// The agent exited, but a descendant outside its group kept the output
 		// pipes open past WaitDelay. The exit status and the output captured so

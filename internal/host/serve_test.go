@@ -543,6 +543,37 @@ func TestServeUnexpandableEnvDoesNotStrandSession(t *testing.T) {
 	stopServe(t, sp, done)
 }
 
+// A run that fails before its process exists cannot have created a provider
+// conversation, so it must not leave a pending session behind either.
+func TestServeStartFailureDoesNotStrandSession(t *testing.T) {
+	notExecutable := filepath.Join(t.TempDir(), "agent")
+	if err := os.WriteFile(notExecutable, []byte("not a program\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, exe := range map[string]string{"missing": "tincan-definitely-missing-agent-xyz", "unstartable": notExecutable} {
+		t.Run(name, func(t *testing.T) {
+			if name == "unstartable" && runtime.GOOS == "windows" {
+				t.Skip("relies on execve rejecting a file without a format")
+			}
+			p := Preset{Exec: []string{exe, "-p", "{body}"}, Provider: "claude"}
+			room, sp, _, done, _ := startServe(t, p, "claude-x")
+			for i := 0; i < 2; i++ {
+				if reply := askVia(t, sp, "hi"); !strings.HasPrefix(reply.Body, "ERROR exec: ") {
+					t.Fatalf("reply %d = %q", i+1, reply.Body)
+				}
+			}
+			canonical, err := canonicalRoom(room)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(sessionPath(canonical, "agent")); !os.IsNotExist(err) {
+				t.Fatalf("session record left for a run that never started: %v", err)
+			}
+			stopServe(t, sp, done)
+		})
+	}
+}
+
 // A pinned preset's argv[0] is never template-expanded, and a file named like
 // the executable inside the room is never what runs (committees §6.6).
 func TestServePinnedPresetIgnoresRoomExecutables(t *testing.T) {

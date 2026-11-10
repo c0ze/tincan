@@ -384,7 +384,9 @@ the log); the run fails only if no final result event can be parsed.
   stderr, and — stateless commands — captured stdout, so partial work is not
   discarded. Structured startup metadata is still excluded.
 - Agent binary missing at run time (removed after `up`) → reply
-  `ERROR exec: <message>`; the listener keeps running.
+  `ERROR exec: <message>`; the listener keeps running. A run whose process
+  never started (a missing binary, an argument list too long) leaves no new
+  session pending, so the next request starts the conversation normally.
 - The listener is stopped (`down`/SIGTERM) mid-run → the agent is killed and
   the asker gets `ERROR interrupted: hosted listener was stopped while running`.
 - Stopping a running agent (timeout, cancel, shutdown) on Linux/macOS sends
