@@ -23,7 +23,12 @@ set -euo pipefail
 REPO_URL="https://github.com/c0ze/tincan"
 RELEASE_BASE="${TINCAN_RELEASE_BASE:-$REPO_URL/releases}"
 RAW_BASE="${TINCAN_RAW_BASE:-https://raw.githubusercontent.com/c0ze/tincan}"
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# Only a script run from a file can sit in a checkout. On stdin (curl | bash)
+# BASH_SOURCE is empty and the working directory is not ours to build or copy.
+REPO_DIR=""
+if [ -f "${BASH_SOURCE[0]:-}" ]; then
+  REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 AGENTS_SKILLS_DIR="${AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
 CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
 TINCAN_BIN_DIR="${TINCAN_BIN_DIR:-$HOME/.local/bin}"
@@ -48,6 +53,13 @@ done
 
 if [ "$DO_BIN" = 0 ] && [ "$DO_SKILLS" = 0 ]; then
   echo "!! --skills-only and --bin-only cannot be combined" >&2
+  exit 2
+fi
+
+# The tag ends up in go install, download URLs and raw skill URLs.
+tag_pattern='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+if [ -n "${TINCAN_VERSION:-}" ] && ! [[ "$TINCAN_VERSION" =~ $tag_pattern ]]; then
+  echo "!! TINCAN_VERSION must be a release tag like v2.0.0, got: $TINCAN_VERSION" >&2
   exit 2
 fi
 
@@ -131,12 +143,13 @@ install_release() {
 }
 
 install_go() {
-  if [ -d "$REPO_DIR/cmd/tincan" ]; then
+  if [ -n "$REPO_DIR" ] && [ -d "$REPO_DIR/cmd/tincan" ] &&
+     grep -qx 'module github.com/c0ze/tincan/v2' "$REPO_DIR/go.mod" 2>/dev/null; then
     echo ">> building tincan from source ($REPO_DIR)"
     ( cd "$REPO_DIR" && go install ./cmd/tincan )
   else
     echo ">> installing tincan from GitHub"
-    go install github.com/c0ze/tincan/v2/cmd/tincan@latest
+    go install "github.com/c0ze/tincan/v2/cmd/tincan@${TINCAN_VERSION:-latest}"
   fi
   local gobin; gobin="$(go env GOBIN)"; [ -n "$gobin" ] || gobin="$(go env GOPATH)/bin"
   INSTALLED_BIN="$gobin/tincan"
@@ -209,7 +222,7 @@ remote_skills() {
 install_skills() {
   local s root src
   # A checkout ships install.sh beside skills/; anything else is curl | bash.
-  { [ -f "$REPO_DIR/install.sh" ] && [ -d "$REPO_DIR/skills" ]; } || remote_skills
+  { [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/install.sh" ] && [ -d "$REPO_DIR/skills" ]; } || remote_skills
   # Validate before changing any installation.
   for s in tell listen; do
     [ -f "$REPO_DIR/skills/$s/SKILL.md" ] || { echo "!! missing skills/$s/SKILL.md" >&2; exit 1; }
@@ -237,22 +250,33 @@ install_skills() {
 # stdio servers in the session's project, and `tincan mcp` uses that project's
 # git work tree as the room. No PATH is frozen into the registration; tincan
 # searches PATH and common per-user bin directories when it launches agents.
+# Neither `claude mcp add` nor `codex mcp add` can replace an entry, so the old
+# one is removed first. If the add then fails, stop and say how to restore it.
+mcp_add_failed() { # mcp_add_failed <client> <command that registers tincan>
+  echo "!! $1 could not register tincan; its previous tincan entry, if any, was removed." >&2
+  echo "   Restore it with: $2" >&2
+  exit 1
+}
+
 register_mcp() {
   local bin="${INSTALLED_BIN:-$(command -v tincan || true)}"
   if [ -z "$bin" ]; then
     echo "!! tincan binary not found; install it before --mcp" >&2
     exit 1
   fi
-  local registered=0
+  local registered=0 qbin
+  qbin="$(printf '%q' "$bin")"
   if command -v claude >/dev/null 2>&1; then
     claude mcp remove tincan -s user >/dev/null 2>&1 || true
-    claude mcp add -s user tincan -- "$bin" mcp
+    claude mcp add -s user tincan -- "$bin" mcp ||
+      mcp_add_failed "Claude Code" "claude mcp add -s user tincan -- $qbin mcp"
     echo ">> Claude Code: registered tincan (user scope; room = session project)"
     registered=1
   fi
   if command -v codex >/dev/null 2>&1; then
     codex mcp remove tincan >/dev/null 2>&1 || true
-    codex mcp add tincan -- "$bin" mcp
+    codex mcp add tincan -- "$bin" mcp ||
+      mcp_add_failed "Codex" "codex mcp add tincan -- $qbin mcp"
     echo ">> Codex: registered tincan (room = session project)"
     registered=1
   fi

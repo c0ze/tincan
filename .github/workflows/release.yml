@@ -17,7 +17,7 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
@@ -26,13 +26,20 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          # Release only commits that are already on main. Use the full ref:
+          # a tag named origin/main would win over the short name.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main ||
+            { echo "::error::$RELEASE_TAG is not on main"; exit 1; }
           test -s "docs/releases/$RELEASE_TAG.md"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: stable
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
         with:
-          version: "~> v2"
+          version: v2.19.0
           args: release --clean --release-notes docs/releases/${{ github.ref_name }}.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Another tag on the same commit must not name the release or version.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}

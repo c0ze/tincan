@@ -116,6 +116,7 @@ install_binary() {
   PATH="$case_dir/bin:$PATH" \
   TINCAN_TEST_GOBIN="$case_dir/bin" \
   TINCAN_TEST_RECORD="$case_dir/go-args" \
+  TINCAN_VERSION="${test_version:-}" \
     bash "$case_dir/repo/install.sh" --bin-only >"$case_dir/output"
 }
 
@@ -126,8 +127,32 @@ install_binary
   fail 'standalone installer did not select the stable v2 module'
 [ ! -e "$case_dir/agents" ] || fail 'binary-only install changed skills'
 
+new_case pinned_binary
+fake_go
+test_version=v2.0.0 install_binary
+[ "$(cat "$case_dir/go-args")" = 'install github.com/c0ze/tincan/v2/cmd/tincan@v2.0.0' ] ||
+  fail "TINCAN_VERSION was not installed: $(cat "$case_dir/go-args")"
+
+new_case invalid_version
+fake_go
+if test_version='v2.0.0 ./cmd/x' install_binary 2>"$case_dir/error"; then
+  fail 'malformed TINCAN_VERSION accepted'
+fi
+[ ! -e "$case_dir/go-args" ] || fail 'ran go install with a malformed TINCAN_VERSION'
+
+new_case other_module_binary
+mkdir -p "$case_dir/repo/cmd/tincan"
+printf 'module example.com/other\n' >"$case_dir/repo/go.mod"
+fake_go
+install_binary
+case "$(cat "$case_dir/go-args")" in
+  'install github.com/c0ze/tincan/v2/cmd/tincan@'*) : ;;
+  *) fail "built a directory that is not a tincan checkout: $(cat "$case_dir/go-args")" ;;
+esac
+
 new_case checkout_binary
 mkdir -p "$case_dir/repo/cmd/tincan"
+cp "$repo_dir/go.mod" "$case_dir/repo/"
 fake_go
 install_binary
 [ "$(cat "$case_dir/go-args")" = 'install ./cmd/tincan' ] || fail 'checkout was not built locally'
@@ -205,6 +230,20 @@ fi
 grep -q "WARNING: 'tincan' on PATH is $case_dir/clients/tincan" "$case_dir/output" ||
   fail 'shadowing tincan was not reported'
 
+# Neither CLI can replace an entry, so a failed add after the remove must stop
+# and print the command that restores the registration.
+new_case mcp_add_fails
+fake_release
+fake_clients
+printf '#!/bin/sh\necho "$*" >>"%s/claude.args"\ncase "$*" in "mcp add"*) exit 1 ;; esac\n' \
+  "$case_dir" >"$case_dir/clients/claude"
+if test_path="$case_dir/clients:$PATH" install_release --bin-only --mcp; then
+  fail 'failed claude registration was reported as success'
+fi
+grep -qF "Restore it with: claude mcp add -s user tincan -- $case_dir/bin/tincan mcp" "$case_dir/output" ||
+  fail "no restore command after failed registration: $(cat "$case_dir/output")"
+[ ! -e "$case_dir/codex.args" ] || fail 'kept changing registrations after a failure'
+
 new_case no_shadow_warning
 fake_release
 test_path="$case_dir/bin:$PATH" install_release --bin-only || fail "install failed: $(cat "$case_dir/output")"
@@ -242,5 +281,46 @@ mkdir -p "$case_dir/elsewhere"
   fail "piped install failed: $(cat "$case_dir/output")"
 check_file "$repo_dir/skills/listen/SKILL.md" "$case_dir/agents/listen/SKILL.md"
 [ -z "$(ls -A "$case_dir/elsewhere")" ] || fail 'piped install wrote into the working directory'
+
+# curl | bash from a directory that looks like a tincan checkout must neither
+# build nor install anything from that directory.
+install_piped() { # install_piped <cwd> <args...>
+  local cwd="$1"; shift
+  ( cd "$cwd" &&
+    PATH="$case_dir/bin:$PATH" \
+    TINCAN_TEST_GOBIN="$case_dir/bin" \
+    TINCAN_TEST_RECORD="$case_dir/go-args" \
+    TINCAN_RAW_BASE="file://$case_dir/raw" \
+    TINCAN_VERSION=v9.9.9 \
+    AGENTS_SKILLS_DIR="$case_dir/agents" \
+    CLAUDE_SKILLS_DIR="$case_dir/claude" \
+    GEMINI_COMMANDS_DIR="$case_dir/gemini" \
+      bash -s -- "$@" <"$case_dir/repo/install.sh" >"$case_dir/output" 2>&1 )
+}
+
+new_case piped_lookalike
+fake_release
+fake_go
+mkdir -p "$case_dir/lookalike/cmd/tincan"
+cp -R "$repo_dir/skills" "$case_dir/lookalike/"
+printf '%s\n' 'planted instructions' >"$case_dir/lookalike/skills/tell/SKILL.md"
+printf '%s\n' 'planted extra' >"$case_dir/lookalike/skills/tell/extra.md"
+printf '%s\n' 'echo planted installer' >"$case_dir/lookalike/install.sh"
+install_piped "$case_dir/lookalike" || fail "piped install failed: $(cat "$case_dir/output")"
+case "$(cat "$case_dir/go-args")" in
+  'install github.com/c0ze/tincan/v2/cmd/tincan@'*) : ;;
+  *) fail "piped install built the working directory: $(cat "$case_dir/go-args")" ;;
+esac
+for root in agents claude; do
+  check_file "$repo_dir/skills/tell/SKILL.md" "$case_dir/$root/tell/SKILL.md"
+  [ ! -e "$case_dir/$root/tell/extra.md" ] || fail 'piped install copied skills from the working directory'
+done
+
+new_case piped_unrelated_repo
+fake_release
+mkdir -p "$case_dir/other/skills/notes"
+printf '%s\n' 'echo other installer' >"$case_dir/other/install.sh"
+install_piped "$case_dir/other" --skills-only || fail "piped install failed: $(cat "$case_dir/output")"
+check_file "$repo_dir/skills/listen/SKILL.md" "$case_dir/claude/listen/SKILL.md"
 
 echo 'Installer regression tests passed.'

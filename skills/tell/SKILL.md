@@ -59,7 +59,7 @@ tincan ping --to <who> --room "$ROOM"
 
 - Exit 0 (`present pid=…`): proceed.
 - Exit 1 (`absent`): if `<who>` is a known preset (`tincan presets` lists them —
-  built-ins are codex, grok, kimi, agy, gemini, claude; `~/.config/tincan/agents.json`
+  built-ins are codex, grok, kimi, agy, gemini, claude, cursor; `~/.config/tincan/agents.json`
   can add more) or the user gave you an `--exec` template, bring it up yourself:
   `tincan up <who> --room "$ROOM"` (add `--exec '<template>'` for a custom command).
   It prints `up name=<who> pid=… preset=…` and returns once the hosted listener is

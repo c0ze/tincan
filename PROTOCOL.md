@@ -320,6 +320,7 @@ file, which listeners started by an older process do not know about.
 | Grok | `streaming-json` | `--resume <UUID>` |
 | Agy | `stream-json` | `--conversation <UUID>` |
 | Kimi | `stream-json` | `--session <session_UUID>` |
+| Cursor | `stream-json` | `--resume <UUID>` |
 
 Saved pointers in `.tincan/sessions/<name>.json` survive host and MCP restarts.
 Each pointer records its provider and a fingerprint of the command and account
@@ -536,7 +537,7 @@ the room; a cloud client needs access to that environment to use a local server.
 
 Interactive listeners use the `listen` skill and the same `recv` loop. These
 examples show how clients discover and invoke it. Hosted listeners instead use
-the six [provider presets](#presets-and-configtincanagentsjson); they do not
+the seven [provider presets](#presets-and-configtincanagentsjson); they do not
 require an interactive session or an installed listener skill.
 
 | Agent | Skill Discovery | How to Invoke | Recommended Auto-Approve Setup |
