@@ -56,6 +56,13 @@ if [ "$DO_BIN" = 0 ] && [ "$DO_SKILLS" = 0 ]; then
   exit 2
 fi
 
+# The tag ends up in go install, download URLs and raw skill URLs.
+tag_pattern='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+if [ -n "${TINCAN_VERSION:-}" ] && ! [[ "$TINCAN_VERSION" =~ $tag_pattern ]]; then
+  echo "!! TINCAN_VERSION must be a release tag like v2.0.0, got: $TINCAN_VERSION" >&2
+  exit 2
+fi
+
 fetch() { # fetch <url> <dest>
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL "$1" -o "$2"
@@ -142,7 +149,7 @@ install_go() {
     ( cd "$REPO_DIR" && go install ./cmd/tincan )
   else
     echo ">> installing tincan from GitHub"
-    go install github.com/c0ze/tincan/v2/cmd/tincan@latest
+    go install "github.com/c0ze/tincan/v2/cmd/tincan@${TINCAN_VERSION:-latest}"
   fi
   local gobin; gobin="$(go env GOBIN)"; [ -n "$gobin" ] || gobin="$(go env GOPATH)/bin"
   INSTALLED_BIN="$gobin/tincan"

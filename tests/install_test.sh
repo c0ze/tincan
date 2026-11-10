@@ -116,6 +116,7 @@ install_binary() {
   PATH="$case_dir/bin:$PATH" \
   TINCAN_TEST_GOBIN="$case_dir/bin" \
   TINCAN_TEST_RECORD="$case_dir/go-args" \
+  TINCAN_VERSION="${test_version:-}" \
     bash "$case_dir/repo/install.sh" --bin-only >"$case_dir/output"
 }
 
@@ -125,6 +126,19 @@ install_binary
 [ "$(cat "$case_dir/go-args")" = 'install github.com/c0ze/tincan/v2/cmd/tincan@latest' ] ||
   fail 'standalone installer did not select the stable v2 module'
 [ ! -e "$case_dir/agents" ] || fail 'binary-only install changed skills'
+
+new_case pinned_binary
+fake_go
+test_version=v2.0.0 install_binary
+[ "$(cat "$case_dir/go-args")" = 'install github.com/c0ze/tincan/v2/cmd/tincan@v2.0.0' ] ||
+  fail "TINCAN_VERSION was not installed: $(cat "$case_dir/go-args")"
+
+new_case invalid_version
+fake_go
+if test_version='v2.0.0 ./cmd/x' install_binary 2>"$case_dir/error"; then
+  fail 'malformed TINCAN_VERSION accepted'
+fi
+[ ! -e "$case_dir/go-args" ] || fail 'ran go install with a malformed TINCAN_VERSION'
 
 new_case other_module_binary
 mkdir -p "$case_dir/repo/cmd/tincan"
