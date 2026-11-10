@@ -398,6 +398,10 @@ the log); the run fails only if no final result event can be parsed.
   a descendant that left the group and ignores its parent's exit is out of
   reach. On Windows the agent's Job Object is terminated.
 - Malformed envelopes are quarantined; an unknown `kind` is not executed.
+- A message the request journal refuses (its ID collides with a different
+  recorded request, or the record is corrupt) is not executed: the asker gets
+  `ERROR request: <reason>`, the envelope moves to `.tincan/log/`, and the
+  listener keeps serving. Restart recovery handles such a claim the same way.
 - A hard crash may prevent an immediate reply. Retained claims and request state
   allow recovery to report interrupted work; a missing reply is not permission
   to repeat an agent run automatically.

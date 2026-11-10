@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/envelope"
 	"github.com/c0ze/tincan/v2/internal/filelock"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 	"github.com/c0ze/tincan/v2/internal/request"
 	"github.com/c0ze/tincan/v2/internal/spool"
 )
@@ -106,7 +109,13 @@ func Serve(ctx context.Context, o ServeOptions) error {
 		}
 		r, err := request.Finish(o.Room, d.Envelope, "ERROR interrupted: previous hosted listener exited; execution outcome is uncertain and was not replayed")
 		if err != nil {
-			return err
+			if !journalRejected(err) {
+				return err
+			}
+			if err := reject(sp, o, d, err); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := complete(sp, o, d, r.Result); err != nil {
 			return err
@@ -143,7 +152,13 @@ func Serve(ctx context.Context, o ServeOptions) error {
 		r, err := request.Start(o.Room, e)
 		if err != nil {
 			endJob()
-			return err
+			if !journalRejected(err) {
+				return err
+			}
+			if err := reject(sp, o, d, err); err != nil {
+				return err
+			}
+			continue
 		}
 		if !r.Terminal() {
 			st.State, st.CurrentID = "busy", e.ID
@@ -156,9 +171,13 @@ func Serve(ctx context.Context, o ServeOptions) error {
 		}
 		endJob()
 		if err != nil {
-			return err
-		}
-		if err := complete(sp, o, d, r.Result); err != nil {
+			if !journalRejected(err) {
+				return err
+			}
+			if err := reject(sp, o, d, err); err != nil {
+				return err
+			}
+		} else if err := complete(sp, o, d, r.Result); err != nil {
 			return err
 		}
 		if ctx.Err() != nil {
@@ -185,6 +204,38 @@ func complete(sp *spool.Spool, o ServeOptions, d *spool.Delivery, body string) e
 		logf(o.Log, "--- %s has no reply_to; result retained in request journal", e.ID)
 	}
 	return d.Ack(false)
+}
+
+// journalRejected reports whether a request journal error belongs to the
+// delivery rather than to the filesystem: an ID collision from a hand-written
+// envelope, or a corrupt, oversized or unsafe record. Retrying cannot help, and
+// a claim left in flight would fail every restart's recovery the same way.
+func journalRejected(err error) bool {
+	if errors.Is(err, fsutil.ErrUnsafeFile) || errors.Is(err, fsutil.ErrTooLarge) {
+		return true
+	}
+	var pathErr *fs.PathError
+	var linkErr *os.LinkError
+	var sysErr *os.SyscallError
+	var errno syscall.Errno
+	return !errors.As(err, &pathErr) && !errors.As(err, &linkErr) && !errors.As(err, &sysErr) && !errors.As(err, &errno)
+}
+
+// reject settles a delivery the request journal refused without running it:
+// the asker gets an ERROR reply (best effort; its journal entry cannot record
+// one) and the envelope moves to the consumed log for inspection.
+func reject(sp *spool.Spool, o ServeOptions, d *spool.Delivery, cause error) error {
+	e := d.Envelope
+	logf(o.Log, "=== %s from=%s rejected: %v", e.ID, e.From, cause)
+	if e.ReplyTo != "" {
+		// Not complete's reply ID: a journaled request with this ID may own it.
+		replyID := fmt.Sprintf("%x", sha256.Sum256([]byte("rejected:"+e.ID)))
+		reply := &envelope.Envelope{ID: replyID, CorrID: e.ReplyTo, From: o.Name, To: e.ReplyTo, TS: e.TS, Body: "ERROR request: " + cause.Error()}
+		if err := sp.Send(reply); err != nil {
+			logf(o.Log, "--- %s rejection reply not sent: %v", e.ID, err)
+		}
+	}
+	return d.Ack(true)
 }
 
 // handle runs the preset for one message and returns the post-processed

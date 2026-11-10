@@ -3,15 +3,21 @@ package host
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 	"github.com/c0ze/tincan/v2/internal/request"
 	"github.com/c0ze/tincan/v2/internal/spool"
 )
@@ -222,6 +228,96 @@ func TestServeRecoveryReusesTerminalResultWithReplyAlreadyQueued(t *testing.T) {
 	}
 	if _, err := os.Stat(pidfile); !os.IsNotExist(err) {
 		t.Fatalf("terminal request executed again: %v", err)
+	}
+}
+
+// collidingRequest journals a finished request and returns a different
+// envelope with the same ID, as a hand-written or replayed envelope might be.
+func collidingRequest(t *testing.T, room string) *envelope.Envelope {
+	t.Helper()
+	original := &envelope.Envelope{ID: envelope.NewID(), From: "orch", To: "agent", TS: time.Now().UTC(), Body: "original"}
+	if _, err := request.Finish(room, original, "done"); err != nil {
+		t.Fatal(err)
+	}
+	e := *original
+	e.Body, e.ReplyTo = "colliding", "r-"+envelope.NewID()
+	e.CorrID = e.ReplyTo
+	return &e
+}
+
+// A delivery whose journal entry cannot be used fails alone; the listener
+// keeps serving instead of exiting with the claim still in flight.
+func TestServeJournalRejectionFailsOnlyThatDelivery(t *testing.T) {
+	room, sp, logbuf, done, _ := startServe(t, echoPreset(), "fake")
+	e := collidingRequest(t, room)
+	if err := sp.Send(e); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := sp.Recv(e.ReplyTo, 10*time.Second, false)
+	if err != nil || !strings.HasPrefix(reply.Body, "ERROR request: ") || !strings.Contains(reply.Body, "collision") {
+		t.Fatalf("rejection reply: %+v %v\nlog:\n%s", reply, err, logbuf.String())
+	}
+	if r := askVia(t, sp, "next"); r.Body != "echo: next" {
+		t.Fatalf("next reply = %q", r.Body)
+	}
+	if d, _ := sp.ListInFlight("agent"); len(d) != 0 {
+		t.Fatalf("rejected delivery still in flight: %d", len(d))
+	}
+	if r, err := request.Get(room, e.ID); err != nil || r.Result != "done" {
+		t.Fatalf("original journal entry changed: %+v %v", r, err)
+	}
+	stopServe(t, sp, done)
+}
+
+func TestJournalRejectedKeepsFilesystemErrorsFatal(t *testing.T) {
+	syntax := json.Unmarshal([]byte("{"), &struct{}{})
+	for _, err := range []error{errors.New("request ID collision: x"), fmt.Errorf("corrupt request record %q", "x"), syntax,
+		fmt.Errorf("%w: x", fsutil.ErrTooLarge), &fs.PathError{Op: "open", Path: "x", Err: fsutil.ErrUnsafeFile}} {
+		if !journalRejected(err) {
+			t.Errorf("not rejected: %v", err)
+		}
+	}
+	for _, err := range []error{&fs.PathError{Op: "write", Path: "x", Err: syscall.ENOSPC}, &os.LinkError{Op: "rename", Err: syscall.EACCES},
+		fmt.Errorf("persist: %w", os.NewSyscallError("fsync", syscall.EIO))} {
+		if journalRejected(err) {
+			t.Errorf("filesystem error rejected the delivery: %v", err)
+		}
+	}
+}
+
+func TestServeRecoveryGetsPastJournalRejection(t *testing.T) {
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	room := t.TempDir()
+	sp, err := spool.Open(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := collidingRequest(t, room)
+	if err := sp.Send(e); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sp.ClaimContext(context.Background(), "agent", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, ServeOptions{Room: room, Name: "agent", Label: "fake", Preset: echoPreset()})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("recovery Serve did not stop")
+		}
+	})
+	if r := askVia(t, sp, "after recovery"); r.Body != "echo: after recovery" {
+		t.Fatalf("reply after recovery = %q", r.Body)
+	}
+	if reply, err := sp.Recv(e.ReplyTo, time.Second, false); err != nil || !strings.HasPrefix(reply.Body, "ERROR request: ") {
+		t.Fatalf("rejection reply: %+v %v", reply, err)
 	}
 }
 
