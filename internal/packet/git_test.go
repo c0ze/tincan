@@ -52,9 +52,15 @@ func fakeGitLauncher() int {
 // fakeRealGit writes to stdout until a write fails: as fast as it can
 // (flood, like a huge diff) or a line every 50 ms (trickle). It gives up
 // after two minutes, so that a regression fails the test instead of leaving
-// a process behind for good.
+// a process behind for good. Once running, and so holding the inherited
+// pipes, it creates the file named by TINCAN_TEST_GIT_READY.
 func fakeRealGit(mode string) int {
 	time.AfterFunc(2*time.Minute, func() { os.Exit(3) })
+	if ready := os.Getenv("TINCAN_TEST_GIT_READY"); ready != "" {
+		if err := os.WriteFile(ready, nil, 0o600); err != nil {
+			return 2
+		}
+	}
 	line := []byte(strings.Repeat("x", 63) + "\n")
 	for {
 		if _, err := os.Stdout.Write(line); err != nil {
@@ -67,8 +73,8 @@ func fakeRealGit(mode string) int {
 }
 
 // useGitLauncher puts the launcher first on PATH; the real git it starts
-// behaves as mode says.
-func useGitLauncher(t *testing.T, mode string) Git {
+// behaves as mode says and creates the returned file once it runs.
+func useGitLauncher(t *testing.T, mode string) (Git, string) {
 	t.Helper()
 	name := "git"
 	if runtime.GOOS == "windows" {
@@ -86,9 +92,14 @@ func useGitLauncher(t *testing.T, mode string) Git {
 	}
 	t.Setenv("PATH", launcherDir)
 	t.Setenv("TINCAN_TEST_GIT_LAUNCHER", mode)
+	ready := filepath.Join(launcherDir, t.Name()+".ready")
+	if err := os.Remove(ready); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	t.Setenv("TINCAN_TEST_GIT_READY", ready)
 	// Not a t.TempDir: on Windows a directory cannot be removed while it is
 	// a running process's working directory.
-	return Git{Dir: launcherDir}
+	return Git{Dir: launcherDir}, ready
 }
 
 func copyFile(from, to string) error {
@@ -124,9 +135,10 @@ func within(t *testing.T, what string, f func() error) error {
 }
 
 // A too-large output stops git; the real git behind the launcher must not
-// keep the review waiting on the output pipes it inherited.
+// keep the review waiting on the output pipes it inherited. Only the real
+// git writes to stdout, so over proves it was running with the pipes.
 func TestRunLimitedStopsGitBehindLauncher(t *testing.T) {
-	g := useGitLauncher(t, "flood")
+	g, _ := useGitLauncher(t, "flood")
 	var over bool
 	err := within(t, "runLimited", func() error {
 		var err error
@@ -141,14 +153,36 @@ func TestRunLimitedStopsGitBehindLauncher(t *testing.T) {
 // Cancelling a command kills the launcher; Run must return without waiting
 // for the real git to finish.
 func TestRunReturnsWhenCancelledGitBehindLauncherHoldsPipes(t *testing.T) {
-	g := useGitLauncher(t, "trickle")
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	g, ready := useGitLauncher(t, "trickle")
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	err := within(t, "Run", func() error {
+	done := make(chan error, 1)
+	go func() {
 		_, err := g.Run(ctx, nil, "status")
-		return err
-	})
-	if err == nil {
-		t.Fatal("cancelled git reported success")
+		done <- err
+	}()
+	// Cancel only once the real git runs with the pipes: a cancellation
+	// before that would not exercise them.
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("Run returned before the real git ran: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the real git did not start within a minute")
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancelled git reported success")
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("Run still blocked a minute after cancellation")
 	}
 }
