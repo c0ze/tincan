@@ -130,7 +130,9 @@ launches agents. Standard output
 is reserved for MCP messages and diagnostics go to standard error.
 
 The tools are `tincan_launch`, `tincan_send`, `tincan_wait`, `tincan_status`,
-`tincan_cancel`, `tincan_reset`, `tincan_stop`, and `tincan_presets`. Launch uses
+`tincan_cancel`, `tincan_reset`, `tincan_stop`, `tincan_presets`, and, for
+committee reviews (which need `tincan web` running), `tincan_review`,
+`tincan_review_wait`, and `tincan_review_cancel`. Launch uses
 configured presets; the MCP API does not accept an arbitrary command to execute.
 Send returns a durable `request_id`. Save it and use wait/status to collect the
 result across client reconnects. A wait timing out does not resubmit or cancel

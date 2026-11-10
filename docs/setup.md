@@ -124,11 +124,12 @@ args = ["mcp"]
 Use the configuration location supported by your client, replace the binary
 path, and restart or reconnect it. Desktop clients that start servers outside
 a project (Claude Desktop uses `/`) need `"args": ["mcp", "--room",
-"/absolute/path/to/repo"]`; tincan refuses to use the home directory or `/` as
-a room. Desktop clients may also have a smaller `PATH` than your terminal;
-tincan adds common per-user bin directories when it launches workers. Workers
-installed elsewhere need that directory on `PATH` or an absolute path in their
-preset entry.
+"/absolute/path/to/repo"]`. Without `--room`, tincan refuses to infer the home
+directory, `/` or another directory above your home as the room; an explicit
+`--room` is used as given, so name the project, never `/`. Desktop clients may
+also have a smaller `PATH` than your terminal; tincan adds common per-user bin
+directories when it launches workers. Workers installed elsewhere need that
+directory on `PATH` or an absolute path in their preset entry.
 
 There is no separate desktop preset: a Claude, Codex or other desktop client
 uses the tools if it supports local stdio MCP. Worker names still refer to the
