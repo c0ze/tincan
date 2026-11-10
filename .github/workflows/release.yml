@@ -26,9 +26,10 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
-          # Release only commits that are already on main.
+          # Release only commits that are already on main. Use the full ref:
+          # a tag named origin/main would win over the short name.
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git merge-base --is-ancestor HEAD origin/main ||
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main ||
             { echo "::error::$RELEASE_TAG is not on main"; exit 1; }
           test -s "docs/releases/$RELEASE_TAG.md"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
