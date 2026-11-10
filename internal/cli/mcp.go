@@ -122,10 +122,11 @@ func cmdGC(args []string, stdout, stderr io.Writer) int {
 		return ExitUsage
 	}
 	before := time.Now().Add(-*age)
-	count, err := request.GC(context.Background(), *room, before)
-	if err != nil {
-		fmt.Fprintf(stderr, "tincan gc: %v\n", err)
-		return ExitError
+	// The spool sweep does not depend on request records: run it even when
+	// some records were skipped, then still exit nonzero for them.
+	count, requestErr := request.GC(context.Background(), *room, before)
+	if requestErr != nil {
+		fmt.Fprintf(stderr, "tincan gc: %v\n", requestErr)
 	}
 	sp, err := spool.Open(*room)
 	if err != nil {
@@ -139,6 +140,9 @@ func cmdGC(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := json.NewEncoder(stdout).Encode(map[string]any{"requests": count, "spool": stats}); err != nil {
 		fmt.Fprintf(stderr, "tincan gc: %v\n", err)
+		return ExitError
+	}
+	if requestErr != nil {
 		return ExitError
 	}
 	return ExitOK

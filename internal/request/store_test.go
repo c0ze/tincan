@@ -157,6 +157,51 @@ func TestGCRetainsQueuedAndInflightTerminalRecords(t *testing.T) {
 	}
 }
 
+func TestGCSkipsCorruptRecordAndContinues(t *testing.T) {
+	room := t.TempDir()
+	ctx := context.Background()
+	if err := fsutil.MkdirPrivate(Dir(room)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.WriteFileAtomic(recordPath(room, "a"), []byte("{not json")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Submit(ctx, room, "worker", "test", "work", "z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp, _ := spool.Open(room)
+	d, err := sp.ClaimContext(ctx, r.Agent, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Finish(room, r.Envelope, "done"); err != nil {
+		t.Fatal(err)
+	}
+	if err = d.Ack(false); err != nil {
+		t.Fatal(err)
+	}
+	r, err = Get(room, "z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Updated = time.Now().Add(-3 * time.Hour)
+	data, _ := json.Marshal(r)
+	if err = fsutil.WriteFileAtomic(recordPath(room, "z"), data); err != nil {
+		t.Fatal(err)
+	}
+	count, err := GC(ctx, room, time.Now().Add(-time.Hour))
+	if count != 1 || err == nil || !strings.Contains(err.Error(), `"a"`) {
+		t.Fatalf("gc: %d %v", count, err)
+	}
+	if _, err := Get(room, "z"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old terminal record kept alive by a corrupt one: %v", err)
+	}
+	if _, err := os.Stat(recordPath(room, "a")); err != nil {
+		t.Fatalf("corrupt record swept: %v", err)
+	}
+}
+
 func TestEncodedBoundsRemainReadable(t *testing.T) {
 	room := t.TempDir()
 	r, err := Submit(context.Background(), room, "worker", "test", strings.Repeat("\x00", MaxBodyBytes), ".legacy")

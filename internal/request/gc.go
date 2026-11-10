@@ -3,6 +3,7 @@ package request
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,8 @@ import (
 // GC removes only old terminal request results and progress. Locks remain in
 // place so a concurrent sender cannot create a second lock inode for the same ID.
 // Queued, running, malformed, and unacknowledged work is never swept here.
+// An unreadable record is skipped without stopping the sweep; the returned
+// error then names every skipped record alongside the count removed.
 func GC(ctx context.Context, room string, before time.Time) (int, error) {
 	room = canonicalRoom(room)
 	entries, err := os.ReadDir(Dir(room))
@@ -22,6 +25,7 @@ func GC(ctx context.Context, room string, before time.Time) (int, error) {
 		return 0, err
 	}
 	count := 0
+	var skipped []error
 	for _, entry := range entries {
 		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -40,8 +44,12 @@ func GC(ctx context.Context, room string, before time.Time) (int, error) {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
-			if err != nil || !r.Terminal() || !r.Updated.Before(before) {
-				return err
+			if err != nil {
+				skipped = append(skipped, fmt.Errorf("skipped request %q: %w", id, err))
+				return nil
+			}
+			if !r.Terminal() || !r.Updated.Before(before) {
+				return nil
 			}
 			// A terminal result may still be needed to finish a crashed delivery.
 			// Retain it whenever any corresponding inflight claim remains.
@@ -71,5 +79,5 @@ func GC(ctx context.Context, room string, before time.Time) (int, error) {
 			return count, err
 		}
 	}
-	return count, nil
+	return count, errors.Join(skipped...)
 }

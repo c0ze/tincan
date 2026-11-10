@@ -401,8 +401,10 @@ to do next.
 and progress once they are no longer needed by a queued/in-flight delivery, plus
 old consumed-message audit logs and quarantine entries. The default age is seven
 days; the minimum is one hour. It retains active work, queued messages, claims,
-session pointers and host logs. After a request record is collected, its result
-and idempotency protection are gone; do not reuse old request IDs for new work.
+session pointers and host logs. An unreadable request record is kept and named on
+stderr; the rest of the sweep still runs, and `gc` then exits 1. After a request
+record is collected, its result and idempotency protection are gone; do not
+reuse old request IDs for new work.
 
 ## MCP stdio
 
