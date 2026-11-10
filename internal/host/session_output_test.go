@@ -131,6 +131,9 @@ func TestSessionSkippedEventNeverYieldsPartialAnswer(t *testing.T) {
 			"\",\"status\":\"SUCCESS\",\"response\":\"ANSWER\"}}\n{\"event\":\"result\",\"pad\":\"" + big + "\"}\n", false},
 		{"grok", "{\"type\":\"tool_call\",\"data\":{\"name\":\"read\"}}\n{\"type\":\"tool_call_update\",\"data\":{\"output\":\"" + big + "\"}}\n" +
 			"{\"type\":\"text\",\"data\":\"ANS\"}\n{\"type\":\"text\",\"data\":\"WER\"}\n{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", true},
+		// A number beyond float64 is valid JSON, as event reads it.
+		{"grok", "{\"type\":\"text\",\"data\":\"ANSWER\"}\n{\"type\":\"tool_call_update\",\"progress\":1e400,\"data\":{\"output\":\"" + big + "\"}}\n" +
+			"{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", true},
 		{"grok", "{\"type\":\"text\",\"data\":\"ANSWER\"}\n" + big + "\n{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", false},
 		{"grok", "{\"type\":\"text\",\"data\":\"ANSWER\"}\n{\"data\":\"" + big + "\",\"type\":\"tool_call_update\"}\n" +
 			"{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", false},
@@ -187,15 +190,16 @@ func TestHeadFieldsSeparatesTruncationFromSyntaxErrors(t *testing.T) {
 		ok     bool
 		fields string
 	}{
-		`{"type":"user","message":{"content":"xx`: {true, `map[message: type:user]`},
-		`{"role":"tool","type":"tool_res`:         {true, `map[role:tool]`},
-		`{"role":"tool","ty`:                      {true, `map[role:tool]`},
-		`{"role":"tool","type":`:                  {true, `map[role:tool]`},
-		`{"n":5,"t":null,"a":[1,`:                 {true, `map[a: n: t:]`},
-		`{"type":"user",BROKEN`:                   {false, `map[type:user]`},
-		`{"type":"user"} xxxx`:                    {false, `map[type:user]`},
-		`[{"type":"user"`:                         {false, `map[]`},
-		`not json`:                                {false, `map[]`},
+		`{"type":"user","message":{"content":"xx`:   {true, `map[message: type:user]`},
+		`{"role":"tool","type":"tool_res`:           {true, `map[role:tool]`},
+		`{"role":"tool","ty`:                        {true, `map[role:tool]`},
+		`{"role":"tool","type":`:                    {true, `map[role:tool]`},
+		`{"n":5,"t":null,"a":[1,`:                   {true, `map[a: n: t:]`},
+		`{"big":1e400,"type":"tool_call_update","x`: {true, `map[big: type:tool_call_update]`},
+		`{"type":"user",BROKEN`:                     {false, `map[type:user]`},
+		`{"type":"user"} xxxx`:                      {false, `map[type:user]`},
+		`[{"type":"user"`:                           {false, `map[]`},
+		`not json`:                                  {false, `map[]`},
 	} {
 		fields, ok := headFields([]byte(head))
 		if ok != want.ok || fmt.Sprint(fields) != want.fields {
