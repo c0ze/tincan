@@ -43,9 +43,19 @@ type Record struct {
 	InteractivePublished bool `json:"interactive_published,omitempty"`
 	// Only publication uncertainty can be resolved by a later validated reply;
 	// execution failures, cancellations, and other terminal results stay final.
-	InteractivePublicationUncertain bool               `json:"interactive_publication_uncertain,omitempty"`
-	Envelope                        *envelope.Envelope `json:"request"`
+	InteractivePublicationUncertain bool `json:"interactive_publication_uncertain,omitempty"`
+	// Publication tracks a native request's enqueue. It is saved as attempted
+	// before Send, so a retry never sends again what may already be in the
+	// spool; only a Send that reported a failure and left nothing queued
+	// reopens it as pending for a same-ID retry. Older records omit it.
+	Publication string             `json:"publication,omitempty"`
+	Envelope    *envelope.Envelope `json:"request"`
 }
+
+const (
+	publicationPending   = "pending"
+	publicationAttempted = "attempted"
+)
 
 func (r Record) Terminal() bool {
 	switch r.Status {
@@ -132,8 +142,9 @@ func sameRequest(r Record, e *envelope.Envelope) bool {
 }
 
 // Submit is idempotent for an explicitly supplied ID and identical request.
-// Persist before enqueueing. Retrying the same ID repairs an interrupted enqueue;
-// a running or completed request is never submitted a second time.
+// Persist before enqueueing. Retrying the same ID repairs an enqueue that
+// reported a failure; an attempted enqueue, a running or a completed request
+// is never resent.
 func Submit(ctx context.Context, room, agent, from, body, id string) (Record, error) {
 	return submit(ctx, room, agent, from, body, id, false)
 }
@@ -182,12 +193,26 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 			if r.InteractivePublished {
 				return r, nil
 			}
-			return resolveInteractivePublication(room, r)
+			return resolveInteractivePublication(ctx, room, r, true)
+		}
+		if r.Publication != publicationPending {
+			return resolveNativePublication(ctx, room, r)
 		}
 		e = r.Envelope
+		// Mark the attempt before Send: once the envelope may be in the spool,
+		// no retry may send it again, even after a crash.
+		attempt := r
+		attempt.Publication = publicationAttempted
+		if err := save(room, attempt); err != nil {
+			return r, fmt.Errorf("request %s was saved but enqueue failed; retry the same request_id: %w", id, err)
+		}
+		r = attempt
 	} else if errors.Is(err, os.ErrNotExist) {
 		r = newRecord(e)
 		r.Interactive = needsReply
+		if !needsReply {
+			r.Publication = publicationAttempted // see above
+		}
 		if err := save(room, r); err != nil {
 			return Record{}, err
 		}
@@ -200,13 +225,13 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 	}
 	if err := sp.Send(e); err != nil {
 		if r.Interactive {
-			resolved, resolveErr := resolveInteractivePublication(room, r)
+			resolved, resolveErr := resolveInteractivePublication(ctx, room, r, true)
 			if resolveErr != nil {
 				return r, fmt.Errorf("interactive request %s dispatch was not confirmed: %w (publication inspection: %v)", id, err, resolveErr)
 			}
 			return resolved, fmt.Errorf("interactive request %s dispatch returned an error and will not be resent automatically: %w", id, err)
 		}
-		return r, fmt.Errorf("request %s was saved but enqueue failed; retry the same request_id: %w", id, err)
+		return reopenEnqueue(ctx, room, r, err)
 	}
 	if r.Interactive {
 		r.InteractivePublished = true
@@ -217,37 +242,80 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 	return r, nil
 }
 
+// reopenEnqueue handles a native Send that reported sendErr. An envelope
+// that is not queued or in flight was not published, so the record returns
+// to pending and a same-ID retry sends it (the documented repair). Residual
+// window: if Send failed after its link became visible (a failed inbox sync)
+// and a consumer outside the journal (an interactive recv) took the envelope
+// before this inspection, the retry sends it a second time. That double
+// fault is accepted to keep the repair for ordinary enqueue failures.
+func reopenEnqueue(ctx context.Context, room string, r Record, sendErr error) (Record, error) {
+	found, err := findPublication(ctx, room, r, true)
+	if err != nil {
+		return r, fmt.Errorf("request %s enqueue failed and its publication cannot be checked, so it will not be resent; retry the same request_id to check again: %w (inspection: %v)", r.ID, sendErr, err)
+	}
+	if found {
+		return r, fmt.Errorf("request %s is queued although enqueue reported an error; retry the same request_id to launch it: %w", r.ID, sendErr)
+	}
+	r.Publication = publicationPending
+	if err := save(room, r); err != nil {
+		return r, fmt.Errorf("request %s enqueue failed and it will not be resent: %w (reopening it: %v)", r.ID, sendErr, err)
+	}
+	return r, fmt.Errorf("request %s was saved but enqueue failed; retry the same request_id: %w", r.ID, sendErr)
+}
+
+// resolveNativePublication answers a retry of a queued hosted request whose
+// enqueue was attempted, or whose record predates the field. A hosted
+// listener records running before it acknowledges, so a queued record whose
+// envelope has left the spool was consumed outside the journal (by an
+// interactive recv, for example) and may already have run. It is never
+// resent. A legacy record cannot tell a failed enqueue from a consumed one,
+// so its absence is treated the same way.
+func resolveNativePublication(ctx context.Context, room string, r Record) (Record, error) {
+	found, err := findPublication(ctx, room, r, true)
+	if err != nil || found {
+		return r, err
+	}
+	r.Status = "interrupted"
+	r.Result = "ERROR interrupted: request was enqueued but is no longer queued or in flight, and no hosted listener recorded running it; delivery and execution may have occurred, and the request was not resent"
+	return r, save(room, r)
+}
+
+// findPublication reports whether r's exact envelope is queued or in flight.
+// The spool inspects both locations under its transport lock (taken after the
+// journal lock, as Send does), so a claim or Nack cannot hide it in between.
+// Without wait, a busy transport returns filelock.ErrLocked at once.
+func findPublication(ctx context.Context, room string, r Record, wait bool) (bool, error) {
+	if err := envelope.Validate(r.Envelope); err != nil {
+		return false, err
+	}
+	sp, err := spool.Open(canonicalRoom(room))
+	if err != nil {
+		return false, err
+	}
+	var found bool
+	if wait {
+		found, err = sp.Published(ctx, r.Envelope)
+	} else {
+		found, err = sp.TryPublished(r.Envelope)
+	}
+	if err != nil {
+		return false, fmt.Errorf("cannot inspect request publication: %w", err)
+	}
+	return found, nil
+}
+
 // resolveInteractivePublication handles a durable dispatch intent left by a
 // process exit or older interactive records without confirmation. Absence is
 // not permission to resend: a legacy receiver may already have consumed and
 // acted on the envelope without writing anything to the request journal.
-// Native queued requests deliberately retain their separate enqueue repair.
-func resolveInteractivePublication(room string, r Record) (Record, error) {
-	if err := envelope.Validate(r.Envelope); err != nil {
+// Native requests resend only an enqueue this version never confirmed.
+func resolveInteractivePublication(ctx context.Context, room string, r Record, wait bool) (Record, error) {
+	found, err := findPublication(ctx, room, r, wait)
+	if err != nil {
 		return r, err
 	}
-	root := filepath.Join(canonicalRoom(room), ".tincan")
-	filename := envelope.Filename(r.Envelope)
-	paths := []string{
-		filepath.Join(root, "inbox", r.Agent, filename),
-		filepath.Join(root, "inflight", r.Agent, filename, "message.json"),
-	}
-	for _, path := range paths {
-		data, err := fsutil.ReadFile(path, spool.MaxMessageBytes)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return r, fmt.Errorf("cannot inspect interactive publication: %w", err)
-		}
-		existing, err := envelope.Unmarshal(data)
-		if err != nil {
-			return r, fmt.Errorf("cannot inspect interactive publication: %w", err)
-		}
-		if existing.ID != r.ID || !sameRequest(r, existing) || !existing.TS.Equal(r.Envelope.TS) ||
-			existing.ReplyTo != r.Envelope.ReplyTo || existing.CorrID != r.Envelope.CorrID {
-			return r, fmt.Errorf("%w: interactive request %s", spool.ErrEnvelopeConflict, r.ID)
-		}
+	if found {
 		r.InteractivePublished = true
 		r.InteractivePublicationUncertain = false
 		return r, save(room, r)
@@ -351,19 +419,40 @@ func finish(room string, e *envelope.Envelope, body string, reply *envelope.Enve
 	if len(body) > MaxResultBytes {
 		body = body[:MaxResultBytes] + "\n[output truncated]"
 	}
-	r.Status, r.Result = "completed", body
-	switch {
-	case r.CancelRequested || strings.HasPrefix(body, "ERROR canceled"):
+	outcome := "completed"
+	if reply == nil {
+		// An interactive reply is typed text; only hosted bodies carry outcomes.
+		outcome = hostedOutcome(body)
+	}
+	r.Status, r.Result = outcome, body
+	if r.CancelRequested || outcome == "canceled" {
 		r.Status = "canceled"
-		if !strings.HasPrefix(body, "ERROR") {
+		if outcome == "completed" {
 			r.Result = "ERROR canceled: the request may have produced changes before cancellation\n" + body
 		}
-	case strings.HasPrefix(body, "ERROR interrupted"):
-		r.Status = "interrupted"
-	case strings.HasPrefix(body, "ERROR"):
-		r.Status = "failed"
 	}
 	return r, save(room, r)
+}
+
+// hostedFailurePrefixes are the failure bodies a hosted listener produces
+// (host.ReplyBody and its serve loop). An answer that merely starts with
+// "ERROR" is not a failure. An explicit outcome passed by the host would be
+// sturdier than matching its text.
+var hostedFailurePrefixes = []string{"ERROR exit=", "ERROR timeout after ", "ERROR exec: ", "ERROR session: ", "ERROR reply file: "}
+
+func hostedOutcome(body string) string {
+	switch {
+	case strings.HasPrefix(body, "ERROR canceled: "):
+		return "canceled"
+	case strings.HasPrefix(body, "ERROR interrupted: "):
+		return "interrupted"
+	}
+	for _, prefix := range hostedFailurePrefixes {
+		if strings.HasPrefix(body, prefix) {
+			return "failed"
+		}
+	}
+	return "completed"
 }
 
 // Cancel prevents queued work from starting. Running work remains running until

@@ -28,6 +28,13 @@ func TestDecideSkipsOnlyWhenEveryConditionHolds(t *testing.T) {
 		{"malformed config", `{not json`, full, false, "malformed"},
 		{"no cache", `{"codex-gmail": {"presets": ["codex-gmail"], "blocking": "weekly"}}`, "", false, "no cached"},
 		{"stale", `{"codex-gmail": {"presets": ["codex-gmail"], "blocking": "weekly"}}`, `{"percent": 100, "reset_at": ` + future + `, "fetched_at": ` + ftoa(unix(now.Add(-2*time.Hour))) + `}`, false, "stale"},
+		{"mistyped blocking", `{"codex-gmail": {"presets": ["codex-gmail"], "blocking": "Weekly"}}`, full, false, `"Weekly"`},
+		{"unknown blocking", `{"codex-gmail": {"presets": ["codex-gmail"], "blocking": "both"}}`, shortFull, false, `"both"`},
+		{"legacy short without reset", `{"codex-gmail": {"presets": ["codex-gmail"], "blocking": "short"}}`, `{"percent": 40, "reset_at": ` + future + `, "short_percent": 100, "fetched_at": ` + fetched + `}`, false, "no short reset"},
+		{"either with short lacking reset", `{"codex-gmail": {"presets": ["codex-gmail"], "blocking": "either"}}`, `{"percent": 40, "reset_at": ` + future + `, "short_percent": 100, "fetched_at": ` + fetched + `}`, false, "no short reset"},
+		{"weekly without reset", `{"codex-gmail": {"presets": ["codex-gmail"], "blocking": "weekly"}}`, `{"percent": 100, "fetched_at": ` + fetched + `}`, false, "no weekly reset"},
+		{"short not full without reset", `{"codex-gmail": {"presets": ["codex-gmail"], "blocking": "short"}}`, `{"percent": 40, "reset_at": ` + future + `, "short_percent": 30, "fetched_at": ` + fetched + `}`, false, "not exhausted"},
+		{"not a cache", `{"codex-gmail": {"presets": ["codex-gmail"], "blocking": "weekly"}}`, `{"access_token": "secret"}`, false, "no cached"},
 	}
 	for _, c := range cases {
 		dir := t.TempDir()

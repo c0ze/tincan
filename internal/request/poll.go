@@ -134,5 +134,11 @@ func reconcileIdleInteractivePublication(ctx context.Context, room string, r Rec
 	if current.Status != "queued" || !current.Interactive || current.InteractivePublished {
 		return current, nil
 	}
-	return resolveInteractivePublication(room, current)
+	// Poll must honor its caller's deadline: a busy transport leaves the
+	// record queued for the next poll instead of waiting for the lock.
+	resolved, err := resolveInteractivePublication(ctx, room, current, false)
+	if errors.Is(err, filelock.ErrLocked) {
+		return current, nil
+	}
+	return resolved, err
 }

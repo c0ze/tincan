@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/host"
@@ -49,15 +50,7 @@ func Launch(ctx context.Context, o Options, name, preset, sessionMode string) (L
 			preset = st.Preset
 		}
 	}
-	all, err := o.PresetMap()
-	if err != nil {
-		return LaunchResult{}, err
-	}
-	label, p, err := host.Resolve(all, name, preset, host.Overrides{ExecTimeoutSec: -1})
-	if err != nil {
-		return LaunchResult{}, err
-	}
-	p, err = host.WithSession(p, label, sessionMode)
+	label, p, err := o.resolve(name, preset, sessionMode)
 	if err != nil {
 		return LaunchResult{}, err
 	}
@@ -66,6 +59,23 @@ func Launch(ctx context.Context, o Options, name, preset, sessionMode string) (L
 		return LaunchResult{}, err
 	}
 	return LaunchResult{State: res.State, Already: res.Already}, nil
+}
+
+// resolve picks the configuration a new listener would start with.
+func (o Options) resolve(name, preset, sessionMode string) (string, host.Preset, error) {
+	all, err := o.PresetMap()
+	if err != nil {
+		return "", host.Preset{}, err
+	}
+	label, p, err := host.Resolve(all, name, preset, host.Overrides{ExecTimeoutSec: -1})
+	if err != nil {
+		return "", host.Preset{}, err
+	}
+	p, err = host.WithSession(p, label, sessionMode)
+	if err != nil {
+		return "", host.Preset{}, err
+	}
+	return label, p, nil
 }
 
 type SendSpec struct {
@@ -77,7 +87,9 @@ type SendSpec struct {
 }
 
 // Send submits a durable request and launches its hosted listener when absent.
-// A saved request stays retrievable when the launch fails.
+// A saved request stays retrievable when the launch fails. A blank prompt, or
+// new work for an agent that is neither running nor configured, is refused
+// before anything is saved.
 func Send(ctx context.Context, o Options, s SendSpec) (request.Record, error) {
 	if s.From == "" {
 		s.From = "mcp"
@@ -96,8 +108,12 @@ func Send(ctx context.Context, o Options, s SendSpec) (request.Record, error) {
 	if len(s.Body) > request.MaxBodyBytes {
 		return request.Record{}, fmt.Errorf("prompt exceeds %d bytes", request.MaxBodyBytes)
 	}
+	if strings.TrimSpace(s.Body) == "" {
+		return request.Record{}, errors.New("prompt is empty")
+	}
 	// A cached result must remain retrievable even when the worker is stopped,
 	// uninstalled, or named with an alias that is not itself a preset.
+	saved := false
 	if s.RequestID != "" {
 		existing, err := request.Get(o.Room, s.RequestID)
 		if err == nil && existing.Terminal() {
@@ -106,6 +122,7 @@ func Send(ctx context.Context, o Options, s SendSpec) (request.Record, error) {
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return request.Record{}, err
 		}
+		saved = err == nil
 	}
 	route, err := request.LockRoute(ctx, o.Room, s.Agent)
 	if err != nil {
@@ -118,6 +135,15 @@ func Send(ctx context.Context, o Options, s SendSpec) (request.Record, error) {
 		interactive, err = request.InteractivePending(ctx, o.Room, s.Agent)
 		if err != nil {
 			return request.Record{}, err
+		}
+	}
+	// New work for a name that is neither running nor launchable (a typo) is
+	// refused before it is saved: nothing could run it but a later listener
+	// that happens to take that name. A saved request keeps its recovery:
+	// launch the intended listener, then retry or collect the same ID.
+	if !alive && !interactive && !saved {
+		if _, _, err := o.resolve(s.Agent, s.Preset, ""); err != nil {
+			return request.Record{}, fmt.Errorf("no listener %s is running and none can be launched; nothing was saved: %w", s.Agent, err)
 		}
 	}
 	submit := request.Submit

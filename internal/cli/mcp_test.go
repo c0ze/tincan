@@ -1,10 +1,16 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/c0ze/tincan/v2/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/request"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 func evalDir(t *testing.T, dir string) string {
@@ -115,5 +121,45 @@ func TestInferRoomRefusesFilesystemRoot(t *testing.T) {
 	t.Chdir(root)
 	if got, err := inferRoom(); err == nil {
 		t.Fatalf("inferRoom accepted filesystem root: %q", got)
+	}
+}
+
+// One unreadable request record is reported but stops neither the request
+// sweep nor the spool GC.
+func TestGCReportsCorruptRecordAndStillSweepsSpool(t *testing.T) {
+	room := t.TempDir()
+	sp, err := spool.Open(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Send(&envelope.Envelope{From: "a", To: "b", Body: "consumed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sp.Recv("b", time.Second, true); err != nil {
+		t.Fatal(err)
+	}
+	logs, err := filepath.Glob(filepath.Join(room, ".tincan", "log", "*"))
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("consumed log %v %v", logs, err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(logs[0], old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(request.Dir(room), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(request.Dir(room), "a.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"gc", "--room", room, "--older-than", "24h"}, &stdout, &stderr); code != ExitError {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `"a"`) || !strings.Contains(stdout.String(), `"Logs":1`) {
+		t.Fatalf("stdout %q, stderr %q", stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(logs[0]); !os.IsNotExist(err) {
+		t.Fatalf("spool GC skipped: %v", err)
 	}
 }

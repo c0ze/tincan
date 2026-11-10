@@ -392,9 +392,12 @@ bounded request progress, with at most a 1 MiB in-memory tail per stream.
   to repeat an agent run automatically.
 - Room rules are unchanged: pass `--room` explicitly; non-root rooms warn.
 
-A hosted `ERROR ` reply marks failed or interrupted work. Inspect its details to
-distinguish provider, session, process and storage failures before deciding what
-to do next.
+A hosted reply starting with one of these prefixes (`ERROR session:`,
+`ERROR exit=`, `ERROR timeout after`, `ERROR exec:`, `ERROR reply file:`,
+`ERROR interrupted:`) marks failed or interrupted work. Any other answer,
+including every reply typed by an interactive receiver, is `completed`, even
+when it begins with `ERROR`. Inspect a failure's details to distinguish
+provider, session, process and storage failures before deciding what to do next.
 
 ### Retention
 
@@ -402,8 +405,10 @@ to do next.
 and progress once they are no longer needed by a queued/in-flight delivery, plus
 old consumed-message audit logs and quarantine entries. The default age is seven
 days; the minimum is one hour. It retains active work, queued messages, claims,
-session pointers and host logs. After a request record is collected, its result
-and idempotency protection are gone; do not reuse old request IDs for new work.
+session pointers and host logs. An unreadable request record is kept and named on
+stderr; the rest of the sweep still runs, and `gc` then exits 1. After a request
+record is collected, its result and idempotency protection are gone; do not
+reuse old request IDs for new work.
 
 ## MCP stdio
 
@@ -479,10 +484,21 @@ Clients that supply an MCP progress token also receive progress notifications.
 
 An explicit `request_id` is an idempotency key for identical agent/from/body
 values while the record is retained. Different work with the same ID is rejected.
-New or omitted IDs submit new work. The prompt limit is 1 MiB; `from` defaults to
-`mcp`. If startup fails after saving work, retain the ID from the error, launch
+New or omitted IDs submit new work. The prompt limit is 1 MiB, a blank prompt is
+refused, and `from` defaults to `mcp`. New work for an agent that is neither
+running nor a configured preset (a typo, say) is refused before anything is
+saved. If startup fails after saving work, retain the ID from the error, launch
 the intended listener and collect or retry that same ID. A custom listener name
 such as `reviewer` needs an explicit launch with its preset after being stopped.
+The journal records each enqueue attempt before it is made. A retry resends
+hosted work only after an enqueue that reported an error and left nothing
+queued. If a queued request has left the spool without a hosted listener
+recording it (an interactive `recv` consumed it, for example), or a crash
+interrupted the enqueue, the retry marks it `interrupted` instead of sending it
+again; submit new work if it never ran. One double fault can still duplicate
+work: the enqueue reports an error after the message became visible (a failed
+directory sync) and an interactive `recv` takes it before tincan checks the
+spool. The same-ID repair of ordinary enqueue failures is kept despite that.
 
 Hosts and retained requests continue after the MCP connection closes. Reconnect
 to the same room and use the same ID with wait/status. A wait deadline does not

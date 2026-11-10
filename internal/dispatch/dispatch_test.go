@@ -2,6 +2,7 @@ package dispatch_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/c0ze/tincan/v2/internal/dispatch"
 	"github.com/c0ze/tincan/v2/internal/host"
 	"github.com/c0ze/tincan/v2/internal/request"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 func TestMain(m *testing.M) {
@@ -85,6 +87,58 @@ func TestLaunchUnknownPresetFails(t *testing.T) {
 	o := opts(t)
 	if _, err := dispatch.Launch(context.Background(), o, "x.t0000003", "nope", ""); err == nil {
 		t.Fatal("unknown preset accepted")
+	}
+}
+
+// A send to a name that is neither running nor a preset (a typo) must not
+// leave a queued record or message that a later listener of that name runs.
+func TestSendUnknownAgentSavesNothing(t *testing.T) {
+	room, _ := filepath.EvalSymlinks(t.TempDir())
+	missing := host.Preset{Exec: []string{filepath.Join(t.TempDir(), "not-installed"), "{body}"}, Stdin: "none", Reply: "stdout"}
+	o := dispatch.Options{Room: room, Presets: map[string]host.Preset{"claude": missing}}
+	for _, spec := range []dispatch.SendSpec{
+		{Agent: "cluade", Body: "typo", RequestID: "typo-1"},
+		{Agent: "reviewer", Preset: "nope", Body: "typo", RequestID: "typo-2"},
+	} {
+		if _, err := dispatch.Send(context.Background(), o, spec); err == nil {
+			t.Fatalf("%+v accepted", spec)
+		}
+		if _, err := request.Get(room, spec.RequestID); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s left a record: %v", spec.RequestID, err)
+		}
+		sp, _ := spool.Open(room)
+		if p, _, err := sp.Present(spec.Agent); err != nil || p.Queued != 0 {
+			t.Fatalf("%s left a message: %+v %v", spec.Agent, p, err)
+		}
+	}
+}
+
+// A launch failure a same-ID retry can cure keeps the request saved.
+func TestSendTransientLaunchFailureKeepsRequest(t *testing.T) {
+	room, _ := filepath.EvalSymlinks(t.TempDir())
+	missing := host.Preset{Exec: []string{filepath.Join(t.TempDir(), "not-installed"), "{body}"}, Stdin: "none", Reply: "stdout"}
+	o := dispatch.Options{Room: room, Presets: map[string]host.Preset{"missing": missing}}
+	_, err := dispatch.Send(context.Background(), o, dispatch.SendSpec{Agent: "missing", Body: "work", RequestID: "transient-1"})
+	if err == nil || !strings.Contains(err.Error(), "retry this same request_id") {
+		t.Fatalf("launch error %v", err)
+	}
+	if r, err := request.Get(room, "transient-1"); err != nil || r.Status != "queued" {
+		t.Fatalf("saved request %+v %v", r, err)
+	}
+}
+
+func TestSendRejectsBlankBody(t *testing.T) {
+	room, _ := filepath.EvalSymlinks(t.TempDir())
+	// The executable is missing, so nothing can run even if the check fails.
+	missing := host.Preset{Exec: []string{filepath.Join(t.TempDir(), "not-installed"), "{body}"}, Stdin: "none", Reply: "stdout"}
+	o := dispatch.Options{Room: room, Presets: map[string]host.Preset{"missing": missing}}
+	for _, body := range []string{"", " \n\t"} {
+		if _, err := dispatch.Send(context.Background(), o, dispatch.SendSpec{Agent: "missing", Body: body, RequestID: "blank-1"}); err == nil {
+			t.Fatalf("blank body %q accepted", body)
+		}
+		if _, err := request.Get(room, "blank-1"); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("blank body saved: %v", err)
+		}
 	}
 }
 
