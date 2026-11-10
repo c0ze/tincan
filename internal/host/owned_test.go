@@ -10,6 +10,51 @@ import (
 	"github.com/c0ze/tincan/v2/internal/filelock"
 )
 
+// A foreground Serve that starts while a probe holds the listener's locks
+// (as Owned, Up, Down and settlements do, under the launch lock) waits for
+// the launch lock instead of failing on the lifetime lock.
+func TestForegroundServeWaitsOutAProbe(t *testing.T) {
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	room := canonicalTempDir(t)
+	launch, err := filelock.Try(launchPath(room, "agent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifetime, err := filelock.Try(lifetimePath(room, "agent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := echoPreset()
+	if err := p.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var serveErr error
+	exited := make(chan struct{})
+	go func() {
+		serveErr = Serve(ctx, ServeOptions{Room: room, Name: "agent", Label: "fake", Preset: p})
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-exited:
+		case <-time.After(10 * time.Second):
+			t.Error("Serve did not exit")
+		}
+	})
+	select {
+	case <-exited:
+		t.Fatalf("foreground serve failed during a probe: %v", serveErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+	lifetime.Close()
+	launch.Close()
+	if !waitFor(func() bool { st, ok, _ := ReadState(room, "agent"); return ok && st.Alive() }, 5*time.Second) {
+		t.Fatal("foreground serve never became ready")
+	}
+}
+
 func TestOwnedReportsTheLifetimeLock(t *testing.T) {
 	ctx := context.Background()
 	empty := canonicalTempDir(t)

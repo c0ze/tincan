@@ -59,16 +59,31 @@ func Serve(ctx context.Context, o ServeOptions) error {
 	if o.Log == nil {
 		o.Log = io.Discard
 	}
+	// Everything else that takes the lifetime lock holds the launch lock: Up
+	// (whose daemon takes its lifetime while that Up holds it), Down,
+	// ClearSession and the Owned and WithoutHost probes. A foreground host
+	// (no owner from Up) takes it too, so a probe briefly holding the
+	// lifetime lock never makes it fail. A daemon must not: its Up holds it.
+	var launch *filelock.Lock
 	if o.Owner == "" {
+		lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		launch, err = filelock.Acquire(lctx, launchPath(o.Room, o.Name))
+		cancel()
+		if err != nil {
+			return fmt.Errorf("listener %s is being launched or probed: %w", o.Name, err)
+		}
 		o.Owner = envelope.NewID()
 	}
 	if len(o.Owner) > 128 {
+		launch.Close()
 		return errors.New("invalid host owner")
 	}
 	if err := spool.ValidName(o.Owner); err != nil {
+		launch.Close()
 		return fmt.Errorf("invalid host owner: %w", err)
 	}
 	lifetime, err := filelock.Try(lifetimePath(o.Room, o.Name))
+	launch.Close() // nil-safe; a held lifetime lock now speaks for itself
 	if err != nil {
 		return fmt.Errorf("listener %s already owns its lifetime or cannot be locked: %w", o.Name, err)
 	}
