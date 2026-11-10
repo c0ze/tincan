@@ -57,7 +57,25 @@ func TestResolveUncommittedSnapshot(t *testing.T) {
 // Git never walks tincan's live state, the root's or a subdirectory room's:
 // other processes create and remove files there while a snapshot runs, and
 // one that vanishes between Git's scan and its stat failed the whole add.
+// Global pathspec modes inherited from the caller (git --literal-pathspecs
+// and friends) must not change how the snapshot's pathspecs are read.
 func TestResolveSnapshotSkipsTincanState(t *testing.T) {
+	for _, env := range [][]string{
+		nil,
+		{"GIT_LITERAL_PATHSPECS"},
+		{"GIT_GLOB_PATHSPECS"},
+		{"GIT_NOGLOB_PATHSPECS"},
+		{"GIT_ICASE_PATHSPECS"},
+		{"GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS"},
+		{"GIT_LITERAL_PATHSPECS", "GIT_ICASE_PATHSPECS"},
+	} {
+		t.Run(strings.Join(append([]string{"env"}, env...), "+"), func(t *testing.T) {
+			testSnapshotSkipsTincanState(t, env)
+		})
+	}
+}
+
+func testSnapshotSkipsTincanState(t *testing.T, env []string) {
 	dir, git := testRepo(t)
 	write(t, dir, "keep.txt", "a\n")
 	write(t, dir, ".tincan/tracked", "t\n")
@@ -76,6 +94,9 @@ func TestResolveSnapshotSkipsTincanState(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+	}
+	for _, name := range env {
+		t.Setenv(name, "1")
 	}
 	r, err := Resolve(context.Background(), room, "uncommitted")
 	if err != nil {
