@@ -3,6 +3,7 @@ package quota
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"time"
 )
@@ -52,6 +53,8 @@ func Decide(cacheDir, configPath, preset string, now time.Time) Decision {
 		return no("several quota entries map this preset")
 	case m.Blocking == "":
 		return no("the quota entry does not declare blocking")
+	case m.Blocking != "weekly" && m.Blocking != "short" && m.Blocking != "either":
+		return no(fmt.Sprintf("the quota entry's blocking %q is not weekly, short or either", m.Blocking))
 	}
 	files, err := Files(cacheDir)
 	if err != nil {
@@ -75,8 +78,17 @@ func Decide(cacheDir, configPath, preset string, now time.Time) Decision {
 	if e.State != StateOK {
 		return no("quota reading is " + e.State)
 	}
+	reason := "quota not exhausted"
 	check := func(window string, pct *float64, reset *time.Time) (Decision, bool) {
-		if pct != nil && *pct >= 100 && reset != nil && reset.After(now) {
+		if pct == nil || *pct < 100 {
+			return Decision{}, false
+		}
+		if reset == nil {
+			// Legacy caches carry short_percent without short_reset_at.
+			reason = window + " quota is full but the reading has no " + window + " reset time"
+			return Decision{}, false
+		}
+		if reset.After(now) {
 			return Decision{Exhausted: true, Window: window, ResetAt: reset, Reason: window + " quota exhausted"}, true
 		}
 		return Decision{}, false
@@ -91,5 +103,5 @@ func Decide(cacheDir, configPath, preset string, now time.Time) Decision {
 			return d
 		}
 	}
-	return no("quota not exhausted")
+	return no(reason)
 }
