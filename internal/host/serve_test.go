@@ -245,42 +245,82 @@ func collidingRequest(t *testing.T, room string) *envelope.Envelope {
 	return &e
 }
 
+// corruptTimestampRequest journals a request whose record has created set to
+// the raw JSON value created, and returns its envelope with a reply channel.
+func corruptTimestampRequest(t *testing.T, room, created string) *envelope.Envelope {
+	t.Helper()
+	e := &envelope.Envelope{ID: envelope.NewID(), From: "orch", To: "agent", TS: time.Now().UTC(), Body: "work"}
+	if _, err := request.Finish(room, e, "done"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(request.Dir(room), e.ID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["created"] = json.RawMessage(created)
+	if data, err = json.Marshal(fields); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.ReplyTo = "r-" + envelope.NewID()
+	e.CorrID = e.ReplyTo
+	return e
+}
+
+// journalRejections are deliveries whose own journal record is unusable.
+var journalRejections = map[string]func(t *testing.T, room string) *envelope.Envelope{
+	"collision":       collidingRequest,
+	"unparsable time": func(t *testing.T, room string) *envelope.Envelope { return corruptTimestampRequest(t, room, `"bad"`) },
+	"non-string time": func(t *testing.T, room string) *envelope.Envelope { return corruptTimestampRequest(t, room, `5`) },
+}
+
 // A delivery whose journal entry cannot be used fails alone; the listener
 // keeps serving instead of exiting with the claim still in flight.
 func TestServeJournalRejectionFailsOnlyThatDelivery(t *testing.T) {
-	room, sp, logbuf, done, _ := startServe(t, echoPreset(), "fake")
-	e := collidingRequest(t, room)
-	if err := sp.Send(e); err != nil {
-		t.Fatal(err)
+	for name, build := range journalRejections {
+		t.Run(name, func(t *testing.T) {
+			room, sp, logbuf, done, _ := startServe(t, echoPreset(), "fake")
+			e := build(t, room)
+			if err := sp.Send(e); err != nil {
+				t.Fatal(err)
+			}
+			reply, err := sp.Recv(e.ReplyTo, 10*time.Second, false)
+			if err != nil || !strings.HasPrefix(reply.Body, "ERROR request: ") {
+				t.Fatalf("rejection reply: %+v %v\nlog:\n%s", reply, err, logbuf.String())
+			}
+			if r := askVia(t, sp, "next"); r.Body != "echo: next" {
+				t.Fatalf("next reply = %q", r.Body)
+			}
+			if d, _ := sp.ListInFlight("agent"); len(d) != 0 {
+				t.Fatalf("rejected delivery still in flight: %d", len(d))
+			}
+			if name == "collision" {
+				if r, err := request.Get(room, e.ID); err != nil || r.Result != "done" {
+					t.Fatalf("original journal entry changed: %+v %v", r, err)
+				}
+			}
+			stopServe(t, sp, done)
+		})
 	}
-	reply, err := sp.Recv(e.ReplyTo, 10*time.Second, false)
-	if err != nil || !strings.HasPrefix(reply.Body, "ERROR request: ") || !strings.Contains(reply.Body, "collision") {
-		t.Fatalf("rejection reply: %+v %v\nlog:\n%s", reply, err, logbuf.String())
-	}
-	if r := askVia(t, sp, "next"); r.Body != "echo: next" {
-		t.Fatalf("next reply = %q", r.Body)
-	}
-	if d, _ := sp.ListInFlight("agent"); len(d) != 0 {
-		t.Fatalf("rejected delivery still in flight: %d", len(d))
-	}
-	if r, err := request.Get(room, e.ID); err != nil || r.Result != "done" {
-		t.Fatalf("original journal entry changed: %+v %v", r, err)
-	}
-	stopServe(t, sp, done)
 }
 
 func TestJournalRejectedOnlyForTheRecordItself(t *testing.T) {
 	room := canonicalTempDir(t)
 	e := &envelope.Envelope{ID: "req1", To: "agent"}
 	record := filepath.Join(request.Dir(room), "req1.json")
-	syntax := json.Unmarshal([]byte("{"), &struct{}{})
-	for _, err := range []error{errors.New("request ID collision: req1"), fmt.Errorf("corrupt request record %q", "req1"), syntax,
-		fmt.Errorf("%w: %s", fsutil.ErrTooLarge, record), fmt.Errorf("%w: %s", fsutil.ErrUnsafeFile, record)} {
-		if !journalRejected(room, e, err) {
+	for _, err := range []error{fmt.Errorf("start: %w", request.ErrIDCollision), fmt.Errorf("get: %w", request.ErrCorruptRecord)} {
+		if !journalRejected(e, err) {
 			t.Errorf("not rejected: %v", err)
 		}
 	}
-	if !journalRejected(room, &envelope.Envelope{ID: strings.Repeat("x", 129)}, errors.New("request ID must be a portable name")) {
+	if !journalRejected(&envelope.Envelope{ID: strings.Repeat("x", 129)}, errors.New("request ID must be a portable name")) {
 		t.Error("invalid ID not rejected")
 	}
 	if runtime.GOOS != "windows" {
@@ -291,16 +331,17 @@ func TestJournalRejectedOnlyForTheRecordItself(t *testing.T) {
 		if err := os.Symlink(filepath.Join(room, "elsewhere"), record); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := request.Start(room, e); err == nil || !journalRejected(room, e, err) {
+		if _, err := request.Start(room, e); err == nil || !journalRejected(e, err) {
 			t.Errorf("unsafe record file not rejected: %v", err)
 		}
 	}
+	// Errors without a sentinel, including the old message shapes, keep the claim.
 	for _, err := range []error{&fs.PathError{Op: "write", Path: "x", Err: syscall.ENOSPC}, &os.LinkError{Op: "rename", Err: syscall.EACCES},
 		fmt.Errorf("persist: %w", os.NewSyscallError("fsync", syscall.EIO)), errors.New("unexpected"),
+		errors.New("request ID collision: req1"), json.Unmarshal([]byte("{"), &struct{}{}),
 		fmt.Errorf("%w: %s", fsutil.ErrUnsafeFile, filepath.Join(request.Dir(room), "locks")),
-		fmt.Errorf("%w: %s", fsutil.ErrUnsafeFile, request.Dir(room)),
-		fmt.Errorf("%w: %s", fsutil.ErrUnsafeFile, filepath.Join(request.Dir(room), "other.json"))} {
-		if journalRejected(room, e, err) {
+		fmt.Errorf("%w: %s", fsutil.ErrUnsafeFile, record)} {
+		if journalRejected(e, err) {
 			t.Errorf("shared storage error rejected the delivery: %v", err)
 		}
 	}
@@ -355,37 +396,41 @@ func TestServeKeepsClaimWhenJournalStorageIsUnsafe(t *testing.T) {
 
 func TestServeRecoveryGetsPastJournalRejection(t *testing.T) {
 	t.Setenv("TINCAN_FAKE_AGENT", "1")
-	room := t.TempDir()
-	sp, err := spool.Open(room)
-	if err != nil {
-		t.Fatal(err)
-	}
-	e := collidingRequest(t, room)
-	if err := sp.Send(e); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sp.ClaimContext(context.Background(), "agent", time.Second); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		done <- Serve(ctx, ServeOptions{Room: room, Name: "agent", Label: "fake", Preset: echoPreset()})
-	}()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("recovery Serve did not stop")
-		}
-	})
-	if r := askVia(t, sp, "after recovery"); r.Body != "echo: after recovery" {
-		t.Fatalf("reply after recovery = %q", r.Body)
-	}
-	if reply, err := sp.Recv(e.ReplyTo, time.Second, false); err != nil || !strings.HasPrefix(reply.Body, "ERROR request: ") {
-		t.Fatalf("rejection reply: %+v %v", reply, err)
+	for name, build := range journalRejections {
+		t.Run(name, func(t *testing.T) {
+			room := t.TempDir()
+			sp, err := spool.Open(room)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := build(t, room)
+			if err := sp.Send(e); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := sp.ClaimContext(context.Background(), "agent", time.Second); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- Serve(ctx, ServeOptions{Room: room, Name: "agent", Label: "fake", Preset: echoPreset()})
+			}()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("recovery Serve did not stop")
+				}
+			})
+			if r := askVia(t, sp, "after recovery"); r.Body != "echo: after recovery" {
+				t.Fatalf("reply after recovery = %q", r.Body)
+			}
+			if reply, err := sp.Recv(e.ReplyTo, time.Second, false); err != nil || !strings.HasPrefix(reply.Body, "ERROR request: ") {
+				t.Fatalf("rejection reply: %+v %v", reply, err)
+			}
+		})
 	}
 }
 

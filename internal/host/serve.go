@@ -3,19 +3,16 @@ package host
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/envelope"
 	"github.com/c0ze/tincan/v2/internal/filelock"
-	"github.com/c0ze/tincan/v2/internal/fsutil"
 	"github.com/c0ze/tincan/v2/internal/request"
 	"github.com/c0ze/tincan/v2/internal/spool"
 )
@@ -122,7 +119,7 @@ func Serve(ctx context.Context, o ServeOptions) error {
 		}
 		r, err := request.Finish(o.Room, d.Envelope, "ERROR interrupted: previous hosted listener exited; execution outcome is uncertain and was not replayed")
 		if err != nil {
-			if !journalRejected(o.Room, d.Envelope, err) {
+			if !journalRejected(d.Envelope, err) {
 				return err
 			}
 			if err := reject(sp, o, d, err); err != nil {
@@ -165,7 +162,7 @@ func Serve(ctx context.Context, o ServeOptions) error {
 		r, err := request.Start(o.Room, e)
 		if err != nil {
 			endJob()
-			if !journalRejected(o.Room, d.Envelope, err) {
+			if !journalRejected(d.Envelope, err) {
 				return err
 			}
 			if err := reject(sp, o, d, err); err != nil {
@@ -184,7 +181,7 @@ func Serve(ctx context.Context, o ServeOptions) error {
 		}
 		endJob()
 		if err != nil {
-			if !journalRejected(o.Room, d.Envelope, err) {
+			if !journalRejected(d.Envelope, err) {
 				return err
 			}
 			if err := reject(sp, o, d, err); err != nil {
@@ -223,26 +220,10 @@ func complete(sp *spool.Spool, o ServeOptions, d *spool.Delivery, body string) e
 // record rather than to shared storage: an invalid ID, an ID collision from a
 // hand-written envelope, or a corrupt, oversized or unsafe record file.
 // Retrying cannot help, and a claim left in flight would fail every restart's
-// recovery the same way. internal/request has no typed errors for these, so
-// this matches its messages; anything else (unsafe journal directories, I/O)
+// recovery the same way. Anything else (unsafe journal directories, I/O)
 // keeps the claim and stops the listener.
-func journalRejected(room string, e *envelope.Envelope, err error) bool {
-	if request.ValidateID(e.ID) != nil {
-		return true
-	}
-	msg := err.Error()
-	for _, prefix := range []string{"request ID collision: ", "corrupt request record ", "encoded request record exceeds "} {
-		if strings.HasPrefix(msg, prefix) {
-			return true
-		}
-	}
-	var syntaxErr *json.SyntaxError
-	var typeErr *json.UnmarshalTypeError
-	if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
-		return true // only the record itself is decoded
-	}
-	record := filepath.Join(request.Dir(room), e.ID+".json")
-	return (errors.Is(err, fsutil.ErrUnsafeFile) || errors.Is(err, fsutil.ErrTooLarge)) && strings.HasSuffix(msg, ": "+record)
+func journalRejected(e *envelope.Envelope, err error) bool {
+	return request.ValidateID(e.ID) != nil || errors.Is(err, request.ErrCorruptRecord) || errors.Is(err, request.ErrIDCollision)
 }
 
 // reject settles a delivery the request journal refused without running it:
