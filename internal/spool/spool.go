@@ -196,8 +196,25 @@ func (s *Spool) RecvContext(ctx context.Context, name string, timeout time.Durat
 
 // ClaimContext waits for a queued envelope and moves it to durable in-flight
 // storage. The caller must Ack only after delivery succeeds, or explicitly Nack
-// to retry. Cancellation never deletes an already claimed envelope.
+// to retry. Cancellation never deletes an already claimed envelope. A claim
+// left by a process that died stays in flight for the caller's own recovery
+// (RecoverInFlight); see ClaimInteractive for claims that should be requeued.
 func (s *Spool) ClaimContext(ctx context.Context, name string, timeout time.Duration) (*Delivery, error) {
+	return s.claim(ctx, name, timeout, false)
+}
+
+// ClaimInteractive is ClaimContext for a receiver that hands the message on
+// itself (tincan recv and ask). It records this process as the claim's owner
+// under owners/<name>/, so if the process exits before Ack or Nack (killed,
+// crashed, a failed Nack), the next claim of the same name requeues the
+// message instead of leaving it stranded in flight. Hosted listeners and
+// request polling recover their own claims and must not have them delivered
+// again, so they use ClaimContext or TryClaim, which record no owner.
+func (s *Spool) ClaimInteractive(ctx context.Context, name string, timeout time.Duration) (*Delivery, error) {
+	return s.claim(ctx, name, timeout, true)
+}
+
+func (s *Spool) claim(ctx context.Context, name string, timeout time.Duration, owned bool) (*Delivery, error) {
 	if err := validName(name); err != nil {
 		return nil, err
 	}
@@ -251,7 +268,7 @@ func (s *Spool) ClaimContext(ctx context.Context, name string, timeout time.Dura
 		if !armed && watcher != nil {
 			armed = watcher.Add(inbox) == nil
 		}
-		delivery, ok, err := s.claimOldest(claimCtx, name)
+		delivery, ok, err := s.claimOldest(claimCtx, name, owned)
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 				return nil, ErrTimeout
@@ -376,6 +393,8 @@ type Presence struct {
 	Since  time.Time `json:"since"`
 	Queued int       `json:"queued"`
 	Alive  bool      `json:"alive"`
+	// InFlight counts claimed messages not yet acknowledged.
+	InFlight int `json:"in_flight"`
 }
 
 // presenceFile is the on-disk JSON shape of one token file under
@@ -518,6 +537,9 @@ func (s *Spool) presenceFor(name string) (Presence, error) {
 			p.Queued++
 		}
 	}
+	if p.InFlight, err = s.countInFlight(name); err != nil {
+		return Presence{}, err
+	}
 	best, _, err := s.scanPresence(name)
 	if err != nil {
 		return Presence{}, err
@@ -529,6 +551,34 @@ func (s *Spool) presenceFor(name string) (Presence, error) {
 	p.Since = best.Since
 	p.Alive = true
 	return p, nil
+}
+
+// countInFlight counts name's claims that hold a message (not yet Ack'd).
+func (s *Spool) countInFlight(name string) (int, error) {
+	dir := s.inFlightDir(name)
+	if err := fsutil.CheckDir(dir); err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	n := 0
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(dir, ent.Name(), "message.json")); err == nil {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // scanPresence returns the live token with the most recent Since for name, and

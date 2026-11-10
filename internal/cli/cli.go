@@ -313,7 +313,9 @@ func cmdRecv(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := receiveContext()
 	defer stop()
-	d, err := sp.ClaimContext(ctx, *as, time.Duration(*timeout)*time.Second)
+	// An interactive claim is requeued by the next receive if this process
+	// dies (SIGKILL) before acknowledging it.
+	d, err := sp.ClaimInteractive(ctx, *as, time.Duration(*timeout)*time.Second)
 	if errors.Is(err, spool.ErrTimeout) {
 		return ExitTimeout
 	}
@@ -409,7 +411,7 @@ func cmdAsk(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
 		return ExitError
 	}
-	reply, err := sp.ClaimContext(ctx, channel, time.Duration(*timeout)*time.Second)
+	reply, err := sp.ClaimInteractive(ctx, channel, time.Duration(*timeout)*time.Second)
 	if errors.Is(err, spool.ErrTimeout) {
 		// Leave the channel in place: a late reply still lands there and is
 		// collected with `tincan recv --as <channel>`.
@@ -595,11 +597,11 @@ func statusRows(sp *spool.Spool, room string) ([]statusRow, error) {
 }
 
 // printStatusTable renders rows as a tab-aligned table: name, queued count,
-// mode (hosted:<preset> / agent / —), listener state (parked / busy / —),
-// pid (or -), and parked-since age.
+// claimed-but-unacknowledged count, mode (hosted:<preset> / agent / —),
+// listener state (parked / busy / —), pid (or -), and parked-since age.
 func printStatusTable(rows []statusRow, stdout io.Writer) {
 	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tQUEUED\tMODE\tSTATE\tPID\tSINCE")
+	fmt.Fprintln(tw, "NAME\tQUEUED\tINFLIGHT\tMODE\tSTATE\tPID\tSINCE")
 	for _, r := range rows {
 		mode, state, pid, since := "—", "—", "-", "-"
 		if r.Mode != "" {
@@ -612,7 +614,7 @@ func printStatusTable(rows []statusRow, stdout io.Writer) {
 			state, pid = "parked", strconv.Itoa(r.PID)
 			since = time.Since(r.Since).Round(time.Second).String() + " ago"
 		}
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n", r.Name, r.Queued, mode, state, pid, since)
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t%s\t%s\t%s\n", r.Name, r.Queued, r.InFlight, mode, state, pid, since)
 	}
 	tw.Flush()
 }

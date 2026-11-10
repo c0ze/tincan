@@ -71,6 +71,9 @@ func (d *Delivery) Ack(logConsumed bool) error {
 		}
 		d.finished = true
 	}
+	if err := d.spool.clearOwner(d.name, d.filename); err != nil {
+		return err
+	}
 	if err := fsutil.SyncDir(d.dir); err != nil {
 		return err
 	}
@@ -82,7 +85,8 @@ func (d *Delivery) Ack(logConsumed bool) error {
 
 // Nack explicitly requeues an envelope. Callers must use it only when retry is
 // safe; interrupted host commands should instead report an uncertain outcome
-// and Ack. Recovery never calls Nack automatically.
+// and Ack. Recovery never calls Nack automatically; only an interactive
+// claim whose owner died is requeued for it (ClaimInteractive).
 func (d *Delivery) Nack() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -94,6 +98,11 @@ func (d *Delivery) Nack() error {
 		return err
 	}
 	defer lock.Close()
+	return d.nackLocked()
+}
+
+// nackLocked is Nack for a caller that holds the transport lock.
+func (d *Delivery) nackLocked() error {
 	if err := fsutil.CheckDir(d.dir); err != nil {
 		return err
 	}
@@ -121,6 +130,9 @@ func (d *Delivery) Nack() error {
 		return err
 	}
 	d.finished = true
+	if err := d.spool.clearOwner(d.name, d.filename); err != nil {
+		return err
+	}
 	if err := fsutil.SyncDir(d.dir); err != nil {
 		return err
 	}
@@ -133,13 +145,13 @@ func (d *Delivery) Nack() error {
 // claimOldest uses an exclusive mkdir gate before moving a queued file. The
 // stable gate remains present throughout delivery, preventing the handle-based
 // rename race on Windows from creating multiple owners of one queued file.
-func (s *Spool) claimOldest(ctx context.Context, name string) (*Delivery, bool, error) {
+func (s *Spool) claimOldest(ctx context.Context, name string, owned bool) (*Delivery, bool, error) {
 	lock, err := s.lockTransport(ctx)
 	if err != nil {
 		return nil, false, err
 	}
 	defer lock.Close()
-	return s.claimOldestLocked(ctx, name)
+	return s.claimOldestLocked(ctx, name, owned)
 }
 
 // TryClaim checks the queue once without parking a receiver or waiting for
@@ -171,13 +183,17 @@ func (s *Spool) TryClaim(ctx context.Context, name string) (*Delivery, bool, err
 		return nil, false, err
 	}
 	defer lock.Close()
-	return s.claimOldestLocked(ctx, name)
+	return s.claimOldestLocked(ctx, name, false)
 }
 
 // The caller must hold transport ownership throughout the queue transition.
-func (s *Spool) claimOldestLocked(ctx context.Context, name string) (*Delivery, bool, error) {
+// owned records this process as the claim's owner (ClaimInteractive).
+func (s *Spool) claimOldestLocked(ctx context.Context, name string, owned bool) (*Delivery, bool, error) {
 	inbox := s.InboxDir(name)
 	if err := fsutil.CheckDir(inbox); err != nil {
+		return nil, false, err
+	}
+	if err := s.requeueAbandoned(name); err != nil {
 		return nil, false, err
 	}
 	entries, err := os.ReadDir(inbox) // sorted by filename, hence timestamp
@@ -202,8 +218,15 @@ func (s *Spool) claimOldestLocked(ctx context.Context, name string) (*Delivery, 
 			}
 			return nil, false, err
 		}
+		// Record the owner while the gate is still empty: a crash before the
+		// rename leaves an empty gate whose record lets a later claim clear it.
+		if err := s.setOwner(name, ent.Name(), owned); err != nil {
+			os.Remove(dir)
+			return nil, false, err
+		}
 		claimed := filepath.Join(dir, "message.json")
 		if err := retryClaimOp(func() error { return os.Rename(filepath.Join(inbox, ent.Name()), claimed) }); err != nil {
+			s.clearOwner(name, ent.Name())
 			os.Remove(dir)
 			if lostClaimRace(err) {
 				continue
@@ -224,6 +247,9 @@ func (s *Spool) claimOldestLocked(ctx context.Context, name string) (*Delivery, 
 				return nil, false, err
 			}
 			if err := s.quarantine(dir); err != nil {
+				return nil, false, err
+			}
+			if err := s.clearOwner(name, ent.Name()); err != nil {
 				return nil, false, err
 			}
 			continue // malformed/unsafe messages never stop a healthy listener
@@ -312,6 +338,24 @@ func (s *Spool) quarantineQueuedDuplicate(name, filename string) error {
 	return s.quarantine(queued)
 }
 
+// discardGate clears a gate that holds no valid claim (readErr is malformed):
+// an empty gate, left by a crash before rename or after acknowledgment, is
+// removed; unexpected contents are quarantined. Its owner record goes too.
+func (s *Spool) discardGate(name, filename string, readErr error) error {
+	path := filepath.Join(s.inFlightDir(name), filename)
+	removed := false
+	if errors.Is(readErr, os.ErrNotExist) {
+		err := os.Remove(path)
+		removed = err == nil || os.IsNotExist(err)
+	}
+	if !removed {
+		if err := s.quarantine(path); err != nil {
+			return err
+		}
+	}
+	return s.clearOwner(name, filename)
+}
+
 // ListInFlight inspects durable deliveries for a listener. It never queues or
 // executes them. Do not Ack these returned handles concurrently with an active
 // owner; hosted listeners must hold their exclusive lifetime lock first.
@@ -367,14 +411,7 @@ func (s *Spool) listInFlight(name string, recoverEmpty bool) ([]*Delivery, error
 			if !isMalformed(err) {
 				return nil, err
 			}
-			path := filepath.Join(dir, ent.Name())
-			if errors.Is(err, os.ErrNotExist) {
-				// Remove only an empty gate; unexpected contents are quarantined.
-				if err := os.Remove(path); err == nil {
-					continue
-				}
-			}
-			if err := s.quarantine(path); err != nil {
+			if err := s.discardGate(name, ent.Name(), err); err != nil {
 				return nil, err
 			}
 			continue

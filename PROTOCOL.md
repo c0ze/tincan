@@ -150,7 +150,8 @@ tincan ping   --to <name> [--room <path>]
 ```
 
 - `status` lists every name that has a queue and/or a live listener: name,
-  queued count, `MODE` (`hosted:<preset>` for a listener tincan hosts, `agent`
+  queued count, in-flight count (claimed, not yet acknowledged),
+  `MODE` (`hosted:<preset>` for a listener tincan hosts, `agent`
   for an interactive `/listen` session, `—` for none), `STATE` (`parked`,
   `busy` — a hosted listener running its agent right now — or `—`), pid, and
   how long it's been parked. `--format json` prints the same data as a JSON
@@ -383,6 +384,19 @@ leftover work as interrupted/uncertain. A process may have changed the workspace
 before it died, so tincan does not automatically execute that work again.
 Inspect the log and files before deliberately submitting a new task. This is
 durable delivery bookkeeping, not a guarantee of exactly-once external effects.
+
+Interactive receives (`recv`, the reply half of `ask`) only print what they
+claim, so their claims are requeued instead. Each records its owner in
+`.tincan/owners/<name>/<message file>` (the same `pid`/`since`/`start` JSON as a
+presence file) while the claim exists. Before claiming, any receive of `<name>`
+returns to the queue every claim whose recorded owner provably exited before
+acknowledging it (SIGKILL, a crash, a failed requeue), so a receive that
+re-arms loses nothing. This is at-least-once: a receiver killed after printing
+a message but before acknowledging it delivers that message again. Claims of
+live owners, and claims with no owner record (hosted listeners, MCP request
+collection, older tincan versions), are never requeued this way. `status`
+counts claimed but unacknowledged messages per name (`INFLIGHT`, JSON
+`in_flight`).
 
 The state file is written atomically (tmp + rename) and removed on clean
 exit; status validates the authenticated host lifetime before reporting it as
