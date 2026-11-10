@@ -117,7 +117,7 @@ func TestBuildIncompleteWhenPatchTooLarge(t *testing.T) {
 // huge cat-file stream, but only MaxPatch and MaxFilesTotal are kept.
 func TestBuildDoesNotBufferOversizedGitOutput(t *testing.T) {
 	dir, git := testRepo(t)
-	big := make([]byte, 24<<20)
+	big := make([]byte, 32<<20)
 	rand.New(rand.NewSource(1)).Read(big)
 	if err := os.WriteFile(filepath.Join(dir, "big.bin"), big, 0o644); err != nil {
 		t.Fatal(err)
@@ -139,8 +139,12 @@ func TestBuildDoesNotBufferOversizedGitOutput(t *testing.T) {
 	if p.Manifest.Complete || p.Patch != nil || len(p.Files) == 0 || len(p.Manifest.FilesOmitted) == 0 {
 		t.Fatalf("outcome: complete=%v patch=%d files=%d omitted=%d", p.Manifest.Complete, len(p.Patch), len(p.Files), len(p.Manifest.FilesOmitted))
 	}
-	// Unbounded reads allocated over 170 MiB here; bounded ones about 12.
-	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 20<<20 {
+	// Buffering git's output at all costs at least its size: the --binary
+	// deletion of 32 MiB of random bytes is over 40 MiB of base85, and the
+	// blobs 12 MiB more (unbounded reads allocated 172 MiB here, 332 under
+	// the race detector). Bounded reads allocate about 12 MiB (20 with
+	// -race), however large the deleted file.
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 40<<20 {
 		t.Fatalf("Build allocated %d MiB", alloc>>20)
 	}
 }
