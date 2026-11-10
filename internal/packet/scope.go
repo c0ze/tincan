@@ -70,7 +70,7 @@ func Resolve(ctx context.Context, dir, scope string) (Resolved, error) {
 		if err := setBase(head); err != nil {
 			return r, err
 		}
-		r.TargetTree, err = snapshot(ctx, g, r.BaseTree)
+		r.TargetTree, err = snapshot(ctx, g, r.BaseTree, stateDirs(root, dir))
 		return r, err
 	case scope == "branch":
 		head, err := commit("HEAD")
@@ -98,7 +98,7 @@ func Resolve(ctx context.Context, dir, scope string) (Resolved, error) {
 		if err != nil {
 			return r, err
 		}
-		r.TargetTree, err = snapshot(ctx, g, headTree)
+		r.TargetTree, err = snapshot(ctx, g, headTree, stateDirs(root, dir))
 		return r, err
 	case strings.HasPrefix(scope, "commit:"):
 		c, err := commit(strings.TrimPrefix(scope, "commit:"))
@@ -144,11 +144,29 @@ func Resolve(ctx context.Context, dir, scope string) (Resolved, error) {
 	return r, fmt.Errorf("unknown scope %q (none, uncommitted, branch, commit:<rev>, range:<a>..<b>)", scope)
 }
 
+// stateDirs returns the .tincan directories, relative to the repository root,
+// that a working-tree snapshot leaves out: the root's and the room's (dir).
+func stateDirs(root, dir string) []string {
+	dirs := []string{".tincan"}
+	if abs, err := filepath.Abs(dir); err == nil {
+		if d, err := filepath.EvalSymlinks(abs); err == nil {
+			abs = d
+		}
+		if rel, err := filepath.Rel(root, abs); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			dirs = append(dirs, filepath.ToSlash(filepath.Join(rel, ".tincan")))
+		}
+	}
+	return dirs
+}
+
 // snapshot captures the working tree as a tree object through a private
 // index seeded from HEAD's tree (headTree; the empty tree when HEAD is
 // unborn), so files tracked at HEAD keep their tracked status even when they
-// match ignore rules. It never touches the real index.
-func snapshot(ctx context.Context, g Git, headTree string) (string, error) {
+// match ignore rules. It never touches the real index. Git does not walk
+// skip, tincan's live state (the path policy refuses it anyway): other
+// processes create and remove files there, and a file that disappears
+// between Git's directory scan and its stat fails the whole add.
+func snapshot(ctx context.Context, g Git, headTree string, skip []string) (string, error) {
 	if u, err := g.Out(ctx, "ls-files", "-u"); err != nil || u != "" {
 		return "", errors.New("the index has unmerged entries; resolve the merge first")
 	}
@@ -164,7 +182,11 @@ func snapshot(ctx context.Context, g Git, headTree string) (string, error) {
 	if _, err := ig.Run(ctx, nil, "read-tree", headTree); err != nil {
 		return "", err
 	}
-	if _, err := ig.Run(ctx, nil, "add", "-A"); err != nil {
+	args := []string{"add", "-A", "--", ":/"}
+	for _, d := range skip {
+		args = append(args, ":(top,exclude,literal)"+d)
+	}
+	if _, err := ig.Run(ctx, nil, args...); err != nil {
 		return "", err
 	}
 	return ig.Out(ctx, "write-tree")

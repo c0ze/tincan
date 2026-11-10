@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -50,6 +51,41 @@ func TestResolveUncommittedSnapshot(t *testing.T) {
 	}
 	if after := git("status", "--porcelain"); after != before {
 		t.Fatalf("snapshot touched the real index:\n%s\nvs\n%s", before, after)
+	}
+}
+
+// Git never walks tincan's live state, the root's or a subdirectory room's:
+// other processes create and remove files there while a snapshot runs, and
+// one that vanishes between Git's scan and its stat failed the whole add.
+func TestResolveSnapshotSkipsTincanState(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "keep.txt", "a\n")
+	write(t, dir, ".tincan/tracked", "t\n")
+	git("add", "-f", ".")
+	git("commit", "-qm", "base")
+	write(t, dir, ".tincan/tracked", "changed\n")
+	write(t, dir, "new.txt", "n\n")
+	room := filepath.Join(dir, "sub")
+	for _, d := range []string{dir, room} {
+		write(t, d, ".tincan/reviews/staging/x/prompts/0.txt", "p\n")
+		if runtime.GOOS != "windows" {
+			// Git fails on a file it cannot read, as on one that vanished.
+			locked := filepath.Join(d, ".tincan", "locked")
+			write(t, d, ".tincan/locked", "l\n")
+			if err := os.Chmod(locked, 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	r, err := Resolve(context.Background(), room, "uncommitted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files := lsTree(t, git, r.TargetTree); files != ".tincan/tracked\nkeep.txt\nnew.txt" {
+		t.Fatalf("snapshot files:\n%s", files)
+	}
+	if got := git("show", r.TargetTree+":.tincan/tracked"); got != "t" {
+		t.Fatalf("tracked state file: %q", got)
 	}
 }
 
