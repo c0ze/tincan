@@ -2,6 +2,7 @@ package spool
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -143,6 +144,43 @@ func TestReceiverRegistersUnderTransportLock(t *testing.T) {
 	waitForPresenceFile(t, room, channel)
 	cancel()
 	<-done
+}
+
+// Registration waits for the transport lock within the receive's own
+// timeout: a sender or gc holding the lock past it yields ErrTimeout on time,
+// with no presence token left behind, rather than a receive that hangs.
+func TestReceiveTimesOutWhileTransportLockIsHeld(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+	lock, err := sp.lockTransport(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := time.AfterFunc(3*time.Second, func() { lock.Close() })
+	defer release.Stop()
+	defer lock.Close()
+	for _, claim := range []func() error{
+		func() error {
+			_, err := sp.ClaimContext(context.Background(), "worker", 200*time.Millisecond)
+			return err
+		},
+		func() error {
+			_, err := sp.ClaimInteractive(context.Background(), "worker", 200*time.Millisecond)
+			return err
+		},
+		func() error { _, err := sp.Recv("worker", 200*time.Millisecond, false); return err },
+	} {
+		start := time.Now()
+		if err := claim(); !errors.Is(err, ErrTimeout) || time.Since(start) > 1500*time.Millisecond {
+			t.Fatalf("claim behind a held lock: %v after %v, want ErrTimeout by its deadline", err, time.Since(start))
+		}
+	}
+	if entries, _ := os.ReadDir(sp.presentNameDir("worker")); len(entries) != 0 {
+		t.Fatalf("timed-out receive left presence: %v", entries)
+	}
+	if _, ok, err := sp.TryClaim(context.Background(), "worker"); ok || err != nil {
+		t.Fatalf("TryClaim behind a held lock: %v, %v; want an immediate empty result", ok, err)
+	}
 }
 
 // If a parked receiver's inbox disappears between polls anyway, the receiver

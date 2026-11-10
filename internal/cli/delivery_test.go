@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/c0ze/tincan/v2/internal/filelock"
 )
 
 type brokenOutput struct{}
@@ -146,6 +148,27 @@ func TestReceiveIntoClosedPipeRequeues(t *testing.T) {
 	code, out, stderr := run("recv", "--room", room, "--as", "worker", "--timeout", "1", "--format", "body")
 	if code != 0 || out != "recover me\n" {
 		t.Fatalf("message stranded: %d %q %q", code, out, stderr)
+	}
+}
+
+// `recv --timeout 1` exits 3 on time even while another process holds the
+// spool's transport lock.
+func TestRecvTimesOutBehindHeldTransportLock(t *testing.T) {
+	room := canonTempDir(t)
+	if code, _, err := run("status", "--room", room); code != 0 {
+		t.Fatal(err)
+	}
+	lock, err := filelock.Try(filepath.Join(room, ".tincan", "transport.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	release := time.AfterFunc(5*time.Second, func() { lock.Close() })
+	defer release.Stop()
+	start := time.Now()
+	code, _, stderr := run("recv", "--room", room, "--as", "worker", "--timeout", "1")
+	if code != ExitTimeout || time.Since(start) > 3*time.Second {
+		t.Fatalf("recv behind a held lock: exit %d after %v, stderr=%q", code, time.Since(start), stderr)
 	}
 }
 

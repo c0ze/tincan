@@ -224,19 +224,8 @@ func (s *Spool) claim(ctx context.Context, name string, timeout time.Duration, o
 	if err := s.ensurePrivateRoot(); err != nil {
 		return nil, err
 	}
-	inbox := s.InboxDir(name)
-	token := envelope.NewID()
-	if err := s.register(ctx, name, token); err != nil {
-		return nil, err
-	}
-	defer s.removePresence(name, token)
-	watcher, watchErr := fsnotify.NewWatcher()
-	var events <-chan fsnotify.Event
-	var watchErrors <-chan error
-	if watchErr == nil {
-		defer watcher.Close()
-		events, watchErrors = watcher.Events, watcher.Errors
-	}
+	// The timeout starts before registration, which waits for the transport
+	// lock: a sender or gc holding it must not stretch the receive.
 	var deadlineC <-chan time.Time
 	claimCtx := ctx
 	if timeout > 0 {
@@ -246,6 +235,22 @@ func (s *Spool) claim(ctx context.Context, name string, timeout time.Duration, o
 		t := time.NewTimer(timeout)
 		defer t.Stop()
 		deadlineC = t.C
+	}
+	inbox := s.InboxDir(name)
+	token := envelope.NewID()
+	if err := s.register(claimCtx, name, token); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return nil, ErrTimeout
+		}
+		return nil, err
+	}
+	defer s.removePresence(name, token)
+	watcher, watchErr := fsnotify.NewWatcher()
+	var events <-chan fsnotify.Event
+	var watchErrors <-chan error
+	if watchErr == nil {
+		defer watcher.Close()
+		events, watchErrors = watcher.Events, watcher.Errors
 	}
 	// Poll even when the watch succeeds: a dropped/coalesced event or closed
 	// watcher must not leave an existing queue parked forever.
