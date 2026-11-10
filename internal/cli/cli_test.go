@@ -150,6 +150,20 @@ func TestHelpExitsZero(t *testing.T) {
 	}
 }
 
+// The usage text lists the flags up/serve and review actually define.
+func TestUsageNamesSessionAndReviewTimeout(t *testing.T) {
+	for _, want := range []string{
+		"tincan up      <name> [--preset <p>]",
+		"[--session persistent|stateless]",
+		"[--request-id <id>] [--wait] [--timeout <sec>]",
+		"tincan review --wait <id> [--timeout <sec>] | --cancel <id>",
+	} {
+		if !strings.Contains(usageText, want) {
+			t.Errorf("usage text lacks %q", want)
+		}
+	}
+}
+
 func TestAskReplyRoundTrip(t *testing.T) {
 	room := t.TempDir()
 	askDone := make(chan int, 1)

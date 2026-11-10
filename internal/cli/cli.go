@@ -43,7 +43,7 @@ Usage:
 
 Hosted listeners (tincan runs a headless agent CLI for you):
   tincan up      <name> [--preset <p>] [--exec '<tpl>'] [--stdin body|none] [--reply stdout|file]
-                        [--exec-timeout <sec>] [--wait <sec>] [flags]
+                        [--session persistent|stateless] [--exec-timeout <sec>] [--wait <sec>] [flags]
   tincan serve   <name> [same flags as up] [--daemon]
   tincan down    <name> [--wait <sec>] [flags]
   tincan presets [--format table|json]
@@ -52,9 +52,9 @@ Hosted listeners (tincan runs a headless agent CLI for you):
   tincan web [--listen unix:<path>|127.0.0.1:<port>] [--public-path /tincan] [--peer name=url]...
                                  chat UI for agents; expose with tailscale serve (see docs/web.md)
   tincan review --committee <name> (--question <s> | --question-file <f>) [--scope <s>]
-                [--request-id <id>] [--wait] [flags]
+                [--request-id <id>] [--wait] [--timeout <sec>] [flags]
                                  ask a committee to review the change (needs tincan web)
-  tincan review --wait <id> | --cancel <id> [flags]
+  tincan review --wait <id> [--timeout <sec>] | --cancel <id> [flags]
   tincan version [--format json]
   tincan gc [--older-than 168h] [--room <path>]
 
