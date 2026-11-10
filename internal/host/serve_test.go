@@ -269,19 +269,87 @@ func TestServeJournalRejectionFailsOnlyThatDelivery(t *testing.T) {
 	stopServe(t, sp, done)
 }
 
-func TestJournalRejectedKeepsFilesystemErrorsFatal(t *testing.T) {
+func TestJournalRejectedOnlyForTheRecordItself(t *testing.T) {
+	room := canonicalTempDir(t)
+	e := &envelope.Envelope{ID: "req1", To: "agent"}
+	record := filepath.Join(request.Dir(room), "req1.json")
 	syntax := json.Unmarshal([]byte("{"), &struct{}{})
-	for _, err := range []error{errors.New("request ID collision: x"), fmt.Errorf("corrupt request record %q", "x"), syntax,
-		fmt.Errorf("%w: x", fsutil.ErrTooLarge), &fs.PathError{Op: "open", Path: "x", Err: fsutil.ErrUnsafeFile}} {
-		if !journalRejected(err) {
+	for _, err := range []error{errors.New("request ID collision: req1"), fmt.Errorf("corrupt request record %q", "req1"), syntax,
+		fmt.Errorf("%w: %s", fsutil.ErrTooLarge, record), fmt.Errorf("%w: %s", fsutil.ErrUnsafeFile, record)} {
+		if !journalRejected(room, e, err) {
 			t.Errorf("not rejected: %v", err)
 		}
 	}
-	for _, err := range []error{&fs.PathError{Op: "write", Path: "x", Err: syscall.ENOSPC}, &os.LinkError{Op: "rename", Err: syscall.EACCES},
-		fmt.Errorf("persist: %w", os.NewSyscallError("fsync", syscall.EIO))} {
-		if journalRejected(err) {
-			t.Errorf("filesystem error rejected the delivery: %v", err)
+	if !journalRejected(room, &envelope.Envelope{ID: strings.Repeat("x", 129)}, errors.New("request ID must be a portable name")) {
+		t.Error("invalid ID not rejected")
+	}
+	if runtime.GOOS != "windows" {
+		// The error request.Start really returns for a symlinked record file.
+		if err := os.MkdirAll(request.Dir(room), 0o700); err != nil {
+			t.Fatal(err)
 		}
+		if err := os.Symlink(filepath.Join(room, "elsewhere"), record); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := request.Start(room, e); err == nil || !journalRejected(room, e, err) {
+			t.Errorf("unsafe record file not rejected: %v", err)
+		}
+	}
+	for _, err := range []error{&fs.PathError{Op: "write", Path: "x", Err: syscall.ENOSPC}, &os.LinkError{Op: "rename", Err: syscall.EACCES},
+		fmt.Errorf("persist: %w", os.NewSyscallError("fsync", syscall.EIO)), errors.New("unexpected"),
+		fmt.Errorf("%w: %s", fsutil.ErrUnsafeFile, filepath.Join(request.Dir(room), "locks")),
+		fmt.Errorf("%w: %s", fsutil.ErrUnsafeFile, request.Dir(room)),
+		fmt.Errorf("%w: %s", fsutil.ErrUnsafeFile, filepath.Join(request.Dir(room), "other.json"))} {
+		if journalRejected(room, e, err) {
+			t.Errorf("shared storage error rejected the delivery: %v", err)
+		}
+	}
+}
+
+// Unsafe shared journal storage is not one delivery's fault: Serve stops with
+// the claim kept, so the work runs once the storage is repaired.
+func TestServeKeepsClaimWhenJournalStorageIsUnsafe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may need privileges")
+	}
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	room := canonicalTempDir(t)
+	sp, err := spool.Open(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := request.Submit(context.Background(), room, "agent", "orch", "valid work", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	locks := filepath.Join(request.Dir(room), "locks")
+	if err := os.RemoveAll(locks); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), locks); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		done <- Serve(ctx, ServeOptions{Room: room, Name: "agent", Label: "fake", Preset: echoPreset()})
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, fsutil.ErrUnsafeFile) {
+			t.Fatalf("Serve = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("Serve kept serving on unsafe journal storage")
+	}
+	if d, _ := sp.ListInFlight("agent"); len(d) != 1 {
+		t.Fatalf("claim not kept: %d in flight", len(d))
+	}
+	if got, err := request.Get(room, r.ID); err != nil || got.Terminal() {
+		t.Fatalf("request settled: %+v %v", got, err)
 	}
 }
 

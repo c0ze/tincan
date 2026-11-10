@@ -406,6 +406,8 @@ the log); the run fails only if no final result event can be parsed.
   recorded request, or the record is corrupt) is not executed: the asker gets
   `ERROR request: <reason>`, the envelope moves to `.tincan/log/`, and the
   listener keeps serving. Restart recovery handles such a claim the same way.
+  Unsafe or failing shared journal storage (a symlinked `.tincan/requests`
+  directory, disk errors) instead stops the listener and keeps the claim.
 - A hard crash may prevent an immediate reply. Retained claims and request state
   allow recovery to report interrupted work; a missing reply is not permission
   to repeat an agent run automatically.
