@@ -8,6 +8,21 @@ import (
 	"github.com/c0ze/tincan/v2/internal/fsutil"
 )
 
+// maxLogBytes caps a host log at the start of a listener lifetime: a larger
+// log becomes <path>.1, replacing the previous generation.
+const maxLogBytes = 16 << 20
+
+// rotateLog renames a regular log over maxLogBytes to <path>.1. Callers hold
+// the listener's lifetime lock, so no other listener is writing the log.
+// Rename never follows a symlink at either name. A log that cannot be rotated
+// (open in another process on Windows, say) keeps growing rather than
+// failing the listener.
+func rotateLog(path string) {
+	if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() && info.Size() > maxLogBytes {
+		_ = os.Rename(path, path+".1")
+	}
+}
+
 // OpenLog opens a private regular append-only log, refusing special files.
 func OpenLog(path string) (*os.File, error) {
 	if err := fsutil.MkdirPrivate(filepath.Dir(path)); err != nil {

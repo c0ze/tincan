@@ -72,6 +72,7 @@ type Result struct {
 	Stderr          []byte
 	ExitCode        int   // -1 when the process never started or was killed
 	Err             error // start failure, or the ctx/timeout error
+	Started         bool  // the agent process was created
 	TimedOut        bool  // Timeout elapsed; the process group was killed
 	Killed          bool  // the parent ctx was cancelled (serve shutting down)
 	Duration        time.Duration
@@ -100,6 +101,9 @@ func Run(ctx context.Context, spec RunSpec) Result {
 		path, err = spec.Argv[0], PinnedExecutable(spec.Argv[0])
 	} else {
 		path, err = ResolveExecutable(spec.Argv[0], spec.Dir)
+	}
+	if err == nil && runtime.GOOS == "windows" {
+		err = batchArgsError(path, spec.Argv[1:])
 	}
 	if err != nil {
 		return Result{ExitCode: -1, Err: err, Duration: time.Since(start)}
@@ -140,6 +144,16 @@ func Run(ctx context.Context, spec RunSpec) Result {
 
 	res := Result{ExitCode: -1}
 	err = runProcess(runCtx, cmd)
+	res.Started = cmd.Process != nil
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil {
+		// The agent exited, but a descendant outside its group kept the output
+		// pipes open past WaitDelay. The exit status and the output captured so
+		// far are still the agent's.
+		err = nil
+		if !cmd.ProcessState.Success() {
+			err = &exec.ExitError{ProcessState: cmd.ProcessState}
+		}
+	}
 	res.Stdout, res.Stderr = stdout.data, stderr.data
 	res.StdoutTruncated, res.StderrTruncated = stdout.truncated, stderr.truncated
 	res.Duration = time.Since(start)
@@ -214,6 +228,29 @@ func tail(b []byte, n int) []byte {
 		return b
 	}
 	return b[len(b)-n:]
+}
+
+// batchUnsafe lists the characters cmd.exe may interpret in a batch file's
+// command line, inside Go's argument quoting or not.
+const batchUnsafe = "\"%&|^<>!()\r\n"
+
+// batchArgsError refuses to run a Windows batch file (.cmd, .bat; npm installs
+// CLIs such as claude and gemini as .cmd shims) with an argument cmd.exe could
+// interpret. Go quotes arguments for the C runtime, not for cmd.exe, so a body
+// like `x" & calc & rem "` would run commands outside the agent and benign
+// bodies with % or quotes would be mangled. tincan does not attempt cmd.exe
+// escaping; the body has to arrive on stdin instead.
+func batchArgsError(path string, args []string) error {
+	lower := strings.ToLower(path)
+	if !strings.HasSuffix(lower, ".cmd") && !strings.HasSuffix(lower, ".bat") {
+		return nil
+	}
+	for _, arg := range args {
+		if i := strings.IndexAny(arg, batchUnsafe); i >= 0 {
+			return fmt.Errorf("%s is a batch file and an argument contains %q, which cmd.exe would interpret; use a preset that passes the body on stdin (--stdin body, without {body} in exec) or a non-batch executable", filepath.Base(path), arg[i])
+		}
+	}
+	return nil
 }
 
 // PinnedExecutable checks a pinned executable: an absolute path to an

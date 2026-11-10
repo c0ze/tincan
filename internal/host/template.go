@@ -21,6 +21,13 @@ type Vars struct {
 // spaces, newlines and quotes included. Nothing is re-split or passed
 // through a shell, and a Replacer makes a single pass, so text substituted
 // in (a body that itself contains "{out}") is never rescanned.
+//
+// A body that starts with "-" gets a leading space wherever it supplies a
+// token's first character (everything before {body} renders empty, as {out}
+// does for a stdout preset), so the agent CLI cannot parse a body such as
+// "--resume=<id>" or "--- a/file" as one of its options, whether its prompt
+// is an option value or a positional argument. Fixed prefixes such as
+// "--prompt={body}" are left alone. Models ignore the space.
 func Render(exec []string, v Vars) []string {
 	r := strings.NewReplacer(
 		"{body}", v.Body,
@@ -32,6 +39,11 @@ func Render(exec []string, v Vars) []string {
 	out := make([]string, len(exec))
 	for i, tok := range exec {
 		out[i] = r.Replace(tok)
+		// Placeholders hold no "{" after their first byte, so the text before
+		// the first {body} renders on its own exactly as within the token.
+		if at := strings.Index(tok, "{body}"); at >= 0 && r.Replace(tok[:at]) == "" && strings.HasPrefix(v.Body, "-") {
+			out[i] = " " + out[i]
+		}
 	}
 	return out
 }

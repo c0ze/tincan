@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"syscall"
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/envelope"
@@ -90,6 +91,8 @@ func Up(ctx context.Context, o UpOptions) (UpResult, error) {
 		}
 		owner, err := filelock.Try(lifetimePath(room, o.Name))
 		if err == nil {
+			// No listener writes the log while this lock is held.
+			rotateLog(LogPath(room, o.Name))
 			owner.Close()
 			break
 		}
@@ -129,7 +132,7 @@ func Up(ctx context.Context, o UpOptions) (UpResult, error) {
 	// never got that far.
 	defer os.Remove(presetFile)
 	args := []string{"serve", o.Name, "--room", room, "--daemon", "--owner", owner, "--resolved-label", o.Label, "--resolved-preset-file", presetFile}
-	_, exited, err := StartDetached(exe, args, room, LogPath(room, o.Name))
+	daemon, exited, err := StartDetached(exe, args, room, LogPath(room, o.Name))
 	if err != nil {
 		return UpResult{}, err
 	}
@@ -144,14 +147,30 @@ func Up(ctx context.Context, o UpOptions) (UpResult, error) {
 			}
 			return UpResult{}, fmt.Errorf("serve exited before readiness (%v); see %s", err, LogPath(room, o.Name))
 		case <-ctx.Done():
-			if st, ok, _ := ReadState(room, o.Name); ok && st.Owner == owner {
-				stopCtx, stop := context.WithTimeout(context.Background(), time.Second)
-				_ = st.controlCall(stopCtx, "/stop")
-				stop()
-			}
+			// Stop the process this call started rather than whatever a state
+			// file names: a daemon still recovering writes its state later and
+			// would stay up although Up reports failure.
+			stopDaemon(daemon, exited)
 			return UpResult{}, fmt.Errorf("listener %s did not become ready: %w; see %s", o.Name, ctx.Err(), LogPath(room, o.Name))
 		case <-time.After(25 * time.Millisecond):
 		}
+	}
+}
+
+// stopDaemon ends a daemon Up started and has not yet reaped. SIGTERM lets
+// serve shut down as usual, stopping any agent it already started; SIGKILL
+// follows when it has not exited within a grace longer than an agent's.
+func stopDaemon(daemon *os.Process, exited <-chan error) {
+	_ = daemon.Signal(syscall.SIGTERM)
+	select {
+	case <-exited:
+		return
+	case <-time.After(5 * time.Second):
+	}
+	_ = daemon.Kill()
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
 	}
 }
 

@@ -72,6 +72,103 @@ func TestSessionClaudeMCPDiagnosticFraming(t *testing.T) {
 	}
 }
 
+// One stdout event over the in-memory limit (a huge tool result, say) is
+// skipped up to its newline; the run fails only without a final result.
+func TestSessionOversizedEventIsSkipped(t *testing.T) {
+	huge := "{\"type\":\"user\",\"tool_result\":\"" + strings.Repeat("x", 3*MaxCapturedOutput) + "\"}\n"
+	for _, final := range []bool{true, false} {
+		s, err := PrepareSession(t.TempDir(), "worker", "claude", Builtin()["claude"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.SplitAfter(sessionFixture("claude", s.record.ID), "\n")
+		fixture := lines[0] + lines[1] + huge
+		if final {
+			fixture += lines[2]
+		}
+		for len(fixture) > 0 {
+			n := min(64<<10, len(fixture))
+			if _, err := s.Output("stdout", []byte(fixture[:n])); err != nil {
+				t.Fatalf("oversized event failed the stream: %v", err)
+			}
+			if cap(s.parser.pending) > 2*MaxCapturedOutput {
+				t.Fatalf("parser buffered %d bytes", cap(s.parser.pending))
+			}
+			fixture = fixture[n:]
+		}
+		body, err := s.Reply(RunSpec{}, Result{ExitCode: 0})
+		if final && (err != nil || body != "ANSWER") {
+			t.Fatalf("final reply = %q, %v", body, err)
+		}
+		if !final && (err == nil || !strings.Contains(err.Error(), "output limit")) {
+			t.Fatalf("missing final result after a skipped event: %q, %v", body, err)
+		}
+	}
+}
+
+// A skipped event may have carried part or all of the answer. Only a later
+// event that replaces the answer whole makes the run successful again.
+func TestSessionSkippedEventNeverYieldsPartialAnswer(t *testing.T) {
+	big := strings.Repeat("x", MaxCapturedOutput+1)
+	cases := []struct {
+		provider, fixture string
+		ok                bool
+	}{
+		{"kimi", "{\"role\":\"assistant\",\"content\":\"COMMENTARY\"}\n{\"role\":\"assistant\",\"content\":\"" + big + "\"}\n" +
+			"{\"role\":\"meta\",\"type\":\"session.resume_hint\",\"session_id\":\"%ID%\"}\n", false},
+		{"kimi", "{\"role\":\"assistant\",\"content\":\"" + big + "\"}\n{\"role\":\"assistant\",\"content\":\"ANSWER\"}\n" +
+			"{\"role\":\"meta\",\"type\":\"session.resume_hint\",\"session_id\":\"%ID%\"}\n", true},
+		{"grok", "{\"type\":\"text\",\"data\":\"ANS\"}\n{\"type\":\"text\",\"data\":\"" + big + "\"}\n" +
+			"{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", false},
+		{"grok", "{\"type\":\"text\",\"data\":\"" + big + "\"}\n{\"type\":\"tool_call\"}\n{\"type\":\"text\",\"data\":\"ANSWER\"}\n" +
+			"{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", true},
+		// Events that never contribute to the answer (tool results, progress)
+		// may be skipped; answer events and unidentifiable lines may not.
+		{"agy", "{\"event\":\"init\",\"conversation_id\":\"%ID%\"}\n{\"event\":\"result\",\"result\":{\"conversation_id\":\"%ID%" +
+			"\",\"status\":\"SUCCESS\",\"response\":\"ANSWER\"}}\n{\"event\":\"step_update\",\"pad\":\"" + big + "\"}\n", true},
+		{"agy", "{\"event\":\"init\",\"conversation_id\":\"%ID%\"}\n{\"event\":\"result\",\"result\":{\"conversation_id\":\"%ID%" +
+			"\",\"status\":\"SUCCESS\",\"response\":\"ANSWER\"}}\n{\"event\":\"result\",\"pad\":\"" + big + "\"}\n", false},
+		{"grok", "{\"type\":\"tool_call\",\"data\":{\"name\":\"read\"}}\n{\"type\":\"tool_call_update\",\"data\":{\"output\":\"" + big + "\"}}\n" +
+			"{\"type\":\"text\",\"data\":\"ANS\"}\n{\"type\":\"text\",\"data\":\"WER\"}\n{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", true},
+		{"grok", "{\"type\":\"text\",\"data\":\"ANSWER\"}\n" + big + "\n{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", false},
+		{"grok", "{\"type\":\"text\",\"data\":\"ANSWER\"}\n{\"data\":\"" + big + "\",\"type\":\"tool_call_update\"}\n" +
+			"{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", false},
+		{"kimi", "{\"role\":\"assistant\",\"content\":\"ANSWER\"}\n{\"role\":\"tool\",\"content\":\"" + big + "\"}\n" +
+			"{\"role\":\"meta\",\"type\":\"session.resume_hint\",\"session_id\":\"%ID%\"}\n", true},
+		{"claude", "{\"type\":\"system\",\"session_id\":\"%ID%\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"%ID%\",\"is_error\":false,\"result\":\"ANSWER\"}\n" +
+			"{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"" + big + "\"}]}}\n", true},
+		{"claude", "{\"type\":\"system\",\"session_id\":\"%ID%\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"%ID%\",\"is_error\":false,\"result\":\"ANSWER\"}\n" +
+			"{\"type\":\"error\",\"message\":\"" + big + "\"}\n", false},
+	}
+	// Whole writes and pipe-sized chunks reach the oversized line differently.
+	for _, chunk := range []int{1 << 30, 64 << 10} {
+		for i, c := range cases {
+			s, err := PrepareSession(t.TempDir(), "worker", c.provider, Builtin()[c.provider])
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := s.record.ID
+			if id == "" {
+				id = fixtureSessionID(c.provider)
+			}
+			for fixture := strings.ReplaceAll(c.fixture, "%ID%", id); len(fixture) > 0; {
+				n := min(chunk, len(fixture))
+				if _, err := s.Output("stdout", []byte(fixture[:n])); err != nil {
+					t.Fatalf("case %d: %v", i, err)
+				}
+				fixture = fixture[n:]
+			}
+			body, err := s.Reply(RunSpec{}, Result{ExitCode: 0})
+			if c.ok && (err != nil || body != "ANSWER") {
+				t.Errorf("case %d (%s, chunk %d): reply = %q, %v", i, c.provider, chunk, body, err)
+			}
+			if !c.ok && (err == nil || !strings.Contains(err.Error(), "output limit")) {
+				t.Errorf("case %d (%s, chunk %d): partial answer accepted: %q, %v", i, c.provider, chunk, body, err)
+			}
+		}
+	}
+}
+
 func TestSessionClaudeDiagnosticDoesNotHideFailures(t *testing.T) {
 	for _, trailing := range []string{"not-json\n", "{\"type\":", "null\n", claudeMCPDiagnosticFixture + " unexpected suffix\n"} {
 		s, err := PrepareSession(t.TempDir(), "worker", "claude", Builtin()["claude"])

@@ -3,16 +3,19 @@ package host
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/envelope"
 	"github.com/c0ze/tincan/v2/internal/filelock"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 	"github.com/c0ze/tincan/v2/internal/request"
 	"github.com/c0ze/tincan/v2/internal/spool"
 )
@@ -25,6 +28,10 @@ type ServeOptions struct {
 	Label  string    // preset label recorded in the state file / status
 	Preset Preset    // resolved preset (see Resolve)
 	Log    io.Writer // host log sink; nil discards
+	// LogPath, when set, is a host log Serve rotates and opens once it owns
+	// the listener, then writes ahead of Log (a foreground serve). Opening it
+	// earlier could rotate the log of a listener that is still running.
+	LogPath string
 }
 
 // Serve parks on <room>/.tincan/inbox/<name> with the normal Recv (so
@@ -69,6 +76,15 @@ func Serve(ctx context.Context, o ServeOptions) error {
 		return fmt.Errorf("listener %s already owns its lifetime or cannot be locked: %w", o.Name, err)
 	}
 	defer lifetime.Close()
+	if o.LogPath != "" {
+		rotateLog(o.LogPath)
+		f, err := OpenLog(o.LogPath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		o.Log = io.MultiWriter(f, o.Log)
+	}
 	// The lock excludes the previous lifetime and all replacement writers.
 	if previous, ok, err := ReadState(o.Room, o.Name); err != nil {
 		if err := RemoveState(o.Room, o.Name); err != nil {
@@ -106,7 +122,13 @@ func Serve(ctx context.Context, o ServeOptions) error {
 		}
 		r, err := request.Finish(o.Room, d.Envelope, "ERROR interrupted: previous hosted listener exited; execution outcome is uncertain and was not replayed")
 		if err != nil {
-			return err
+			if !journalRejected(o.Room, d.Envelope, err) {
+				return err
+			}
+			if err := reject(sp, o, d, err); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := complete(sp, o, d, r.Result); err != nil {
 			return err
@@ -143,7 +165,13 @@ func Serve(ctx context.Context, o ServeOptions) error {
 		r, err := request.Start(o.Room, e)
 		if err != nil {
 			endJob()
-			return err
+			if !journalRejected(o.Room, d.Envelope, err) {
+				return err
+			}
+			if err := reject(sp, o, d, err); err != nil {
+				return err
+			}
+			continue
 		}
 		if !r.Terminal() {
 			st.State, st.CurrentID = "busy", e.ID
@@ -156,9 +184,13 @@ func Serve(ctx context.Context, o ServeOptions) error {
 		}
 		endJob()
 		if err != nil {
-			return err
-		}
-		if err := complete(sp, o, d, r.Result); err != nil {
+			if !journalRejected(o.Room, d.Envelope, err) {
+				return err
+			}
+			if err := reject(sp, o, d, err); err != nil {
+				return err
+			}
+		} else if err := complete(sp, o, d, r.Result); err != nil {
 			return err
 		}
 		if ctx.Err() != nil {
@@ -187,6 +219,49 @@ func complete(sp *spool.Spool, o ServeOptions, d *spool.Delivery, body string) e
 	return d.Ack(false)
 }
 
+// journalRejected reports whether a request journal error belongs to e's own
+// record rather than to shared storage: an invalid ID, an ID collision from a
+// hand-written envelope, or a corrupt, oversized or unsafe record file.
+// Retrying cannot help, and a claim left in flight would fail every restart's
+// recovery the same way. internal/request has no typed errors for these, so
+// this matches its messages; anything else (unsafe journal directories, I/O)
+// keeps the claim and stops the listener.
+func journalRejected(room string, e *envelope.Envelope, err error) bool {
+	if request.ValidateID(e.ID) != nil {
+		return true
+	}
+	msg := err.Error()
+	for _, prefix := range []string{"request ID collision: ", "corrupt request record ", "encoded request record exceeds "} {
+		if strings.HasPrefix(msg, prefix) {
+			return true
+		}
+	}
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
+		return true // only the record itself is decoded
+	}
+	record := filepath.Join(request.Dir(room), e.ID+".json")
+	return (errors.Is(err, fsutil.ErrUnsafeFile) || errors.Is(err, fsutil.ErrTooLarge)) && strings.HasSuffix(msg, ": "+record)
+}
+
+// reject settles a delivery the request journal refused without running it:
+// the asker gets an ERROR reply (best effort; its journal entry cannot record
+// one) and the envelope moves to the consumed log for inspection.
+func reject(sp *spool.Spool, o ServeOptions, d *spool.Delivery, cause error) error {
+	e := d.Envelope
+	logf(o.Log, "=== %s from=%s rejected: %v", e.ID, e.From, cause)
+	if e.ReplyTo != "" {
+		// Not complete's reply ID: a journaled request with this ID may own it.
+		replyID := fmt.Sprintf("%x", sha256.Sum256([]byte("rejected:"+e.ID)))
+		reply := &envelope.Envelope{ID: replyID, CorrID: e.ReplyTo, From: o.Name, To: e.ReplyTo, TS: e.TS, Body: "ERROR request: " + cause.Error()}
+		if err := sp.Send(reply); err != nil {
+			logf(o.Log, "--- %s rejection reply not sent: %v", e.ID, err)
+		}
+	}
+	return d.Ack(true)
+}
+
 // handle runs the preset for one message and returns the post-processed
 // reply body, writing the per-message log block:
 //
@@ -196,11 +271,23 @@ func complete(sp *spool.Spool, o ServeOptions, d *spool.Delivery, body string) e
 func handle(ctx context.Context, o ServeOptions, e *envelope.Envelope) string {
 	started := time.Now()
 	logf(o.Log, "=== %s from=%s started=%s", e.ID, e.From, started.UTC().Format(time.RFC3339))
-	// Check the account environment before preparing a session: a run that
-	// cannot start must not leave a new conversation pending initialization.
+	// Check the account environment and the executable before preparing a
+	// session: a run that cannot start must not leave a new conversation
+	// pending initialization.
 	if _, err := composeEnv(nil, o.Preset.EnvUnset, o.Preset.Env); err != nil {
 		logf(o.Log, "=== exit=error %v", err)
 		return "ERROR exec: " + err.Error()
+	}
+	vars := Vars{Body: e.Body, Room: o.Room, Name: o.Name, ID: e.ID}
+	var err error
+	if o.Preset.Pinned {
+		err = PinnedExecutable(o.Preset.Exec[0])
+	} else {
+		_, err = ResolveExecutable(Render(o.Preset.Exec[:1], vars)[0], o.Room)
+	}
+	if err != nil {
+		logf(o.Log, "=== exit=error %v", err)
+		return ReplyBody(RunSpec{}, Result{ExitCode: -1, Err: err})
 	}
 	session, err := PrepareSession(o.Room, o.Name, o.Label, o.Preset)
 	if err != nil {
@@ -223,7 +310,6 @@ func handle(ctx context.Context, o ServeOptions, e *envelope.Envelope) string {
 			return nil
 		},
 	}
-	vars := Vars{Body: e.Body, Room: o.Room, Name: o.Name, ID: e.ID}
 	if p.Reply == "file" {
 		f, err := newReplyFile()
 		if err != nil {
@@ -245,6 +331,12 @@ func handle(ctx context.Context, o ServeOptions, e *envelope.Envelope) string {
 	}
 	res := Run(ctx, spec)
 	logf(o.Log, "=== exit=%s duration=%.1fs", exitLabel(res), res.Duration.Seconds())
+	if !res.Started {
+		// A start failure (argument list too long, say) ran nothing.
+		if err := session.Discard(); err != nil {
+			logf(o.Log, "--- %s pending session record not removed: %v", e.ID, err)
+		}
+	}
 	body, err := session.Reply(spec, res)
 	if err != nil {
 		return "ERROR session: " + err.Error()

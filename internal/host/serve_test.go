@@ -3,15 +3,21 @@ package host
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 	"github.com/c0ze/tincan/v2/internal/request"
 	"github.com/c0ze/tincan/v2/internal/spool"
 )
@@ -222,6 +228,164 @@ func TestServeRecoveryReusesTerminalResultWithReplyAlreadyQueued(t *testing.T) {
 	}
 	if _, err := os.Stat(pidfile); !os.IsNotExist(err) {
 		t.Fatalf("terminal request executed again: %v", err)
+	}
+}
+
+// collidingRequest journals a finished request and returns a different
+// envelope with the same ID, as a hand-written or replayed envelope might be.
+func collidingRequest(t *testing.T, room string) *envelope.Envelope {
+	t.Helper()
+	original := &envelope.Envelope{ID: envelope.NewID(), From: "orch", To: "agent", TS: time.Now().UTC(), Body: "original"}
+	if _, err := request.Finish(room, original, "done"); err != nil {
+		t.Fatal(err)
+	}
+	e := *original
+	e.Body, e.ReplyTo = "colliding", "r-"+envelope.NewID()
+	e.CorrID = e.ReplyTo
+	return &e
+}
+
+// A delivery whose journal entry cannot be used fails alone; the listener
+// keeps serving instead of exiting with the claim still in flight.
+func TestServeJournalRejectionFailsOnlyThatDelivery(t *testing.T) {
+	room, sp, logbuf, done, _ := startServe(t, echoPreset(), "fake")
+	e := collidingRequest(t, room)
+	if err := sp.Send(e); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := sp.Recv(e.ReplyTo, 10*time.Second, false)
+	if err != nil || !strings.HasPrefix(reply.Body, "ERROR request: ") || !strings.Contains(reply.Body, "collision") {
+		t.Fatalf("rejection reply: %+v %v\nlog:\n%s", reply, err, logbuf.String())
+	}
+	if r := askVia(t, sp, "next"); r.Body != "echo: next" {
+		t.Fatalf("next reply = %q", r.Body)
+	}
+	if d, _ := sp.ListInFlight("agent"); len(d) != 0 {
+		t.Fatalf("rejected delivery still in flight: %d", len(d))
+	}
+	if r, err := request.Get(room, e.ID); err != nil || r.Result != "done" {
+		t.Fatalf("original journal entry changed: %+v %v", r, err)
+	}
+	stopServe(t, sp, done)
+}
+
+func TestJournalRejectedOnlyForTheRecordItself(t *testing.T) {
+	room := canonicalTempDir(t)
+	e := &envelope.Envelope{ID: "req1", To: "agent"}
+	record := filepath.Join(request.Dir(room), "req1.json")
+	syntax := json.Unmarshal([]byte("{"), &struct{}{})
+	for _, err := range []error{errors.New("request ID collision: req1"), fmt.Errorf("corrupt request record %q", "req1"), syntax,
+		fmt.Errorf("%w: %s", fsutil.ErrTooLarge, record), fmt.Errorf("%w: %s", fsutil.ErrUnsafeFile, record)} {
+		if !journalRejected(room, e, err) {
+			t.Errorf("not rejected: %v", err)
+		}
+	}
+	if !journalRejected(room, &envelope.Envelope{ID: strings.Repeat("x", 129)}, errors.New("request ID must be a portable name")) {
+		t.Error("invalid ID not rejected")
+	}
+	if runtime.GOOS != "windows" {
+		// The error request.Start really returns for a symlinked record file.
+		if err := os.MkdirAll(request.Dir(room), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(room, "elsewhere"), record); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := request.Start(room, e); err == nil || !journalRejected(room, e, err) {
+			t.Errorf("unsafe record file not rejected: %v", err)
+		}
+	}
+	for _, err := range []error{&fs.PathError{Op: "write", Path: "x", Err: syscall.ENOSPC}, &os.LinkError{Op: "rename", Err: syscall.EACCES},
+		fmt.Errorf("persist: %w", os.NewSyscallError("fsync", syscall.EIO)), errors.New("unexpected"),
+		fmt.Errorf("%w: %s", fsutil.ErrUnsafeFile, filepath.Join(request.Dir(room), "locks")),
+		fmt.Errorf("%w: %s", fsutil.ErrUnsafeFile, request.Dir(room)),
+		fmt.Errorf("%w: %s", fsutil.ErrUnsafeFile, filepath.Join(request.Dir(room), "other.json"))} {
+		if journalRejected(room, e, err) {
+			t.Errorf("shared storage error rejected the delivery: %v", err)
+		}
+	}
+}
+
+// Unsafe shared journal storage is not one delivery's fault: Serve stops with
+// the claim kept, so the work runs once the storage is repaired.
+func TestServeKeepsClaimWhenJournalStorageIsUnsafe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may need privileges")
+	}
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	room := canonicalTempDir(t)
+	sp, err := spool.Open(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := request.Submit(context.Background(), room, "agent", "orch", "valid work", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	locks := filepath.Join(request.Dir(room), "locks")
+	if err := os.RemoveAll(locks); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), locks); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		done <- Serve(ctx, ServeOptions{Room: room, Name: "agent", Label: "fake", Preset: echoPreset()})
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, fsutil.ErrUnsafeFile) {
+			t.Fatalf("Serve = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("Serve kept serving on unsafe journal storage")
+	}
+	if d, _ := sp.ListInFlight("agent"); len(d) != 1 {
+		t.Fatalf("claim not kept: %d in flight", len(d))
+	}
+	if got, err := request.Get(room, r.ID); err != nil || got.Terminal() {
+		t.Fatalf("request settled: %+v %v", got, err)
+	}
+}
+
+func TestServeRecoveryGetsPastJournalRejection(t *testing.T) {
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	room := t.TempDir()
+	sp, err := spool.Open(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := collidingRequest(t, room)
+	if err := sp.Send(e); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sp.ClaimContext(context.Background(), "agent", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, ServeOptions{Room: room, Name: "agent", Label: "fake", Preset: echoPreset()})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("recovery Serve did not stop")
+		}
+	})
+	if r := askVia(t, sp, "after recovery"); r.Body != "echo: after recovery" {
+		t.Fatalf("reply after recovery = %q", r.Body)
+	}
+	if reply, err := sp.Recv(e.ReplyTo, time.Second, false); err != nil || !strings.HasPrefix(reply.Body, "ERROR request: ") {
+		t.Fatalf("rejection reply: %+v %v", reply, err)
 	}
 }
 
@@ -496,6 +660,39 @@ func TestServeLogHasPerMessageMarkers(t *testing.T) {
 	}
 }
 
+func TestServeRotatesLargeLogOnceItOwnsTheListener(t *testing.T) {
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	room := canonicalTempDir(t)
+	path := LogPath(room, "agent")
+	f, err := OpenLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if err := os.Truncate(path, maxLogBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, ServeOptions{Room: room, Name: "agent", Label: "fake", Preset: echoPreset(), LogPath: path})
+	}()
+	if !waitFor(func() bool { st, ok, _ := ReadState(room, "agent"); return ok && st.State == "parked" }, 10*time.Second) {
+		cancel()
+		t.Fatal("serve never parked")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path + ".1"); err != nil || info.Size() != maxLogBytes+1 {
+		t.Fatalf("previous log: %v %v", info, err)
+	}
+	if data, err := os.ReadFile(path); err != nil || !strings.HasPrefix(string(data), "serve name=agent ") {
+		t.Fatalf("new log: %q %v", data, err)
+	}
+}
+
 func TestServeRejectsInvalidName(t *testing.T) {
 	err := Serve(context.Background(), ServeOptions{Room: t.TempDir(), Name: "../x", Preset: echoPreset()})
 	if err == nil {
@@ -541,6 +738,37 @@ func TestServeUnexpandableEnvDoesNotStrandSession(t *testing.T) {
 		t.Fatalf("session record created for a run that never started: %v", err)
 	}
 	stopServe(t, sp, done)
+}
+
+// A run that fails before its process exists cannot have created a provider
+// conversation, so it must not leave a pending session behind either.
+func TestServeStartFailureDoesNotStrandSession(t *testing.T) {
+	notExecutable := filepath.Join(t.TempDir(), "agent")
+	if err := os.WriteFile(notExecutable, []byte("not a program\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, exe := range map[string]string{"missing": "tincan-definitely-missing-agent-xyz", "unstartable": notExecutable} {
+		t.Run(name, func(t *testing.T) {
+			if name == "unstartable" && runtime.GOOS == "windows" {
+				t.Skip("relies on execve rejecting a file without a format")
+			}
+			p := Preset{Exec: []string{exe, "-p", "{body}"}, Provider: "claude"}
+			room, sp, _, done, _ := startServe(t, p, "claude-x")
+			for i := 0; i < 2; i++ {
+				if reply := askVia(t, sp, "hi"); !strings.HasPrefix(reply.Body, "ERROR exec: ") {
+					t.Fatalf("reply %d = %q", i+1, reply.Body)
+				}
+			}
+			canonical, err := canonicalRoom(room)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(sessionPath(canonical, "agent")); !os.IsNotExist(err) {
+				t.Fatalf("session record left for a run that never started: %v", err)
+			}
+			stopServe(t, sp, done)
+		})
+	}
 }
 
 // A pinned preset's argv[0] is never template-expanded, and a file named like

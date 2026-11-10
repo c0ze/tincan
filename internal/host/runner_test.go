@@ -314,6 +314,26 @@ func TestPinnedRunUsesTheExactPath(t *testing.T) {
 	}
 }
 
+func TestBatchArgsError(t *testing.T) {
+	safe := []string{"-p", "review PR 56, then summarise: it's fine", "--model", "x.y", `C:\Users\me\tmp\reply.md`}
+	for _, path := range []string{`C:\npm\claude.cmd`, `C:\npm\GEMINI.CMD`, `C:\tools\agent.Bat`} {
+		if err := batchArgsError(path, safe); err != nil {
+			t.Errorf("%s refused safe arguments: %v", path, err)
+		}
+		for _, body := range []string{`x" & calc.exe & rem "`, "100%", "a|b", "a^b", "a<b", "a>b", "hi!", "(x)", "line\nbreak", "cr\r", `say "hi"`} {
+			err := batchArgsError(path, []string{"-p", body})
+			if err == nil || !strings.Contains(err.Error(), "--stdin body") {
+				t.Errorf("%s accepted %q: %v", path, body, err)
+			}
+		}
+	}
+	for _, path := range []string{`C:\bin\agent.exe`, "/usr/local/bin/claude", `C:\cmd\agent.exe`} {
+		if err := batchArgsError(path, []string{`x" & calc.exe & rem "`}); err != nil {
+			t.Errorf("%s is not a batch file: %v", path, err)
+		}
+	}
+}
+
 func TestPinnedExecutable(t *testing.T) {
 	exe, _ := os.Executable()
 	if err := PinnedExecutable(exe); err != nil {

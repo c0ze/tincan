@@ -58,7 +58,10 @@ func (s *SessionRun) Reply(spec RunSpec, res Result) (string, error) {
 	if !s.record.Ready {
 		return "", errors.New("provider returned no session ID; initialization remains pending and requires explicit reset")
 	}
-	if !s.parser.final || len(bytes.TrimSpace(s.parser.body)) == 0 {
+	if s.parser.stale || !s.parser.final || len(bytes.TrimSpace(s.parser.body)) == 0 {
+		if s.parser.skipped {
+			return "", errors.New("provider returned no complete final answer; an event over the output limit was skipped")
+		}
 		return "", errors.New("provider returned no parseable final answer")
 	}
 	return strings.TrimSpace(string(s.parser.body)), nil
@@ -72,6 +75,11 @@ type sessionParser struct {
 	failure   string
 	final     bool
 	err       error
+	// discarding drops the rest of an event over the in-memory limit up to its
+	// newline; skipped records that one was dropped. stale marks the answer
+	// as possibly incomplete since the last skip, until an event replaces it
+	// whole (a final result, a Kimi assistant message, a Grok tool call reset).
+	discarding, skipped, stale bool
 }
 
 func (p *sessionParser) write(data []byte) ([]byte, error) {
@@ -85,9 +93,25 @@ func (p *sessionParser) write(data []byte) ([]byte, error) {
 		if i >= 0 {
 			n = i
 		}
-		if len(p.pending)+n > MaxCapturedOutput {
-			p.err = errors.New("provider JSON event exceeds output limit")
-			return nil, p.err
+		if p.discarding || len(p.pending)+n > MaxCapturedOutput {
+			// An event too large to hold (a huge tool result, say) is skipped
+			// and parsing goes on. Unless its head identifies an event that
+			// never feeds the answer, Reply fails until a later event
+			// replaces the answer whole.
+			if !p.discarding {
+				head := p.pending
+				if len(head) < skipHeadBytes {
+					head = append(head, data[:min(n, skipHeadBytes-len(head))]...)
+				}
+				p.stale = p.stale || p.mayCarryAnswer(head[:min(len(head), skipHeadBytes)])
+			}
+			p.discarding, p.skipped = i < 0, true
+			p.pending = p.pending[:0]
+			if i < 0 {
+				break
+			}
+			data = data[n+1:]
+			continue
 		}
 		p.pending = append(p.pending, data[:n]...)
 		if i < 0 {
@@ -103,6 +127,75 @@ func (p *sessionParser) write(data []byte) ([]byte, error) {
 		data = data[n+1:]
 	}
 	return progress.Bytes(), nil
+}
+
+// skipHeadBytes is how much of a skipped event is read for its type.
+const skipHeadBytes = 4096
+
+// mayCarryAnswer reports whether a skipped event, known only by its head,
+// could have changed the answer: answer text, a final result, a Grok body
+// reset or a failure. It mirrors event; an event whose type the head does
+// not show counts as one that could.
+func (p *sessionParser) mayCarryAnswer(head []byte) bool {
+	f := headFields(head)
+	kind, event, role := f["type"], f["event"], f["role"]
+	if kind == "error" || event == "error" {
+		return true
+	}
+	switch p.provider {
+	case "claude", "cursor":
+		// Assistant messages are progress only; the answer is the result.
+		return kind == "" || kind == "result"
+	case "grok":
+		switch kind {
+		case "", "text", "tool_call", "tool_use", "end":
+			return true
+		}
+		return false
+	case "agy":
+		return event == "" || event == "result"
+	case "kimi":
+		return (kind == "" && role == "") || role == "assistant" || kind == "session.resume_hint"
+	}
+	return true
+}
+
+// headFields returns the top-level string fields that appear in a possibly
+// truncated JSON object, stopping at the first token it cannot read.
+func headFields(head []byte) map[string]string {
+	fields := map[string]string{}
+	dec := json.NewDecoder(bytes.NewReader(head))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return fields
+	}
+	key, expectKey := "", true
+	for depth := 1; depth > 0; {
+		t, err := dec.Token()
+		if err != nil {
+			return fields
+		}
+		if d, ok := t.(json.Delim); ok {
+			if d == '{' || d == '[' {
+				depth++
+			} else if depth--; depth == 1 {
+				expectKey = true
+			}
+			continue
+		}
+		if depth != 1 {
+			continue
+		}
+		if expectKey {
+			key, _ = t.(string)
+			expectKey = false
+			continue
+		}
+		if s, ok := t.(string); ok {
+			fields[key] = s
+		}
+		expectKey = true
+	}
+	return fields
 }
 
 func (p *sessionParser) flush() error {
@@ -169,6 +262,7 @@ func (p *sessionParser) setBody(body string, appendText bool) error {
 			return errors.New("provider final answer exceeds output limit")
 		}
 		p.body = append(p.body[:0], body...)
+		p.stale = false
 	}
 	return nil
 }
@@ -222,7 +316,7 @@ func (p *sessionParser) event(line []byte) (string, error) {
 			return text, p.setBody(text, true)
 		case "tool_call", "tool_use":
 			// Commentary before tool execution is not the final answer.
-			p.body = p.body[:0]
+			p.body, p.stale = p.body[:0], false
 		case "end":
 			stop := fieldString(m, "stopReason")
 			if stop != "end_turn" && stop != "stop_sequence" {

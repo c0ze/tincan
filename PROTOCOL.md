@@ -193,7 +193,8 @@ a detached `tincan serve` process that
 3. persists the terminal result, sends a reply if `reply_to` is present, then
    acknowledges the claimed message;
 4. loops. A `kind == "stop"` message (`tincan stop`), authenticated shutdown
-   (`tincan down`), or SIGTERM/SIGINT ends the loop.
+   (`tincan down`), or SIGTERM/SIGINT/SIGHUP/SIGQUIT ends the loop (a closed
+   terminal stops a foreground `serve` cleanly).
 
 Each request runs one provider CLI process. Claude, Grok, Agy, Kimi and Cursor native
 executable presets resume a conversation scoped to the room and listener name by
@@ -222,7 +223,9 @@ tincan down codex --room "$ROOM"        # down name=codex
   harness's session variables (Claude Code's `CLAUDECODE`, session ID and
   messaging socket, `GROK_SESSION_ID`, …), so each hosted agent starts its own
   session; credentials and provider configuration are passed through.
-  Failure reports the host log path.
+  Failure reports the host log path; a daemon that is not ready within
+  `--wait` is stopped (SIGTERM, then SIGKILL after 5 s), so a failed `up`
+  never leaves a listener running.
 - `serve` is the loop itself, in the foreground — handy for debugging a
   preset (`Ctrl-C` stops it). `--daemon` is what `up` passes.
 - `down` sends an authenticated shutdown request to a hosted listener,
@@ -251,7 +254,11 @@ described below):
 Placeholders: `{body}` (the message body, passed as **one argv element** —
 never through a shell), `{out}` (a per-message temp file whose contents become
 the reply when `reply = file`), `{room}`, `{name}`, `{id}`. `stdin = body` pipes
-the body to the process' stdin instead. Templates given with `--exec` are
+the body to the process' stdin instead. A body that begins with `-` is passed
+with one leading space wherever it would start a token (nothing before `{body}`
+in the token renders to text), so the agent CLI
+reads it as the prompt rather than as its own options (`--resume=…`,
+`--- a/file`). Templates given with `--exec` are
 split on unquoted whitespace (single/double quotes group a token) *before*
 substitution, so a body can never be re-tokenized.
 
@@ -342,6 +349,7 @@ before resetting. Stopping alone preserves the conversation.
 ```
 .tincan/hosts/<name>.json   # private owner/control credentials, preset, session_mode, state, current_id
 .tincan/hosts/<name>.log    # per message: "=== <id> from=<from> started=<ts>" … agent stdout+stderr … "=== exit=<code> duration=<s>s"
+.tincan/hosts/<name>.log.1  # the previous log: a log over 16 MiB is rotated when a listener starts, never while one runs
 .tincan/hosts/config/<name>/<owner>.json # a launch's resolved preset (0600), read and removed by the daemon at startup
 .tincan/sessions/<name>.json # saved provider conversation pointer and preset identity
 .tincan/requests/<id>.json # durable request status and result
@@ -370,7 +378,12 @@ alive or busy. Add `.tincan/` to your project's `.gitignore`
 An OS lock gives each hosted name one owner for its lifetime. Readiness and
 shutdown authenticate to that owner through a private loopback control endpoint;
 the stored PID alone never authorizes shutdown. Output streams to the log and
-bounded request progress, with at most a 1 MiB in-memory tail per stream.
+bounded request progress, with at most a 1 MiB in-memory tail per stream. A
+persistent session's structured event larger than 1 MiB is skipped (it stays in
+the log). When its first 4 KiB identify an event that never carries the answer
+(a tool result or progress event), the run goes on normally. Otherwise the run
+succeeds only if a later event replaces the whole answer (a final result, a
+Kimi assistant message), so a skipped event never yields a partial answer.
 
 ### Error handling and interrupted work
 
@@ -383,10 +396,23 @@ bounded request progress, with at most a 1 MiB in-memory tail per stream.
   stderr, and — stateless commands — captured stdout, so partial work is not
   discarded. Structured startup metadata is still excluded.
 - Agent binary missing at run time (removed after `up`) → reply
-  `ERROR exec: <message>`; the listener keeps running.
+  `ERROR exec: <message>`; the listener keeps running. A run whose process
+  never started (a missing binary, an argument list too long) leaves no new
+  session pending, so the next request starts the conversation normally.
 - The listener is stopped (`down`/SIGTERM) mid-run → the agent is killed and
   the asker gets `ERROR interrupted: hosted listener was stopped while running`.
+- Stopping a running agent (timeout, cancel, shutdown) on Linux/macOS sends
+  SIGTERM to its process group, then SIGKILL to the group once the agent exits
+  or after 2 s. The grace lets the agent stop descendants that left its group;
+  a descendant that left the group and ignores its parent's exit is out of
+  reach. On Windows the agent's Job Object is terminated.
 - Malformed envelopes are quarantined; an unknown `kind` is not executed.
+- A message the request journal refuses (its ID collides with a different
+  recorded request, or the record is corrupt) is not executed: the asker gets
+  `ERROR request: <reason>`, the envelope moves to `.tincan/log/`, and the
+  listener keeps serving. Restart recovery handles such a claim the same way.
+  Unsafe or failing shared journal storage (a symlinked `.tincan/requests`
+  directory, disk errors) instead stops the listener and keeps the claim.
 - A hard crash may prevent an immediate reply. Retained claims and request state
   allow recovery to report interrupted work; a missing reply is not permission
   to repeat an agent run automatically.
@@ -541,7 +567,11 @@ Detaching (`up`) is implemented for Linux/macOS (new session, stdio to the
 log). On Windows, `up` and MCP automatic launch are unsupported; run
 `tincan serve <name> --room <path>` in a terminal first, then use MCP to send
 and collect work through that existing host. Agent processes run in a Windows
-Job Object so interruption terminates their descendants too. Process liveness
+Job Object so interruption terminates their descendants too. An agent resolved
+to a batch file (`.cmd`/`.bat`, as npm installs `claude` and `gemini`) is run
+by cmd.exe, which does not follow Go's argument quoting: a run whose arguments
+contain `" % & | ^ < > ! ( )`, CR or LF is refused with `ERROR exec`. Pass the
+body on stdin (`stdin = body`) or use a non-batch executable. Process liveness
 checks recognize exited Windows processes even while another process retains
 a handle; atomic state replacement also supports concurrent readers.
 

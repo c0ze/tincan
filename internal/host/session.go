@@ -125,10 +125,11 @@ func sessionPath(room, name string) string {
 // lifetime lock from preparation until completion. Output calls are serialized
 // by Run, and Reply must be called after Run returns.
 type SessionRun struct {
-	Preset Preset
-	path   string
-	record sessionRecord
-	parser sessionParser
+	Preset  Preset
+	path    string
+	record  sessionRecord
+	parser  sessionParser
+	created bool // this preparation saved a new, not yet ready record
 }
 
 // PrepareSession loads one room/listener's explicit provider session. It records
@@ -208,8 +209,23 @@ func PrepareSession(room, name, label string, p Preset) (*SessionRun, error) {
 		if err := s.save(); err != nil {
 			return nil, err
 		}
+		s.created = !resume
 	}
 	return s, nil
+}
+
+// Discard forgets the pending record this preparation created, for a run whose
+// process never started: the provider cannot have created a conversation, and
+// a kept record would make every later run demand an explicit reset.
+func (s *SessionRun) Discard() error {
+	if !s.created || s.record.Ready {
+		return nil
+	}
+	if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	s.created = false
+	return fsutil.SyncDir(filepath.Dir(s.path))
 }
 
 func sessionArgs(argv []string, provider string) ([]string, error) {

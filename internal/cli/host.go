@@ -212,22 +212,18 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 	}
 	rooms.TouchQuiet(room, stderr)
 	// In daemon mode `up` already pointed our stdio at the host log, so
-	// stderr is the log. In the foreground we append to the log file
-	// ourselves and tee to the terminal for debugging.
-	logw := stderr
+	// stderr is the log. In the foreground Serve appends to the log file
+	// once it owns the listener, and we tee to the terminal for debugging.
+	logPath := ""
 	if !daemon {
-		f, err := host.OpenLog(host.LogPath(room, h.name))
-		if err != nil {
-			fmt.Fprintf(stderr, "tincan serve: %v\n", err)
-			return ExitError
-		}
-		defer f.Close()
-		logw = io.MultiWriter(f, stderr)
+		logPath = host.LogPath(room, h.name)
 		fmt.Fprintf(stdout, "serving name=%s preset=%s room=%s (Ctrl-C to stop)\n", h.name, label, room)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// A closed terminal (SIGHUP) or Ctrl-\ (SIGQUIT) must still stop the agent's
+	// process group and remove the state file. Windows never delivers these two.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer stop()
-	if err := host.Serve(ctx, host.ServeOptions{Room: room, Name: h.name, Label: label, Preset: p, Log: logw, Owner: owner}); err != nil {
+	if err := host.Serve(ctx, host.ServeOptions{Room: room, Name: h.name, Label: label, Preset: p, Log: stderr, LogPath: logPath, Owner: owner}); err != nil {
 		fmt.Fprintf(stderr, "tincan serve: %v\n", err)
 		return ExitError
 	}

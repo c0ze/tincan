@@ -112,6 +112,8 @@ Template placeholders: `{body}` (the message body, passed as a single argv
 element — never through a shell), `{out}` (a per-message temp file whose
 contents become the reply when `reply = file`), `{room}`, `{name}`, `{id}`.
 `stdin = body` pipes the body to the process' stdin instead of an argument.
+A body beginning with `-` gets one leading space wherever it would start a
+token, so the agent CLI never parses it as an option.
 
 User config `~/.config/tincan/agents.json` (JSON, no new deps) overrides or adds
 presets:
