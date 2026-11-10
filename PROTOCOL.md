@@ -482,6 +482,10 @@ New or omitted IDs submit new work. The prompt limit is 1 MiB; `from` defaults t
 `mcp`. If startup fails after saving work, retain the ID from the error, launch
 the intended listener and collect or retry that same ID. A custom listener name
 such as `reviewer` needs an explicit launch with its preset after being stopped.
+A retry resends hosted work only when its enqueue was never confirmed. If a
+queued request has left the spool without a hosted listener recording it (an
+interactive `recv` consumed it, for example), the retry marks it `interrupted`
+instead of sending it again.
 
 Hosts and retained requests continue after the MCP connection closes. Reconnect
 to the same room and use the same ID with wait/status. A wait deadline does not

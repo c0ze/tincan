@@ -43,9 +43,17 @@ type Record struct {
 	InteractivePublished bool `json:"interactive_published,omitempty"`
 	// Only publication uncertainty can be resolved by a later validated reply;
 	// execution failures, cancellations, and other terminal results stay final.
-	InteractivePublicationUncertain bool               `json:"interactive_publication_uncertain,omitempty"`
-	Envelope                        *envelope.Envelope `json:"request"`
+	InteractivePublicationUncertain bool `json:"interactive_publication_uncertain,omitempty"`
+	// Publication tracks a native request's enqueue: pending from its first
+	// save until Send succeeds, then published. Older records omit it.
+	Publication string             `json:"publication,omitempty"`
+	Envelope    *envelope.Envelope `json:"request"`
 }
+
+const (
+	publicationPending   = "pending"
+	publicationConfirmed = "published"
+)
 
 func (r Record) Terminal() bool {
 	switch r.Status {
@@ -133,7 +141,7 @@ func sameRequest(r Record, e *envelope.Envelope) bool {
 
 // Submit is idempotent for an explicitly supplied ID and identical request.
 // Persist before enqueueing. Retrying the same ID repairs an interrupted enqueue;
-// a running or completed request is never submitted a second time.
+// a confirmed enqueue, a running or a completed request is never resent.
 func Submit(ctx context.Context, room, agent, from, body, id string) (Record, error) {
 	return submit(ctx, room, agent, from, body, id, false)
 }
@@ -184,10 +192,16 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 			}
 			return resolveInteractivePublication(room, r)
 		}
+		if r.Publication != publicationPending {
+			return resolveNativePublication(room, r)
+		}
 		e = r.Envelope
 	} else if errors.Is(err, os.ErrNotExist) {
 		r = newRecord(e)
 		r.Interactive = needsReply
+		if !needsReply {
+			r.Publication = publicationPending
+		}
 		if err := save(room, r); err != nil {
 			return Record{}, err
 		}
@@ -213,18 +227,37 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 		if err := save(room, r); err != nil {
 			return r, fmt.Errorf("interactive request %s was published but confirmation failed; retry the same request_id to inspect without resending: %w", id, err)
 		}
+	} else {
+		r.Publication = publicationConfirmed
+		if err := save(room, r); err != nil {
+			return r, fmt.Errorf("request %s was enqueued but confirmation failed; retry the same request_id: %w", id, err)
+		}
 	}
 	return r, nil
 }
 
-// resolveInteractivePublication handles a durable dispatch intent left by a
-// process exit or older interactive records without confirmation. Absence is
-// not permission to resend: a legacy receiver may already have consumed and
-// acted on the envelope without writing anything to the request journal.
-// Native queued requests deliberately retain their separate enqueue repair.
-func resolveInteractivePublication(room string, r Record) (Record, error) {
-	if err := envelope.Validate(r.Envelope); err != nil {
+// resolveNativePublication answers a retry of a queued hosted request whose
+// enqueue was confirmed, or whose record predates confirmation. A hosted
+// listener records running before it acknowledges, so a queued record whose
+// envelope has left the spool was consumed outside the journal (by an
+// interactive recv, for example) and may already have run. It is never
+// resent. A legacy record cannot tell a failed enqueue from a consumed one,
+// so its absence is treated the same way.
+func resolveNativePublication(room string, r Record) (Record, error) {
+	found, err := findPublication(room, r)
+	if err != nil || found {
 		return r, err
+	}
+	r.Status = "interrupted"
+	r.Result = "ERROR interrupted: request was enqueued but is no longer queued or in flight, and no hosted listener recorded running it; delivery and execution may have occurred, and the request was not resent"
+	return r, save(room, r)
+}
+
+// findPublication reports whether r's exact envelope is queued or in flight.
+// A claim moves inbox -> inflight, so scanning the inbox first cannot miss it.
+func findPublication(room string, r Record) (bool, error) {
+	if err := envelope.Validate(r.Envelope); err != nil {
+		return false, err
 	}
 	root := filepath.Join(canonicalRoom(room), ".tincan")
 	filename := envelope.Filename(r.Envelope)
@@ -238,16 +271,32 @@ func resolveInteractivePublication(room string, r Record) (Record, error) {
 			continue
 		}
 		if err != nil {
-			return r, fmt.Errorf("cannot inspect interactive publication: %w", err)
+			return false, fmt.Errorf("cannot inspect request publication: %w", err)
 		}
 		existing, err := envelope.Unmarshal(data)
 		if err != nil {
-			return r, fmt.Errorf("cannot inspect interactive publication: %w", err)
+			return false, fmt.Errorf("cannot inspect request publication: %w", err)
 		}
 		if existing.ID != r.ID || !sameRequest(r, existing) || !existing.TS.Equal(r.Envelope.TS) ||
 			existing.ReplyTo != r.Envelope.ReplyTo || existing.CorrID != r.Envelope.CorrID {
-			return r, fmt.Errorf("%w: interactive request %s", spool.ErrEnvelopeConflict, r.ID)
+			return false, fmt.Errorf("%w: request %s", spool.ErrEnvelopeConflict, r.ID)
 		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// resolveInteractivePublication handles a durable dispatch intent left by a
+// process exit or older interactive records without confirmation. Absence is
+// not permission to resend: a legacy receiver may already have consumed and
+// acted on the envelope without writing anything to the request journal.
+// Native requests resend only an enqueue this version never confirmed.
+func resolveInteractivePublication(room string, r Record) (Record, error) {
+	found, err := findPublication(room, r)
+	if err != nil {
+		return r, err
+	}
+	if found {
 		r.InteractivePublished = true
 		r.InteractivePublicationUncertain = false
 		return r, save(room, r)

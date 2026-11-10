@@ -128,7 +128,9 @@ func TestInteractivePublicationRecoveryAcrossProcessExit(t *testing.T) {
 func TestNativeSubmitStillRepairsInterruptedEnqueue(t *testing.T) {
 	room := t.TempDir()
 	e := &envelope.Envelope{ID: "native-enqueue", From: "test", To: "worker", TS: time.Now().UTC(), Body: "native task"}
-	if err := save(room, newRecord(e)); err != nil {
+	saved := newRecord(e)
+	saved.Publication = publicationPending // saved, then the process lost before Send
+	if err := save(room, saved); err != nil {
 		t.Fatal(err)
 	}
 	r, err := Submit(context.Background(), room, "worker", "test", "native task", e.ID)
@@ -142,6 +144,76 @@ func TestNativeSubmitStillRepairsInterruptedEnqueue(t *testing.T) {
 	accepted, err := sp.Recv("worker", time.Second, false)
 	if err != nil || accepted.ID != e.ID {
 		t.Fatalf("native enqueue was not repaired: %+v, %v", accepted, err)
+	}
+}
+
+func TestNativeRetryDoesNotRepublishConsumedRequest(t *testing.T) {
+	room := t.TempDir()
+	ctx := context.Background()
+	r, err := Submit(ctx, room, "worker", "test", "one side effect", "native-once")
+	if err != nil || r.Publication != publicationConfirmed {
+		t.Fatalf("publication=%+v, %v", r, err)
+	}
+	sp, err := spool.Open(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An interactive `tincan recv --as worker` consumes the envelope without
+	// touching the journal, so the record stays queued.
+	if _, err := sp.Recv(r.Agent, time.Second, false); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		retry, err := Submit(ctx, room, r.Agent, "test", "one side effect", r.ID)
+		if err != nil || retry.Status != "interrupted" || !strings.Contains(retry.Result, "not resent") {
+			t.Fatalf("retry %d=%+v, %v", i, retry, err)
+		}
+	}
+	if _, err := sp.Recv(r.Agent, 20*time.Millisecond, false); !errors.Is(err, spool.ErrTimeout) {
+		t.Fatalf("native work was republished: %v", err)
+	}
+}
+
+func TestNativeRetryOfLegacyRecord(t *testing.T) {
+	for _, queued := range []bool{true, false} {
+		t.Run(map[bool]string{true: "queued", false: "consumed"}[queued], func(t *testing.T) {
+			room := t.TempDir()
+			ctx := context.Background()
+			// A record written before publication confirmation existed.
+			e := &envelope.Envelope{ID: "legacy-native", From: "test", To: "worker", TS: time.Now().UTC(), Body: "native task"}
+			if err := save(room, newRecord(e)); err != nil {
+				t.Fatal(err)
+			}
+			sp, err := spool.Open(room)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sp.Send(e); err != nil {
+				t.Fatal(err)
+			}
+			if !queued {
+				if _, err := sp.Recv(e.To, time.Second, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r, err := Submit(ctx, room, "worker", "test", "native task", e.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if queued {
+				if r.Status != "queued" {
+					t.Fatalf("queued legacy request=%+v", r)
+				}
+				if _, err := sp.Recv(e.To, time.Second, false); err != nil {
+					t.Fatalf("original queue lost: %v", err)
+				}
+			} else if r.Status != "interrupted" || !strings.Contains(r.Result, "not resent") {
+				t.Fatalf("consumed legacy request=%+v", r)
+			}
+			if _, err := sp.Recv(e.To, 20*time.Millisecond, false); !errors.Is(err, spool.ErrTimeout) {
+				t.Fatalf("legacy work was republished: %v", err)
+			}
+		})
 	}
 }
 
