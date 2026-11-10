@@ -58,9 +58,9 @@ func (s *SessionRun) Reply(spec RunSpec, res Result) (string, error) {
 	if !s.record.Ready {
 		return "", errors.New("provider returned no session ID; initialization remains pending and requires explicit reset")
 	}
-	if !s.parser.final || len(bytes.TrimSpace(s.parser.body)) == 0 {
+	if s.parser.stale || !s.parser.final || len(bytes.TrimSpace(s.parser.body)) == 0 {
 		if s.parser.skipped {
-			return "", errors.New("provider returned no parseable final answer; an event over the output limit was skipped")
+			return "", errors.New("provider returned no complete final answer; an event over the output limit was skipped")
 		}
 		return "", errors.New("provider returned no parseable final answer")
 	}
@@ -76,8 +76,10 @@ type sessionParser struct {
 	final     bool
 	err       error
 	// discarding drops the rest of an event over the in-memory limit up to its
-	// newline; skipped records that one was dropped.
-	discarding, skipped bool
+	// newline; skipped records that one was dropped. stale marks the answer
+	// as possibly incomplete since the last skip, until an event replaces it
+	// whole (a final result, a Kimi assistant message, a Grok tool call reset).
+	discarding, skipped, stale bool
 }
 
 func (p *sessionParser) write(data []byte) ([]byte, error) {
@@ -92,10 +94,10 @@ func (p *sessionParser) write(data []byte) ([]byte, error) {
 			n = i
 		}
 		if p.discarding || len(p.pending)+n > MaxCapturedOutput {
-			// An event too large to hold (a huge tool result, say) is not the
-			// answer's concern: skip it and keep parsing. Reply still fails
-			// when no final result arrives.
-			p.discarding, p.skipped = i < 0, true
+			// An event too large to hold (a huge tool result, say) is skipped
+			// and parsing goes on. It may have carried answer text, so Reply
+			// fails unless a later event replaces the answer whole.
+			p.discarding, p.skipped, p.stale = i < 0, true, true
 			p.pending = p.pending[:0]
 			if i < 0 {
 				break
@@ -183,6 +185,7 @@ func (p *sessionParser) setBody(body string, appendText bool) error {
 			return errors.New("provider final answer exceeds output limit")
 		}
 		p.body = append(p.body[:0], body...)
+		p.stale = false
 	}
 	return nil
 }
@@ -236,7 +239,7 @@ func (p *sessionParser) event(line []byte) (string, error) {
 			return text, p.setBody(text, true)
 		case "tool_call", "tool_use":
 			// Commentary before tool execution is not the final answer.
-			p.body = p.body[:0]
+			p.body, p.stale = p.body[:0], false
 		case "end":
 			stop := fieldString(m, "stopReason")
 			if stop != "end_turn" && stop != "stop_sequence" {

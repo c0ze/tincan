@@ -378,7 +378,9 @@ shutdown authenticate to that owner through a private loopback control endpoint;
 the stored PID alone never authorizes shutdown. Output streams to the log and
 bounded request progress, with at most a 1 MiB in-memory tail per stream. A
 persistent session's structured event larger than 1 MiB is skipped (it stays in
-the log); the run fails only if no final result event can be parsed.
+the log). The run then succeeds only if a later event replaces the whole answer
+(a final result, a Kimi assistant message), so a skipped event never yields a
+partial answer.
 
 ### Error handling and interrupted work
 

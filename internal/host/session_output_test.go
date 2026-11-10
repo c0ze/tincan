@@ -106,6 +106,47 @@ func TestSessionOversizedEventIsSkipped(t *testing.T) {
 	}
 }
 
+// A skipped event may have carried part or all of the answer. Only a later
+// event that replaces the answer whole makes the run successful again.
+func TestSessionSkippedEventNeverYieldsPartialAnswer(t *testing.T) {
+	big := strings.Repeat("x", MaxCapturedOutput+1)
+	cases := []struct {
+		provider, fixture string
+		ok                bool
+	}{
+		{"kimi", "{\"role\":\"assistant\",\"content\":\"COMMENTARY\"}\n{\"role\":\"assistant\",\"content\":\"" + big + "\"}\n" +
+			"{\"role\":\"meta\",\"type\":\"session.resume_hint\",\"session_id\":\"%ID%\"}\n", false},
+		{"kimi", "{\"role\":\"assistant\",\"content\":\"" + big + "\"}\n{\"role\":\"assistant\",\"content\":\"ANSWER\"}\n" +
+			"{\"role\":\"meta\",\"type\":\"session.resume_hint\",\"session_id\":\"%ID%\"}\n", true},
+		{"grok", "{\"type\":\"text\",\"data\":\"ANS\"}\n{\"type\":\"text\",\"data\":\"" + big + "\"}\n" +
+			"{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", false},
+		{"grok", "{\"type\":\"text\",\"data\":\"" + big + "\"}\n{\"type\":\"tool_call\"}\n{\"type\":\"text\",\"data\":\"ANSWER\"}\n" +
+			"{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"%ID%\"}\n", true},
+		{"agy", "{\"event\":\"init\",\"conversation_id\":\"%ID%\"}\n{\"event\":\"result\",\"result\":{\"conversation_id\":\"%ID%" +
+			"\",\"status\":\"SUCCESS\",\"response\":\"ANSWER\"}}\n{\"event\":\"step_update\",\"pad\":\"" + big + "\"}\n", false},
+	}
+	for i, c := range cases {
+		s, err := PrepareSession(t.TempDir(), "worker", c.provider, Builtin()[c.provider])
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := s.record.ID
+		if id == "" {
+			id = fixtureSessionID(c.provider)
+		}
+		if _, err := s.Output("stdout", []byte(strings.ReplaceAll(c.fixture, "%ID%", id))); err != nil {
+			t.Fatalf("case %d: %v", i, err)
+		}
+		body, err := s.Reply(RunSpec{}, Result{ExitCode: 0})
+		if c.ok && (err != nil || body != "ANSWER") {
+			t.Errorf("case %d (%s): reply = %q, %v", i, c.provider, body, err)
+		}
+		if !c.ok && (err == nil || !strings.Contains(err.Error(), "output limit")) {
+			t.Errorf("case %d (%s): partial answer accepted: %q, %v", i, c.provider, body, err)
+		}
+	}
+}
+
 func TestSessionClaudeDiagnosticDoesNotHideFailures(t *testing.T) {
 	for _, trailing := range []string{"not-json\n", "{\"type\":", "null\n", claudeMCPDiagnosticFixture + " unexpected suffix\n"} {
 		s, err := PrepareSession(t.TempDir(), "worker", "claude", Builtin()["claude"])
