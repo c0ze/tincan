@@ -118,6 +118,82 @@ func TestGCSweepsAbandonedReplyChannelsOnly(t *testing.T) {
 	}
 }
 
+// A receiver creates its inbox and publishes its presence token under the
+// transport lock, so gc (which sweeps under the same lock) never sees an old
+// empty reply channel half-registered and removes it underneath the receiver.
+func TestReceiverRegistersUnderTransportLock(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+	channel := "r-" + envelope.NewID()
+	lock, err := sp.lockTransport(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sp.ClaimContext(ctx, channel, 10*time.Second)
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if entries, _ := os.ReadDir(sp.presentNameDir(channel)); len(entries) != 0 {
+		t.Fatalf("token published without the transport lock: %v", entries)
+	}
+	lock.Close()
+	waitForPresenceFile(t, room, channel)
+	cancel()
+	<-done
+}
+
+// If a parked receiver's inbox disappears between polls anyway, the receiver
+// recreates it under the lock and keeps waiting.
+func TestParkedReceiverSurvivesItsInboxBeingRemoved(t *testing.T) {
+	room := t.TempDir()
+	sp, _ := Open(room)
+	channel := "r-" + envelope.NewID()
+	got := make(chan error, 1)
+	go func() {
+		_, err := sp.Recv(channel, 10*time.Second, false)
+		got <- err
+	}()
+	waitForPresenceFile(t, room, channel)
+	// Remove it the way a sweep would: between polls, under the lock.
+	lock, err := sp.lockTransport(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = os.Remove(sp.InboxDir(channel))
+	lock.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond) // several polls without an inbox
+	if err := sp.Send(msg("worker", channel, "reply", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-got; err != nil {
+		t.Fatalf("receiver failed after its inbox was removed: %v", err)
+	}
+}
+
+// A channel directory that gained an entry after gc checked it stops the
+// sweep of that channel instead of failing gc.
+func TestChannelRemovalStopsAtNonEmptyDirectory(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	channel := "r-" + envelope.NewID()
+	writeToken(t, sp, channel, "late", presenceFile{PID: os.Getpid(), Since: time.Now().UTC(), Start: selfStart()})
+	if err := os.MkdirAll(sp.InboxDir(channel), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := removeChannelDirs([]string{sp.presentNameDir(channel), sp.InboxDir(channel)})
+	if err != nil || removed {
+		t.Fatalf("removeChannelDirs = %v, %v; want false, nil", removed, err)
+	}
+	if _, err := os.Lstat(sp.InboxDir(channel)); err != nil {
+		t.Fatalf("inbox removed although the channel is in use: %v", err)
+	}
+}
+
 // Temporary files of a crashed send, presence write, claim record or
 // .gitignore write are collected once older than the retention; fresh ones
 // may still be in use. Only the exact names the spool itself generates, in

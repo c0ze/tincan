@@ -225,14 +225,10 @@ func (s *Spool) claim(ctx context.Context, name string, timeout time.Duration, o
 		return nil, err
 	}
 	inbox := s.InboxDir(name)
-	if err := fsutil.MkdirPrivate(inbox); err != nil {
-		return nil, err
-	}
-	if err := s.checkCaseAlias(name); err != nil {
-		return nil, err
-	}
 	token := envelope.NewID()
-	s.writePresence(name, token)
+	if err := s.register(ctx, name, token); err != nil {
+		return nil, err
+	}
 	defer s.removePresence(name, token)
 	watcher, watchErr := fsnotify.NewWatcher()
 	var events <-chan fsnotify.Event
@@ -334,6 +330,26 @@ func (s *Spool) sameInbox(a, b string) bool {
 	}
 	bi, err := os.Lstat(s.InboxDir(b))
 	return err == nil && os.SameFile(ai, bi)
+}
+
+// register creates name's inbox and publishes this receive's presence token
+// while holding the transport lock. gc sweeps abandoned reply channels under
+// the same lock, so it never removes a channel between a receiver creating
+// (or finding) its inbox and announcing itself in it.
+func (s *Spool) register(ctx context.Context, name, token string) error {
+	lock, err := s.lockTransport(ctx)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := fsutil.MkdirPrivate(s.InboxDir(name)); err != nil {
+		return err
+	}
+	if err := s.checkCaseAlias(name); err != nil {
+		return err
+	}
+	s.writePresence(name, token)
+	return nil
 }
 
 // retryClaimOp runs op, retrying briefly while it fails with a Windows

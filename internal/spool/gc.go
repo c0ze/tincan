@@ -180,10 +180,23 @@ func (s *Spool) sweepChannel(name string, before time.Time) (bool, error) {
 			return false, nil
 		}
 	}
+	return removeChannelDirs(dirs)
+}
+
+// removeChannelDirs removes a channel's directories in order, presence first
+// and inbox last. Receivers register under the transport lock that gc holds,
+// but an older tincan does not: a directory that gained an entry since it was
+// checked stops the sweep, leaving the rest of the channel in place.
+func removeChannelDirs(dirs []string) (bool, error) {
 	for _, dir := range dirs {
-		if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
-			return false, err
+		err := os.Remove(dir)
+		if err == nil || os.IsNotExist(err) {
+			continue
 		}
+		if entries, readErr := os.ReadDir(dir); readErr == nil && len(entries) > 0 {
+			return false, nil
+		}
+		return false, err
 	}
 	return true, nil
 }

@@ -189,7 +189,9 @@ func (s *Spool) TryClaim(ctx context.Context, name string) (*Delivery, bool, err
 // owned records this process as the claim's owner (ClaimInteractive).
 func (s *Spool) claimOldestLocked(ctx context.Context, name string, owned bool) (*Delivery, bool, error) {
 	inbox := s.InboxDir(name)
-	if err := fsutil.CheckDir(inbox); err != nil {
+	// Recreate an inbox removed while this receiver waited (gc of an old
+	// reply channel by an older tincan, manual cleanup); symlinks still fail.
+	if err := fsutil.MkdirPrivate(inbox); err != nil {
 		return nil, false, err
 	}
 	if err := s.requeueAbandoned(name); err != nil {
