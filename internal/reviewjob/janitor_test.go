@@ -62,6 +62,49 @@ func countRuns(t *testing.T, ws, _ string) int {
 	return strings.Count(string(data), "\n")
 }
 
+// Seven days after expiry a record is forgotten only once its workspace is
+// cleaned up, under the job lock, and the lock file stays (lock files are
+// never unlinked: that would allow split ownership).
+func TestJanitorForgetsOnlyCleanedRecords(t *testing.T) {
+	s := testService(t, "echo")
+	ctx := context.Background()
+	exp := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	req := jobRequest("rv-0000000000000000-f", "p", exp)
+	s.Create(ctx, req)
+	s.Wait()
+	done := waitTerminal(t, s, req.JobID)
+	st := s.store()
+	s.Now = func() time.Time { return exp.Add(TombstoneKeep + time.Hour) }
+	s.down = func(context.Context, string, string, time.Duration) error { return errors.New("host busy") }
+	s.Janitor(ctx)
+	if _, ok, _ := st.Get(req.JobID); !ok {
+		t.Fatal("record forgotten although its workspace could not be cleaned")
+	}
+	if _, err := os.Stat(done.Workspace); err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	s.down = nil
+	held, err := st.Lock(ctx, req.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Janitor(ctx)
+	if _, ok, _ := st.Get(req.JobID); !ok {
+		t.Fatal("record removed while another operation held the job lock")
+	}
+	held.Close()
+	s.Janitor(ctx)
+	if _, ok, _ := st.Get(req.JobID); ok {
+		t.Fatal("cleaned record kept")
+	}
+	if _, err := os.Stat(done.Workspace); !os.IsNotExist(err) {
+		t.Fatalf("workspace kept: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(st.jobsDir(), req.JobID+".lock")); err != nil {
+		t.Fatalf("lock file unlinked: %v", err)
+	}
+}
+
 // A cleanup that could not stop the listener is retried on the next pass,
 // not recorded as done.
 func TestJanitorRetriesFailedCleanup(t *testing.T) {

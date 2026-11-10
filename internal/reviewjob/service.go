@@ -448,18 +448,22 @@ func (s *Service) Janitor(ctx context.Context) error {
 	}
 	now := s.now()
 	for _, j := range jobs {
-		if now.After(j.ExpiresAt.Add(TombstoneKeep)) {
-			s.cleanup(ctx, j)
-			st.Remove(j.ID)
-			os.Remove(s.packetPath(j.ID))
-			continue
-		}
 		lock, err := st.TryLock(j.ID)
 		if err != nil {
 			continue // creation or another operation holds it
 		}
 		cur, ok, err := st.Get(j.ID)
 		if err != nil || !ok {
+			lock.Close()
+			continue
+		}
+		if now.After(cur.ExpiresAt.Add(TombstoneKeep)) {
+			// Forget the record only once nothing is left behind; a failed
+			// cleanup is retried on the next pass.
+			if cur.Cleaned || s.cleanup(ctx, cur) {
+				st.Remove(cur.ID)
+				os.Remove(s.packetPath(cur.ID))
+			}
 			lock.Close()
 			continue
 		}

@@ -484,7 +484,9 @@ docs list this as residual risk.
 cancelled — or 1 hour after `expires_at` for anything else — it imports any
 terminal request result not yet imported, stops the listener (`host.Down`,
 wait for exit) and removes the workspace; records and
-tombstones are removed 7 days after `expires_at`. Workspaces are never
+tombstones are removed 7 days after `expires_at`, under the job lock and only
+once that cleanup has succeeded (otherwise retried on the next pass). Job lock
+files are never removed (unlinking a lock file permits split ownership). Workspaces are never
 registered as rooms (phase 1 §15.3), so room passes never see them.
 
 ### 6.7 Machine-link API (added to phase 1's `tincan web`)

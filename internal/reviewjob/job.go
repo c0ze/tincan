@@ -159,14 +159,15 @@ func (s Store) List() ([]Job, error) {
 	return out, nil
 }
 
+// Remove deletes the job record; the caller holds the job lock. The lock
+// file itself stays: unlinking a lock file another process may be waiting
+// on would let two owners hold "the" lock (see filelock).
 func (s Store) Remove(id string) error {
 	if err := validID(id); err != nil {
 		return err
 	}
-	for _, p := range []string{s.Path(id), filepath.Join(s.jobsDir(), id+".lock")} {
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
+	if err := os.Remove(s.Path(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	return nil
 }
