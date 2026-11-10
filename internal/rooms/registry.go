@@ -166,9 +166,13 @@ func TouchQuiet(room string, stderr io.Writer) {
 	}
 }
 
+// maxRegistryBytes bounds the registry read; a room entry is a few hundred
+// bytes, so this is far beyond any real registry.
+const maxRegistryBytes int64 = 4 << 20
+
 func (r *Registry) read() (file, error) {
 	var f file
-	data, err := os.ReadFile(r.path)
+	data, err := fsutil.ReadFile(r.path, maxRegistryBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return f, nil
 	}

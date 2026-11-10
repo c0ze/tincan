@@ -108,6 +108,21 @@ func TestRejectsUnsafePortableComponents(t *testing.T) {
 	}
 }
 
+// Windows reserves COM0/LPT0, the superscript-digit ports and the console
+// devices too, and ignores trailing spaces and dots in a device's base name.
+func TestRejectsAllWindowsDeviceNames(t *testing.T) {
+	for _, bad := range []string{"COM0", "lpt0.log", "COM¹", "lpt³.x", "CONIN$", "conout$.txt", "NUL .x", "con..x", "AUX. .y"} {
+		if err := ValidComponent(bad); err == nil {
+			t.Errorf("accepted Windows device name %q", bad)
+		}
+	}
+	for _, good := range []string{"COM10", "LPT", "console", "nul-agent", "CONIN", "auxiliary.x", "com1x"} {
+		if err := ValidComponent(good); err != nil {
+			t.Errorf("rejected ordinary component %q: %v", good, err)
+		}
+	}
+}
+
 func TestUnmarshalRejectsMissingEnvelopeFields(t *testing.T) {
 	for _, data := range []string{"null", "{}", `{"id":"safe","from":"a","ts":"2026-07-03T12:00:00Z"}`, `{"id":"../escape","from":"a","to":"b","ts":"2026-07-03T12:00:00Z"}`} {
 		if _, err := Unmarshal([]byte(data)); err == nil {

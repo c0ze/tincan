@@ -25,6 +25,35 @@ func mkroom(t *testing.T, parts ...string) string {
 	return c
 }
 
+// The registry is read like every other state file: bounded, and never
+// through a symlink planted at its path.
+func TestRegistryReadIsBoundedAndRefusesSymlinks(t *testing.T) {
+	r := tempRegistry(t)
+	if err := os.MkdirAll(filepath.Dir(r.path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	big := `{"rooms":[],"pad":"` + strings.Repeat("x", int(maxRegistryBytes)) + `"}`
+	if err := os.WriteFile(r.path, []byte(big), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.List(); err == nil {
+		t.Fatal("oversized registry was read")
+	}
+	if err := os.Remove(r.path); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "elsewhere.json")
+	if err := os.WriteFile(target, []byte(`{"rooms":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, r.path); err != nil {
+		t.Skip("symlinks unavailable")
+	}
+	if _, err := r.List(); err == nil {
+		t.Fatal("registry read through a symlink")
+	}
+}
+
 func TestTouchIsIdempotentAndStableID(t *testing.T) {
 	r := tempRegistry(t)
 	room := mkroom(t, "proj")

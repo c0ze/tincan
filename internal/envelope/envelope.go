@@ -77,12 +77,27 @@ func ValidComponent(value string) error {
 			return fmt.Errorf("tincan: invalid name or ID %q", value)
 		}
 	}
-	base := strings.ToUpper(strings.SplitN(value, ".", 2)[0])
-	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" ||
-		(len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9') {
+	// Windows resolves a device name before the first dot and ignores trailing
+	// spaces there, so "NUL .x" opens NUL just like "nul.txt".
+	base := strings.TrimRight(strings.ToUpper(strings.SplitN(value, ".", 2)[0]), " ")
+	if windowsDevice(base) {
 		return fmt.Errorf("tincan: reserved name or ID %q", value)
 	}
 	return nil
+}
+
+// windowsDevice reports the reserved device base names: CON, PRN, AUX, NUL,
+// the console streams, and COM/LPT ports 0-9 including the superscript digits.
+func windowsDevice(base string) bool {
+	switch base {
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
+		return true
+	}
+	if len(base) < 4 || (base[:3] != "COM" && base[:3] != "LPT") {
+		return false
+	}
+	port := base[3:]
+	return (len(port) == 1 && port[0] >= '0' && port[0] <= '9') || port == "¹" || port == "²" || port == "³"
 }
 
 // Validate checks the parts of an envelope used for routing or filesystem paths.
