@@ -369,6 +369,8 @@ func (s *Spool) ListInFlight(name string) ([]*Delivery, error) {
 // It returns interrupted claims for reporting/acknowledgment, and clears empty
 // gates left by a crash before rename or after acknowledgment. It never retries
 // commands: callers should report their outcome as interrupted/uncertain.
+// Interactive claims (ClaimInteractive) whose owner is still running are left
+// to that owner; those of a dead owner are taken over and no longer requeued.
 func (s *Spool) RecoverInFlight(name string) ([]*Delivery, error) {
 	return s.listInFlight(name, true)
 }
@@ -417,6 +419,18 @@ func (s *Spool) listInFlight(name string, recoverEmpty bool) ([]*Delivery, error
 			continue
 		}
 		if recoverEmpty {
+			// An interactive claim belongs to its recorded owner while that
+			// process runs; it will Ack or Nack the claim itself. Otherwise
+			// recovery takes the claim over, under this same lock, so that
+			// requeueAbandoned can no longer deliver it a second time.
+			if alive, err := s.ownerAlive(name, ent.Name()); err != nil {
+				return nil, err
+			} else if alive {
+				continue
+			}
+			if err := s.clearOwner(name, ent.Name()); err != nil {
+				return nil, err
+			}
 			// An interrupted explicit Nack may have published an inbox link
 			// before removing its durable claim. Preserve that duplicate as
 			// evidence rather than executing uncertain work after recovery.

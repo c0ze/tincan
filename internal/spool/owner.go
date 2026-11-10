@@ -120,6 +120,29 @@ func (s *Spool) setOwner(name, filename string, owned bool) error {
 	return err
 }
 
+// readOwner returns a claim's owner record; ok is false when it has none or
+// the record is unreadable.
+func (s *Spool) readOwner(name, filename string) (rec presenceFile, ok bool) {
+	data, err := fsutil.ReadFile(filepath.Join(s.ownerDir(name), filename), 4096)
+	if err != nil || json.Unmarshal(data, &rec) != nil {
+		return presenceFile{}, false
+	}
+	return rec, true
+}
+
+// ownerAlive reports whether a claim has an owner record whose process may
+// still be running. The caller holds the transport lock.
+func (s *Spool) ownerAlive(name, filename string) (bool, error) {
+	if err := fsutil.CheckDir(s.ownerDir(name)); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	rec, ok := s.readOwner(name, filename)
+	return ok && ownerLiveness(rec.PID, rec.Start, rec.Since) == ownerAlive, nil
+}
+
 // clearOwner removes a claim's owner record, if any.
 func (s *Spool) clearOwner(name, filename string) error {
 	err := os.Remove(filepath.Join(s.ownerDir(name), filename))
@@ -155,15 +178,8 @@ func (s *Spool) requeueAbandoned(name string) error {
 		if ent.IsDir() || strings.HasPrefix(filename, ".") || !strings.HasSuffix(filename, ".json") {
 			continue // WriteFileAtomic temporaries and anything unexpected
 		}
-		data, err := fsutil.ReadFile(filepath.Join(dir, filename), 4096)
-		if err != nil {
-			continue
-		}
-		var rec presenceFile
-		if err := json.Unmarshal(data, &rec); err != nil {
-			continue
-		}
-		if ownerLiveness(rec.PID, rec.Start, rec.Since) != ownerDead {
+		rec, ok := s.readOwner(name, filename)
+		if !ok || ownerLiveness(rec.PID, rec.Start, rec.Since) != ownerDead {
 			continue
 		}
 		d, err := s.readDelivery(name, filename)

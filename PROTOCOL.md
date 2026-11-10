@@ -394,7 +394,10 @@ acknowledging it (SIGKILL, a crash, a failed requeue), so a receive that
 re-arms loses nothing. This is at-least-once: a receiver killed after printing
 a message but before acknowledging it delivers that message again. Claims of
 live owners, and claims with no owner record (hosted listeners, MCP request
-collection, older tincan versions), are never requeued this way. `status`
+collection, older tincan versions), are never requeued this way. Hosted and
+MCP recovery of in-flight work leaves a live interactive owner's claim alone,
+and takes a dead owner's claim over (removing its record) instead of letting
+it be requeued as well. `status`
 counts claimed but unacknowledged messages per name (`INFLIGHT`, JSON
 `in_flight`).
 

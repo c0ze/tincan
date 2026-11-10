@@ -53,6 +53,66 @@ func TestAbandonedInteractiveClaimIsRequeued(t *testing.T) {
 	}
 }
 
+// Recovery that hands out a dead interactive receiver's claim takes it over:
+// a later receive must not requeue that claim as well (double delivery, and
+// recovery's Ack removing the second receiver's claim).
+func TestRecoveredInteractiveClaimIsNotRequeuedAgain(t *testing.T) {
+	if room := os.Getenv("TINCAN_TEST_RECOVER_ROOM"); room != "" {
+		sp, err := Open(room)
+		if err != nil {
+			os.Exit(2)
+		}
+		if _, err := sp.ClaimInteractive(context.Background(), "r-chan", time.Second); err != nil {
+			os.Exit(3)
+		}
+		os.Exit(0)
+	}
+	room := t.TempDir()
+	sp, _ := Open(room)
+	e := msg("worker", "r-chan", "reply", 1)
+	if err := sp.Send(e); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRecoveredInteractiveClaimIsNotRequeuedAgain$")
+	cmd.Env = append(os.Environ(), "TINCAN_TEST_RECOVER_ROOM="+room)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("claim subprocess: %v: %s", err, out)
+	}
+	claims, err := sp.RecoverInFlight("r-chan")
+	if err != nil || len(claims) != 1 || claims[0].Envelope.ID != e.ID {
+		t.Fatalf("recovered %v, %v", claims, err)
+	}
+	if d, ok, err := sp.TryClaim(context.Background(), "r-chan"); err != nil || ok {
+		t.Fatalf("recovered claim delivered again: %+v, %v, %v", d, ok, err)
+	}
+	if err := claims[0].Ack(false); err != nil {
+		t.Fatal(err)
+	}
+	if p, _, _ := sp.Present("r-chan"); p.Queued != 0 || p.InFlight != 0 {
+		t.Fatalf("after recovery Ack: %+v", p)
+	}
+}
+
+// Recovery never hands out a claim whose recorded owner is still running:
+// that receiver will Ack or Nack it itself.
+func TestRecoveryLeavesLiveInteractiveClaim(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	if err := sp.Send(msg("orch", "worker", "mine", 1)); err != nil {
+		t.Fatal(err)
+	}
+	d, err := sp.ClaimInteractive(context.Background(), "worker", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := sp.RecoverInFlight("worker")
+	if err != nil || len(claims) != 0 {
+		t.Fatalf("recovery took a live claim: %v, %v", claims, err)
+	}
+	if err := d.Ack(false); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A live owner's claim is never requeued, and Ack and Nack clear the record.
 func TestLiveInteractiveClaimIsNotRequeued(t *testing.T) {
 	sp, _ := Open(t.TempDir())
