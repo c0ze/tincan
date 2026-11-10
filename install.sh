@@ -250,22 +250,33 @@ install_skills() {
 # stdio servers in the session's project, and `tincan mcp` uses that project's
 # git work tree as the room. No PATH is frozen into the registration; tincan
 # searches PATH and common per-user bin directories when it launches agents.
+# Neither `claude mcp add` nor `codex mcp add` can replace an entry, so the old
+# one is removed first. If the add then fails, stop and say how to restore it.
+mcp_add_failed() { # mcp_add_failed <client> <command that registers tincan>
+  echo "!! $1 could not register tincan; its previous tincan entry, if any, was removed." >&2
+  echo "   Restore it with: $2" >&2
+  exit 1
+}
+
 register_mcp() {
   local bin="${INSTALLED_BIN:-$(command -v tincan || true)}"
   if [ -z "$bin" ]; then
     echo "!! tincan binary not found; install it before --mcp" >&2
     exit 1
   fi
-  local registered=0
+  local registered=0 qbin
+  qbin="$(printf '%q' "$bin")"
   if command -v claude >/dev/null 2>&1; then
     claude mcp remove tincan -s user >/dev/null 2>&1 || true
-    claude mcp add -s user tincan -- "$bin" mcp
+    claude mcp add -s user tincan -- "$bin" mcp ||
+      mcp_add_failed "Claude Code" "claude mcp add -s user tincan -- $qbin mcp"
     echo ">> Claude Code: registered tincan (user scope; room = session project)"
     registered=1
   fi
   if command -v codex >/dev/null 2>&1; then
     codex mcp remove tincan >/dev/null 2>&1 || true
-    codex mcp add tincan -- "$bin" mcp
+    codex mcp add tincan -- "$bin" mcp ||
+      mcp_add_failed "Codex" "codex mcp add tincan -- $qbin mcp"
     echo ">> Codex: registered tincan (room = session project)"
     registered=1
   fi

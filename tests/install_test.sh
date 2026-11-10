@@ -230,6 +230,20 @@ fi
 grep -q "WARNING: 'tincan' on PATH is $case_dir/clients/tincan" "$case_dir/output" ||
   fail 'shadowing tincan was not reported'
 
+# Neither CLI can replace an entry, so a failed add after the remove must stop
+# and print the command that restores the registration.
+new_case mcp_add_fails
+fake_release
+fake_clients
+printf '#!/bin/sh\necho "$*" >>"%s/claude.args"\ncase "$*" in "mcp add"*) exit 1 ;; esac\n' \
+  "$case_dir" >"$case_dir/clients/claude"
+if test_path="$case_dir/clients:$PATH" install_release --bin-only --mcp; then
+  fail 'failed claude registration was reported as success'
+fi
+grep -qF "Restore it with: claude mcp add -s user tincan -- $case_dir/bin/tincan mcp" "$case_dir/output" ||
+  fail "no restore command after failed registration: $(cat "$case_dir/output")"
+[ ! -e "$case_dir/codex.args" ] || fail 'kept changing registrations after a failure'
+
 new_case no_shadow_warning
 fake_release
 test_path="$case_dir/bin:$PATH" install_release --bin-only || fail "install failed: $(cat "$case_dir/output")"
