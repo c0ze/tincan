@@ -66,6 +66,9 @@ func Decide(cacheDir, configPath, preset string, now time.Time) Decision {
 		return no("quota cache unreadable: " + err.Error())
 	}
 	e, err := Parse(id, raw, now)
+	if errors.Is(err, errNotCache) {
+		return no("no cached quota reading for " + id)
+	}
 	if err != nil {
 		return no("quota cache malformed")
 	}

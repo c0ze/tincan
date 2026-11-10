@@ -90,11 +90,28 @@ func pct(raw map[string]any, key string) *float64 {
 	return &v
 }
 
+// quotaFields are the keys Parse understands. A file with none of them (a
+// refresher's session or credential file whose name matches) is not a cache.
+var quotaFields = []string{"percent", "reset_at", "reset_secs", "short_percent", "short_reset_at", "fetched_at", "attempted_at", "error"}
+
+// errNotCache marks a file that matches the cache name but holds no reading.
+var errNotCache = errors.New("not a quota cache")
+
 // Parse normalizes one cache file of either known schema.
 func Parse(id string, data []byte, now time.Time) (Entry, error) {
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return Entry{}, err
+	}
+	known := false
+	for _, key := range quotaFields {
+		if _, ok := raw[key]; ok {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return Entry{}, errNotCache
 	}
 	e := Entry{ID: id, Label: id}
 	e.FetchedAt = stamp(raw, "fetched_at", now, clockSkew)
@@ -192,6 +209,9 @@ func Load(cacheDir, configPath string, now time.Time) ([]Entry, error) {
 			continue
 		}
 		e, err := Parse(id, data, now)
+		if errors.Is(err, errNotCache) {
+			continue
+		}
 		if err != nil {
 			e = Entry{ID: id, Label: id, State: StateError, Error: "unreadable cache: " + err.Error()}
 		}

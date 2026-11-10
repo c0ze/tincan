@@ -122,6 +122,26 @@ func TestLoadDiscoversFilesAndAppliesMapping(t *testing.T) {
 	}
 }
 
+// A refresher's session or credential file can match the cache file name; it
+// is not a quota reading and none of its content may be surfaced.
+func TestLoadIgnoresFilesWithoutQuotaFields(t *testing.T) {
+	dir := t.TempDir()
+	good := []byte(`{"percent": 1, "reset_at": ` + ftoa(unix(now.Add(time.Hour))) + `, "fetched_at": ` + ftoa(unix(now.Add(-time.Minute))) + `}`)
+	os.WriteFile(filepath.Join(dir, "mimo-quota.json"), good, 0o600)
+	os.WriteFile(filepath.Join(dir, "mimo-quota-session.json"), []byte(`{"access_token": "s3cret", "cookie": "c00kie"}`), 0o600)
+	os.WriteFile(filepath.Join(dir, "grok-quota.json"), []byte(`{"schema": 2}`), 0o600)
+	entries, err := Load(dir, filepath.Join(dir, "quotas.json"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].ID != "mimo" {
+		t.Fatalf("entries %+v", entries)
+	}
+	if _, err := Parse("mimo-session", []byte(`{"access_token": "s3cret"}`), now); err == nil {
+		t.Fatal("non-cache file parsed as a reading")
+	}
+}
+
 func TestLoadMalformedConfigReturnsEntriesWithError(t *testing.T) {
 	dir := t.TempDir()
 	good := []byte(`{"percent": 1, "reset_at": ` + ftoa(unix(now.Add(time.Hour))) + `, "fetched_at": ` + ftoa(unix(now.Add(-time.Minute))) + `}`)
