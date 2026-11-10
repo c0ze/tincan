@@ -64,21 +64,49 @@ func stripCode(text string) string {
 			b.WriteString("\n")
 			continue
 		}
-		inCode := false
-		for i := 0; i < len(line); i++ {
-			if line[i] == '`' {
-				inCode = !inCode
-				b.WriteByte(' ')
+		for i := 0; i < len(line); {
+			if line[i] != '`' {
+				b.WriteByte(line[i])
+				i++
 				continue
 			}
-			if inCode && line[i] != '\n' {
-				b.WriteByte(' ')
-				continue
+			end := spanEnd(line, i)
+			for ; i < end; i++ {
+				if line[i] == '\n' {
+					b.WriteByte('\n')
+				} else {
+					b.WriteByte(' ')
+				}
 			}
-			b.WriteByte(line[i])
 		}
 	}
 	return b.String()
+}
+
+// spanEnd returns the end of the inline code span opened by the backtick
+// run at line[i]: as in CommonMark, it closes at the next run of exactly as
+// many backticks. An unclosed run is taken as code to the end of the line,
+// so text after it is never dispatched.
+func spanEnd(line string, i int) int {
+	n := 0
+	for i+n < len(line) && line[i+n] == '`' {
+		n++
+	}
+	for j := i + n; j < len(line); {
+		if line[j] != '`' {
+			j++
+			continue
+		}
+		k := j
+		for k < len(line) && line[k] == '`' {
+			k++
+		}
+		if k-j == n {
+			return k
+		}
+		j = k
+	}
+	return len(line)
 }
 
 func ParseMentions(text string) []string {
