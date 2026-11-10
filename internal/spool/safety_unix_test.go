@@ -121,6 +121,44 @@ func TestClaimReadErrorKeepsClaimInsteadOfQuarantining(t *testing.T) {
 	}
 }
 
+// Stamping a quarantined entry's mtime must touch the entry itself: for a
+// symlink that is the link, never its target outside the spool.
+func TestQuarantinedSymlinkStampsLinkNotTarget(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	if err := sp.Send(msg("a", "b", "x", 1)); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(target, []byte("not ours"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(target, old, old); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(sp.InboxDir("b"), "stray-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Lutimes(link, []unix.Timeval{unix.NsecToTimeval(old.UnixNano()), unix.NsecToTimeval(old.UnixNano())}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.quarantine(link); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(target); err != nil || !info.ModTime().Equal(old) {
+		t.Fatalf("target outside the spool restamped: %v, %v", info.ModTime(), err)
+	}
+	entries, _ := os.ReadDir(filepath.Join(sp.root, "quarantine"))
+	if len(entries) != 1 {
+		t.Fatalf("quarantine = %v", entries)
+	}
+	info, err := os.Lstat(filepath.Join(sp.root, "quarantine", entries[0].Name()))
+	if err != nil || info.Mode()&os.ModeSymlink == 0 || time.Since(info.ModTime()) > time.Hour {
+		t.Fatalf("quarantined link not stamped: %v, %v", info, err)
+	}
+}
+
 func TestPresenceIgnoresFIFOAndSymlinkWithoutBlocking(t *testing.T) {
 	sp, _ := Open(t.TempDir())
 	sp.writePresence("b", "live")

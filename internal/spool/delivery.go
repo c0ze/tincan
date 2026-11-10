@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/c0ze/tincan/v2/internal/envelope"
 	"github.com/c0ze/tincan/v2/internal/filelock"
@@ -309,15 +308,6 @@ func (s *Spool) quarantine(path string) error {
 		return err
 	}
 	return fsutil.SyncDir(filepath.Dir(path))
-}
-
-// stampMoved sets a just-moved log or quarantine entry's mtime to now. Rename
-// keeps the original mtime, and GC ages these entries by mtime, so without it
-// a message that waited longer than the retention would be collected by the
-// very next gc. Best-effort: the move has already committed.
-func stampMoved(path string) {
-	now := time.Now()
-	os.Chtimes(path, now, now)
 }
 
 func (s *Spool) quarantineQueuedDuplicate(name, filename string) error {
