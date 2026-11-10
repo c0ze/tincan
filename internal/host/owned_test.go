@@ -55,6 +55,34 @@ func TestForegroundServeWaitsOutAProbe(t *testing.T) {
 	}
 }
 
+// WithoutHost runs its callback only while no host owns the listener, and
+// holds the listener's locks meanwhile.
+func TestWithoutHostRunsOnlyWhenNoHostOwns(t *testing.T) {
+	ctx := context.Background()
+	room, sp, _, done, _ := startServe(t, echoPreset(), "fake")
+	called := false
+	if ran, err := WithoutHost(ctx, room, "agent", func() error { called = true; return nil }); err != nil || ran || called {
+		t.Fatalf("live host: ran=%v called=%v err=%v", ran, called, err)
+	}
+	stopServe(t, sp, done)
+	ran, err := WithoutHost(ctx, room, "agent", func() error {
+		called = true
+		short, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		defer cancel()
+		if owned, err := Owned(short, room, "agent"); err == nil {
+			t.Errorf("probe ran inside WithoutHost (owned=%v): the launch lock was not held", owned)
+		}
+		if l, err := filelock.Try(lifetimePath(room, "agent")); err == nil {
+			l.Close()
+			t.Error("the lifetime lock was not held")
+		}
+		return nil
+	})
+	if err != nil || !ran || !called {
+		t.Fatalf("no host: ran=%v called=%v err=%v", ran, called, err)
+	}
+}
+
 func TestOwnedReportsTheLifetimeLock(t *testing.T) {
 	ctx := context.Background()
 	empty := canonicalTempDir(t)

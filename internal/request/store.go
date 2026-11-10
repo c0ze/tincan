@@ -380,7 +380,14 @@ func Start(room string, e *envelope.Envelope) (Record, error) {
 // Finish persists a terminal result before the host replies or acknowledges its
 // delivery. Existing terminal results win, including cancellations and duplicates.
 func Finish(room string, e *envelope.Envelope, body string) (Record, error) {
-	return finish(room, e, body, nil)
+	return finish(context.Background(), room, e, body, nil)
+}
+
+// FinishContext is Finish for callers that must not wait indefinitely for
+// the journal lock (another writer may be stopped while holding it): it
+// gives up with ctx's error and records nothing.
+func FinishContext(ctx context.Context, room string, e *envelope.Envelope, body string) (Record, error) {
+	return finish(ctx, room, e, body, nil)
 }
 
 // finishInteractiveReply is used only for an actual collected reply. Its
@@ -390,14 +397,14 @@ func finishInteractiveReply(room string, e, reply *envelope.Envelope) (Record, e
 	if err := envelope.Validate(reply); err != nil {
 		return Record{}, err
 	}
-	return finish(room, e, reply.Body, reply)
+	return finish(context.Background(), room, e, reply.Body, reply)
 }
 
-func finish(room string, e *envelope.Envelope, body string, reply *envelope.Envelope) (Record, error) {
+func finish(ctx context.Context, room string, e *envelope.Envelope, body string, reply *envelope.Envelope) (Record, error) {
 	var l *filelock.Lock
 	var err error
 	if reply == nil {
-		l, err = lock(context.Background(), room, e.ID)
+		l, err = lock(ctx, room, e.ID)
 	} else {
 		if err := validID(e.ID); err != nil {
 			return Record{}, err

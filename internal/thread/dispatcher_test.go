@@ -16,6 +16,7 @@ import (
 
 	"github.com/c0ze/tincan/v2/internal/cli"
 	"github.com/c0ze/tincan/v2/internal/dispatch"
+	"github.com/c0ze/tincan/v2/internal/filelock"
 	"github.com/c0ze/tincan/v2/internal/host"
 	"github.com/c0ze/tincan/v2/internal/request"
 	"github.com/c0ze/tincan/v2/internal/thread"
@@ -366,6 +367,88 @@ func countRelaunches(d *thread.Dispatcher) *int {
 		return nil
 	}
 	return n
+}
+
+func brokenPreset(e *env) host.Preset {
+	return host.Preset{Exec: []string{filepath.Join(e.fixture, "not-installed")}, Stdin: "body", Reply: "stdout"}
+}
+
+// A submitter that starts the listener after the last failed relaunch but
+// before the turn is settled wins: its host runs the request, and the
+// dispatcher never records it interrupted.
+func TestHostStartedBeforeSettlementKeepsTheRequest(t *testing.T) {
+	e := newEnv(t, "a")
+	e.script("a", "gate", "")
+	good := e.opts.Presets["a"]
+	e.opts.Presets["a"] = brokenPreset(e)
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d := e.dispatcher()
+	thread.SetRedrive(d, time.Millisecond, 1)
+	listener := "a." + th.ID
+	mid := runningWithoutHost(t, th, e.room, listener, "a", false)
+	started := false
+	d.Hook = func(point string) error {
+		if point == "settle" && !started {
+			started = true
+			e.opts.Presets["a"] = good
+			if _, err := dispatch.Launch(context.Background(), e.opts, listener, "a", ""); err != nil {
+				t.Errorf("launch: %v", err)
+			}
+		}
+		return nil
+	}
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !started {
+		t.Fatal("the turn never reached settlement")
+	}
+	snap, _ := th.Snapshot()
+	m, _ := snap.Message(mid)
+	if r, err := request.Get(e.room, m.RequestID); err != nil || r.Terminal() {
+		t.Fatalf("request settled under a running host: %+v %v", r, err)
+	}
+	os.WriteFile(filepath.Join(e.fixture, "a.open"), nil, 0o600)
+	snap = e.settle(d, th, func(s thread.Snapshot) bool { cur, _ := s.Message(mid); return !cur.Active() })
+	if cur, _ := snap.Message(mid); cur.State != thread.StateDone || cur.Text != "done by a" {
+		t.Fatalf("turn: %+v", cur)
+	}
+}
+
+// A journal lock held by a stopped writer bounds the pass instead of
+// blocking it: the turn stays running, and a later pass settles it.
+func TestSettlementWaitsOutABusyJournal(t *testing.T) {
+	e := newEnv(t, "a")
+	e.opts.Presets["broken"] = brokenPreset(e)
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d := e.dispatcher()
+	thread.SetRedrive(d, time.Millisecond, 1)
+	thread.SetRedriveWait(d, 300*time.Millisecond)
+	mid := runningWithoutHost(t, th, e.room, "broken."+th.ID, "broken", false)
+	// The request journal's own lock (request.lock): held as a stopped writer would.
+	held, err := filelock.Try(filepath.Join(request.Dir(e.room), "locks", th.ID+"-"+mid+".lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pass := make(chan error, 1)
+	go func() { pass <- d.Reconcile(context.Background()) }()
+	select {
+	case err := <-pass:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		held.Close()
+		t.Fatal("the pass blocked on the journal lock")
+	}
+	if r, _ := request.Get(e.room, th.ID+"-"+mid); r.Terminal() {
+		t.Fatalf("settled without the journal lock: %+v", r)
+	}
+	held.Close()
+	snap := e.settle(d, th, func(s thread.Snapshot) bool { m, _ := s.Message(mid); return !m.Active() })
+	if m, _ := snap.Message(mid); m.State != thread.StateError || !strings.Contains(m.Text, "could not be restarted") {
+		t.Fatalf("turn: %+v", m)
+	}
 }
 
 // A listener that did run here and is gone, with its preset now broken:

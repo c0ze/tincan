@@ -42,10 +42,12 @@ type Dispatcher struct {
 	lock *filelock.Lock
 	// redrives tracks relaunches of running turns whose host is gone, by
 	// request ID (guarded by mu); redriveEvery spaces them (0 = 30 s) and
-	// redriveMax failed relaunches end the turn (0 = 3).
+	// redriveMax failed relaunches end the turn (0 = 3); redriveWait bounds
+	// one probe and relaunch, and one settlement (0 = 20 s).
 	redrives     map[string]*redriveState
 	redriveEvery time.Duration
 	redriveMax   int
+	redriveWait  time.Duration
 }
 
 type redriveState struct {
@@ -440,18 +442,22 @@ func (d *Dispatcher) collect(ctx context.Context, t *Thread, m Message) error {
 // false for a busy host that stops answering, so the decision comes from
 // host.Owned: an owned listener is left alone. Every failed relaunch of an
 // unowned one counts, and after redriveMax of them the request is finished
-// as interrupted unless a host owns the listener by then. Interactive
-// receivers answer through Poll and are never relaunched.
+// as interrupted inside host.WithoutHost, so no host can start meanwhile.
+// Every step is bounded by redriveWait. Interactive receivers answer through
+// Poll and are never relaunched.
 func (d *Dispatcher) redrive(ctx context.Context, r request.Record, preset string) (request.Record, error) {
 	if r.Interactive {
 		return r, nil
 	}
-	every, limit := d.redriveEvery, d.redriveMax
+	every, limit, wait := d.redriveEvery, d.redriveMax, d.redriveWait
 	if every == 0 {
 		every = 30 * time.Second
 	}
 	if limit == 0 {
 		limit = 3
+	}
+	if wait == 0 {
+		wait = 20 * time.Second
 	}
 	now := time.Now()
 	d.mu.Lock()
@@ -475,7 +481,7 @@ func (d *Dispatcher) redrive(ctx context.Context, r request.Record, preset strin
 		return r, nil
 	}
 	// One probe and relaunch hold the room pass for a bounded time.
-	pctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	pctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	if owned, err := host.Owned(pctx, d.Opts.Room, r.Agent); err != nil || owned {
 		// A host that is busy but not answering still has the request (its
@@ -497,14 +503,25 @@ func (d *Dispatcher) redrive(ctx context.Context, r request.Record, preset strin
 	if attempts < limit {
 		return r, nil
 	}
-	// A host may have taken the listener since the probe: then it has the
-	// request, and finishing it here would discard its result.
-	octx, ocancel := context.WithTimeout(ctx, 10*time.Second)
-	defer ocancel()
-	if owned, oerr := host.Owned(octx, d.Opts.Room, r.Agent); oerr != nil || owned {
+	if err := d.hook("settle"); err != nil {
+		return r, err
+	}
+	// Settle only while no host can own the listener: a host that started
+	// since the probe has the request, and its own result must win. A busy
+	// journal (a stopped writer holds it) leaves settling to a later probe.
+	sctx, scancel := context.WithTimeout(ctx, wait)
+	defer scancel()
+	text := "ERROR interrupted: hosted listener " + r.Agent + " is not running and could not be restarted: " + err.Error()
+	fin := r
+	ran, serr := host.WithoutHost(sctx, d.Opts.Room, r.Agent, func() error {
+		var ferr error
+		fin, ferr = request.FinishContext(sctx, d.Opts.Room, r.Envelope, text)
+		return ferr
+	})
+	if serr != nil || !ran {
 		return r, nil
 	}
-	return request.Finish(d.Opts.Room, r.Envelope, "ERROR interrupted: hosted listener "+r.Agent+" is not running and could not be restarted: "+err.Error())
+	return fin, nil
 }
 
 func (d *Dispatcher) handoffs(ctx context.Context, t *Thread, m Message) error {

@@ -16,6 +16,33 @@ import (
 	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
+// FinishContext gives up when the journal lock stays busy (a stopped
+// writer holds it) instead of blocking its caller forever.
+func TestFinishContextIsBounded(t *testing.T) {
+	room := t.TempDir()
+	r, err := Submit(context.Background(), room, "agent", "web", "work", "rid-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := lock(context.Background(), room, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := FinishContext(ctx, room, r.Envelope, "ERROR interrupted: gone"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("busy journal: %v", err)
+	}
+	if got, _ := Get(room, r.ID); got.Terminal() {
+		t.Fatalf("finished without the lock: %+v", got)
+	}
+	held.Close()
+	got, err := FinishContext(context.Background(), room, r.Envelope, "ERROR interrupted: gone")
+	if err != nil || got.Status != "interrupted" {
+		t.Fatalf("finish: %+v %v", got, err)
+	}
+}
+
 func TestConcurrentIdempotentSubmissionAndTerminalReplay(t *testing.T) {
 	room := t.TempDir()
 	var wg sync.WaitGroup

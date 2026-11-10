@@ -86,6 +86,37 @@ func Owned(ctx context.Context, room, name string) (bool, error) {
 	return false, nil
 }
 
+// WithoutHost runs fn only while no host can own listener name: under the
+// launch lock it takes the lifetime lock without waiting and, if it got it,
+// runs fn holding both. No host is running then, and none can start (Up, a
+// foreground Serve and Up's daemons all need one of the two), so fn may
+// settle work a host would otherwise own, as a host's start-up recovery
+// does. ran is false when a host owns the listener. ctx bounds the wait for
+// the launch lock; fn holds both locks and must itself be short and bounded.
+func WithoutHost(ctx context.Context, room, name string, fn func() error) (ran bool, err error) {
+	if err := spool.ValidName(name); err != nil {
+		return false, err
+	}
+	room, err = canonicalRoom(room)
+	if err != nil {
+		return false, err
+	}
+	launch, err := filelock.Acquire(ctx, launchPath(room, name))
+	if err != nil {
+		return false, err
+	}
+	defer launch.Close()
+	lifetime, err := filelock.Try(lifetimePath(room, name))
+	if errors.Is(err, filelock.ErrLocked) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer lifetime.Close()
+	return true, fn()
+}
+
 // Up serializes starts and waits for the exact owner's control endpoint.
 // Receiving a queued job immediately does not prevent readiness.
 func Up(ctx context.Context, o UpOptions) (UpResult, error) {
