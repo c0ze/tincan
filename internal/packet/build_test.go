@@ -135,6 +135,11 @@ func TestValidateRejectsHostilePackets(t *testing.T) {
 		"file path":  {Manifest: Manifest{Scope: "none"}, Files: map[string][]byte{"a/../../b": []byte("x")}},
 		"collision":  {Manifest: Manifest{Scope: "none", Changes: []Change{{Status: "A", Path: "A.txt", Included: true}, {Status: "A", Path: "a.txt", Included: true}}}},
 		"rename src": {Manifest: Manifest{Scope: "none", Changes: []Change{{Status: "R", Path: "ok.txt", From: ".tincan/x", Included: true}}}},
+		"symlink":    {Manifest: Manifest{Scope: "none", Changes: []Change{{Status: "A", Path: "link", NewMode: "120000", Included: true}}}},
+		"gitlink":    {Manifest: Manifest{Scope: "none", Changes: []Change{{Status: "D", Path: "sub", OldMode: "160000", Included: true}}}},
+		"base rev":   {Manifest: Manifest{Scope: "branch", BaseKind: "commit", BaseCommit: "HEAD~1"}},
+		"short base": {Manifest: Manifest{Scope: "branch", BaseKind: "commit", BaseCommit: "abc1234"}},
+		"tree opt":   {Manifest: Manifest{Scope: "branch", BaseKind: "empty", IncludedTree: "--output=/tmp/x"}},
 	} {
 		p := p
 		if err := p.Validate(); err == nil {

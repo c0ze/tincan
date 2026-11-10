@@ -397,12 +397,17 @@ promisor remote) are skipped. With lazy fetching disabled
 
 **Checkout mode** (packet `complete` and a candidate qualifies):
 1. `git clone --no-checkout --shared <candidate root> <ws>`, then
+   `git -C <ws> config core.symlinks false` (persisted, so the reviewer's own
+   `git restore`/`reset --hard` never creates a real symlink either),
    `git -C <ws> repack -a -d -q` and remove `.git/objects/info/alternates`, so
    the clone owns its objects and survives maintenance in the candidate.
 2. Base: `git -C <ws> checkout --detach <base_commit>`, or for an empty base
    `git -C <ws> checkout --orphan tincan-review` with an empty index and tree.
 3. Validate the patch before applying (below), then
-   `git -C <ws> -c core.symlinks=false apply --index --binary packet/diff.patch`.
+   `git -C <ws> -c core.symlinks=false apply --index --binary packet/diff.patch`,
+   then check what was staged: `git diff-index --cached --no-renames <base>`
+   must list only paths the manifest includes (both rename endpoints) and no
+   mode 120000 or 160000 entry.
 4. Verify `git -C <ws> write-tree` equals `included_tree`.
 Any failure removes `<ws>` entirely before falling back to packet-only mode.
 The reviewer is told that `git diff --cached` (or `git diff HEAD`) shows the
@@ -417,7 +422,8 @@ every path in the patch header — is relative, clean, without empty, `.` or
 `..` components, without a component that case-folds to `.git` or `.tincan`,
 ≤ 1 024 bytes, each component valid under `envelope.ValidComponent`; no two
 included paths may case-fold to the same string; symlink and gitlink modes are
-never applied. Packet files are created with exclusive, no-follow opens as
+never applied (an included change with either mode makes the packet invalid);
+`base_commit` and `included_tree` are full hex object IDs. Packet files are created with exclusive, no-follow opens as
 regular 0600 files in directories the materializer created itself.
 
 **Executables are pinned outside reviewed content.** The member preset's
