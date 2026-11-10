@@ -395,7 +395,8 @@ re-arms loses nothing. This is at-least-once: a receiver killed after printing
 a message but before acknowledging it delivers that message again. Claims of
 live owners, and claims with no owner record (hosted listeners, MCP request
 collection, older tincan versions), are never requeued this way. Hosted and
-MCP recovery of in-flight work leaves a live interactive owner's claim alone,
+MCP recovery of in-flight work leaves a live interactive owner's claim alone
+(as it does, like requeueing, when the owner record cannot be read or parsed),
 and takes a dead owner's claim over (removing its record) instead of letting
 it be requeued as well. An empty claim directory that a crash left behind
 (after creating it, or in a requeue after the message went back to the

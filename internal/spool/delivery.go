@@ -423,6 +423,12 @@ func (s *Spool) listInFlight(name string, recoverEmpty bool) ([]*Delivery, error
 			}
 			continue
 		}
+		// An interactive claim belongs to its recorded owner while that
+		// process may run (or while its record cannot be read); the owner
+		// will Ack or Nack it itself. Recovery leaves such a gate alone.
+		if recoverEmpty && s.ownerHolds(name, ent.Name()) {
+			continue
+		}
 		d, err := s.readDelivery(name, ent.Name())
 		if err != nil {
 			if !recoverEmpty {
@@ -437,15 +443,8 @@ func (s *Spool) listInFlight(name string, recoverEmpty bool) ([]*Delivery, error
 			continue
 		}
 		if recoverEmpty {
-			// An interactive claim belongs to its recorded owner while that
-			// process runs; it will Ack or Nack the claim itself. Otherwise
-			// recovery takes the claim over, under this same lock, so that
-			// requeueAbandoned can no longer deliver it a second time.
-			if alive, err := s.ownerAlive(name, ent.Name()); err != nil {
-				return nil, err
-			} else if alive {
-				continue
-			}
+			// Otherwise recovery takes the claim over, under this same lock,
+			// so that requeueAbandoned can no longer deliver it a second time.
 			if err := s.clearOwner(name, ent.Name()); err != nil {
 				return nil, err
 			}

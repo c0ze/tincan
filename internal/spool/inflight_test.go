@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -154,6 +155,52 @@ func TestEmptyOwnerlessGateDoesNotBlockItsMessage(t *testing.T) {
 			}
 			if _, err := os.Lstat(gate); !os.IsNotExist(err) {
 				t.Fatalf("gate kept after delivery: %v", err)
+			}
+		})
+	}
+}
+
+// An owner record that exists but cannot be read or parsed proves nothing
+// about its owner, who may be alive: recovery and requeueing leave that claim
+// (and its record) alone rather than delivering it a second time.
+func TestUnreadableOwnerRecordKeepsClaimUntouched(t *testing.T) {
+	for _, damage := range []string{"unreadable", "malformed"} {
+		t.Run(damage, func(t *testing.T) {
+			if damage == "unreadable" && (runtime.GOOS == "windows" || os.Geteuid() == 0) {
+				t.Skip("mode 000 does not deny reads here")
+			}
+			sp, _ := Open(t.TempDir())
+			e := msg("orch", "worker", "mine", 1)
+			if err := sp.Send(e); err != nil {
+				t.Fatal(err)
+			}
+			d, err := sp.ClaimInteractive(context.Background(), "worker", time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := filepath.Join(sp.ownerDir("worker"), d.filename)
+			if damage == "unreadable" {
+				err = os.Chmod(rec, 0)
+				t.Cleanup(func() { os.Chmod(rec, 0o600) })
+			} else {
+				err = os.WriteFile(rec, []byte("{not json"), 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			claims, err := sp.RecoverInFlight("worker")
+			if err != nil || len(claims) != 0 {
+				t.Fatalf("recovery took a claim with a %s owner record: %v, %v", damage, claims, err)
+			}
+			if _, err := sp.Recv("worker", 50*time.Millisecond, false); !errors.Is(err, ErrTimeout) {
+				t.Fatalf("claim with a %s owner record delivered again: %v", damage, err)
+			}
+			if _, err := os.Lstat(rec); err != nil {
+				t.Fatalf("%s owner record removed: %v", damage, err)
+			}
+			os.Chmod(rec, 0o600)
+			if err := d.Ack(false); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

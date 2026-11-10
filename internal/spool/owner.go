@@ -120,27 +120,34 @@ func (s *Spool) setOwner(name, filename string, owned bool) error {
 	return err
 }
 
-// readOwner returns a claim's owner record; ok is false when it has none or
-// the record is unreadable.
-func (s *Spool) readOwner(name, filename string) (rec presenceFile, ok bool) {
+// readOwner returns a claim's owner record. found is false only when the
+// claim has no record (an unrecorded claim, or one from an older binary). A
+// record that exists but cannot be read or parsed is an error: it proves
+// nothing about its owner, who may still be running.
+func (s *Spool) readOwner(name, filename string) (rec presenceFile, found bool, err error) {
 	data, err := fsutil.ReadFile(filepath.Join(s.ownerDir(name), filename), 4096)
-	if err != nil || json.Unmarshal(data, &rec) != nil {
-		return presenceFile{}, false
+	if err != nil {
+		if os.IsNotExist(err) {
+			return presenceFile{}, false, nil
+		}
+		return presenceFile{}, true, err
 	}
-	return rec, true
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return presenceFile{}, true, err
+	}
+	return rec, true, nil
 }
 
-// ownerAlive reports whether a claim has an owner record whose process may
-// still be running. The caller holds the transport lock.
-func (s *Spool) ownerAlive(name, filename string) (bool, error) {
-	if err := fsutil.CheckDir(s.ownerDir(name)); err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
+// ownerHolds reports whether a claim must be left to its recorded owner:
+// the record names a process that may still run, or exists but cannot be
+// read. Only a missing record or a provably exited (or replaced) owner lets
+// the caller take the claim over. The caller holds the transport lock.
+func (s *Spool) ownerHolds(name, filename string) bool {
+	rec, found, err := s.readOwner(name, filename)
+	if !found {
+		return false
 	}
-	rec, ok := s.readOwner(name, filename)
-	return ok && ownerLiveness(rec.PID, rec.Start, rec.Since) == ownerAlive, nil
+	return err != nil || ownerLiveness(rec.PID, rec.Start, rec.Since) == ownerAlive
 }
 
 // clearOwner removes a claim's owner record, if any.
@@ -178,8 +185,9 @@ func (s *Spool) requeueAbandoned(name string) error {
 		if ent.IsDir() || strings.HasPrefix(filename, ".") || !strings.HasSuffix(filename, ".json") {
 			continue // WriteFileAtomic temporaries and anything unexpected
 		}
-		rec, ok := s.readOwner(name, filename)
-		if !ok || ownerLiveness(rec.PID, rec.Start, rec.Since) != ownerDead {
+		// An unreadable or malformed record is left alone with its claim.
+		rec, found, err := s.readOwner(name, filename)
+		if !found || err != nil || ownerLiveness(rec.PID, rec.Start, rec.Since) != ownerDead {
 			continue
 		}
 		d, err := s.readDelivery(name, filename)
