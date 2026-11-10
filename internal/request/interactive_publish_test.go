@@ -131,7 +131,7 @@ func TestNativeSubmitStillRepairsInterruptedEnqueue(t *testing.T) {
 	room := t.TempDir()
 	e := &envelope.Envelope{ID: "native-enqueue", From: "test", To: "worker", TS: time.Now().UTC(), Body: "native task"}
 	saved := newRecord(e)
-	saved.Publication = publicationPending // saved, then the process lost before Send
+	saved.Publication = publicationPending // left by a Send that reported a failure
 	if err := save(room, saved); err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestNativeRetryDoesNotRepublishConsumedRequest(t *testing.T) {
 	room := t.TempDir()
 	ctx := context.Background()
 	r, err := Submit(ctx, room, "worker", "test", "one side effect", "native-once")
-	if err != nil || r.Publication != publicationConfirmed {
+	if err != nil || r.Publication != publicationAttempted {
 		t.Fatalf("publication=%+v, %v", r, err)
 	}
 	sp, err := spool.Open(room)
@@ -173,6 +173,75 @@ func TestNativeRetryDoesNotRepublishConsumedRequest(t *testing.T) {
 	}
 	if _, err := sp.Recv(r.Agent, 20*time.Millisecond, false); !errors.Is(err, spool.ErrTimeout) {
 		t.Fatalf("native work was republished: %v", err)
+	}
+}
+
+// The record must forbid a resend before the envelope can reach the spool:
+// a crash after Send (before any later save) must not leave a retry free to
+// publish again once a recv has consumed the first copy.
+func TestNativeRecordForbidsResendBeforeEnqueue(t *testing.T) {
+	room, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	transport, err := filelock.Acquire(ctx, filepath.Join(room, ".tincan", "transport.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := Submit(ctx, room, "worker", "test", "task", "ordered")
+		done <- err
+	}()
+	// Send now waits for the transport lock; the record is already final.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r, err := Get(room, "ordered")
+		if err == nil && r.Publication == publicationAttempted {
+			break
+		}
+		if time.Now().After(deadline) {
+			transport.Close()
+			<-done
+			t.Fatalf("record still allows a resend while Send runs: %+v, %v", r, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	transport.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A Send that reports an error before publishing leaves the request for the
+// documented same-ID repair.
+func TestNativeSendErrorKeepsSameIDRepair(t *testing.T) {
+	room := t.TempDir()
+	ctx := context.Background()
+	tmp := filepath.Join(room, ".tincan", "tmp")
+	if err := os.MkdirAll(filepath.Dir(tmp), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmp, nil, 0o600); err != nil { // Send cannot stage its write
+		t.Fatal(err)
+	}
+	r, err := Submit(ctx, room, "worker", "test", "task", "send-error")
+	if err == nil || !strings.Contains(err.Error(), "retry the same request_id") {
+		t.Fatalf("send error: %+v %v", r, err)
+	}
+	if saved, err := Get(room, r.ID); err != nil || saved.Publication != publicationPending {
+		t.Fatalf("saved %+v %v", saved, err)
+	}
+	if err := os.Remove(tmp); err != nil {
+		t.Fatal(err)
+	}
+	if r, err = Submit(ctx, room, "worker", "test", "task", r.ID); err != nil || r.Status != "queued" {
+		t.Fatalf("repair %+v %v", r, err)
+	}
+	sp, _ := spool.Open(room)
+	if _, err := sp.Recv("worker", time.Second, false); err != nil {
+		t.Fatalf("not repaired: %v", err)
 	}
 }
 

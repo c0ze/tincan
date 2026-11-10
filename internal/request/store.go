@@ -44,15 +44,17 @@ type Record struct {
 	// Only publication uncertainty can be resolved by a later validated reply;
 	// execution failures, cancellations, and other terminal results stay final.
 	InteractivePublicationUncertain bool `json:"interactive_publication_uncertain,omitempty"`
-	// Publication tracks a native request's enqueue: pending from its first
-	// save until Send succeeds, then published. Older records omit it.
+	// Publication tracks a native request's enqueue. It is saved as attempted
+	// before Send, so a retry never sends again what may already be in the
+	// spool; only a Send that reported a failure and left nothing queued
+	// reopens it as pending for a same-ID retry. Older records omit it.
 	Publication string             `json:"publication,omitempty"`
 	Envelope    *envelope.Envelope `json:"request"`
 }
 
 const (
 	publicationPending   = "pending"
-	publicationConfirmed = "published"
+	publicationAttempted = "attempted"
 )
 
 func (r Record) Terminal() bool {
@@ -140,8 +142,9 @@ func sameRequest(r Record, e *envelope.Envelope) bool {
 }
 
 // Submit is idempotent for an explicitly supplied ID and identical request.
-// Persist before enqueueing. Retrying the same ID repairs an interrupted enqueue;
-// a confirmed enqueue, a running or a completed request is never resent.
+// Persist before enqueueing. Retrying the same ID repairs an enqueue that
+// reported a failure; an attempted enqueue, a running or a completed request
+// is never resent.
 func Submit(ctx context.Context, room, agent, from, body, id string) (Record, error) {
 	return submit(ctx, room, agent, from, body, id, false)
 }
@@ -196,11 +199,19 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 			return resolveNativePublication(room, r)
 		}
 		e = r.Envelope
+		// Mark the attempt before Send: once the envelope may be in the spool,
+		// no retry may send it again, even after a crash.
+		attempt := r
+		attempt.Publication = publicationAttempted
+		if err := save(room, attempt); err != nil {
+			return r, fmt.Errorf("request %s was saved but enqueue failed; retry the same request_id: %w", id, err)
+		}
+		r = attempt
 	} else if errors.Is(err, os.ErrNotExist) {
 		r = newRecord(e)
 		r.Interactive = needsReply
 		if !needsReply {
-			r.Publication = publicationPending
+			r.Publication = publicationAttempted // see above
 		}
 		if err := save(room, r); err != nil {
 			return Record{}, err
@@ -220,24 +231,41 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 			}
 			return resolved, fmt.Errorf("interactive request %s dispatch returned an error and will not be resent automatically: %w", id, err)
 		}
-		return r, fmt.Errorf("request %s was saved but enqueue failed; retry the same request_id: %w", id, err)
+		return reopenEnqueue(room, r, err)
 	}
 	if r.Interactive {
 		r.InteractivePublished = true
 		if err := save(room, r); err != nil {
 			return r, fmt.Errorf("interactive request %s was published but confirmation failed; retry the same request_id to inspect without resending: %w", id, err)
 		}
-	} else {
-		r.Publication = publicationConfirmed
-		if err := save(room, r); err != nil {
-			return r, fmt.Errorf("request %s was enqueued but confirmation failed; retry the same request_id: %w", id, err)
-		}
 	}
 	return r, nil
 }
 
+// reopenEnqueue handles a native Send that reported sendErr. An envelope
+// that is not queued or in flight was not published, so the record returns
+// to pending and a same-ID retry sends it (the documented repair). Residual
+// window: if Send failed after its link became visible (a failed inbox sync)
+// and a consumer outside the journal (an interactive recv) took the envelope
+// before this inspection, the retry sends it a second time. That double
+// fault is accepted to keep the repair for ordinary enqueue failures.
+func reopenEnqueue(room string, r Record, sendErr error) (Record, error) {
+	found, err := findPublication(room, r)
+	if err != nil {
+		return r, fmt.Errorf("request %s enqueue failed and its publication cannot be checked, so it will not be resent; retry the same request_id to check again: %w (inspection: %v)", r.ID, sendErr, err)
+	}
+	if found {
+		return r, fmt.Errorf("request %s is queued although enqueue reported an error; retry the same request_id to launch it: %w", r.ID, sendErr)
+	}
+	r.Publication = publicationPending
+	if err := save(room, r); err != nil {
+		return r, fmt.Errorf("request %s enqueue failed and it will not be resent: %w (reopening it: %v)", r.ID, sendErr, err)
+	}
+	return r, fmt.Errorf("request %s was saved but enqueue failed; retry the same request_id: %w", r.ID, sendErr)
+}
+
 // resolveNativePublication answers a retry of a queued hosted request whose
-// enqueue was confirmed, or whose record predates confirmation. A hosted
+// enqueue was attempted, or whose record predates the field. A hosted
 // listener records running before it acknowledges, so a queued record whose
 // envelope has left the spool was consumed outside the journal (by an
 // interactive recv, for example) and may already have run. It is never

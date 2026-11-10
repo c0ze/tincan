@@ -489,10 +489,15 @@ running nor a configured preset (a typo, say) is refused before anything is
 saved. If startup fails after saving work, retain the ID from the error, launch
 the intended listener and collect or retry that same ID. A custom listener name
 such as `reviewer` needs an explicit launch with its preset after being stopped.
-A retry resends hosted work only when its enqueue was never confirmed. If a
-queued request has left the spool without a hosted listener recording it (an
-interactive `recv` consumed it, for example), the retry marks it `interrupted`
-instead of sending it again.
+The journal records each enqueue attempt before it is made. A retry resends
+hosted work only after an enqueue that reported an error and left nothing
+queued. If a queued request has left the spool without a hosted listener
+recording it (an interactive `recv` consumed it, for example), or a crash
+interrupted the enqueue, the retry marks it `interrupted` instead of sending it
+again; submit new work if it never ran. One double fault can still duplicate
+work: the enqueue reports an error after the message became visible (a failed
+directory sync) and an interactive `recv` takes it before tincan checks the
+spool. The same-ID repair of ordinary enqueue failures is kept despite that.
 
 Hosts and retained requests continue after the MCP connection closes. Reconnect
 to the same room and use the same ID with wait/status. A wait deadline does not
