@@ -533,7 +533,11 @@ Detaching (`up`) is implemented for Linux/macOS (new session, stdio to the
 log). On Windows, `up` and MCP automatic launch are unsupported; run
 `tincan serve <name> --room <path>` in a terminal first, then use MCP to send
 and collect work through that existing host. Agent processes run in a Windows
-Job Object so interruption terminates their descendants too. Process liveness
+Job Object so interruption terminates their descendants too. An agent resolved
+to a batch file (`.cmd`/`.bat`, as npm installs `claude` and `gemini`) is run
+by cmd.exe, which does not follow Go's argument quoting: a run whose arguments
+contain `" % & | ^ < > ! ( )`, CR or LF is refused with `ERROR exec`. Pass the
+body on stdin (`stdin = body`) or use a non-batch executable. Process liveness
 checks recognize exited Windows processes even while another process retains
 a handle; atomic state replacement also supports concurrent readers.
 

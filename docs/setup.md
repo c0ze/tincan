@@ -138,7 +138,12 @@ local room merely because this configuration exists on your computer.
 Each computer has its own rooms and hosts. Installing on a second computer does
 not bridge messages between machines. On Windows, start a foreground
 `tincan serve <name> --room <path>` before sending through MCP; automatic detached
-launch is supported on Linux and macOS.
+launch is supported on Linux and macOS. A Windows agent installed as a batch file
+(`claude.cmd` or `gemini.cmd` from npm) cannot take the prompt as an argument
+safely: a run whose arguments contain `" % & | ^ < > ! ( )` or a line break
+is refused with `ERROR exec`. Give such an agent a preset that reads the body
+on stdin (`"stdin": "body"`, no `{body}` in `exec`), or point `exec` at a
+non-batch executable.
 
 ## Start a session
 

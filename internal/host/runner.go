@@ -102,6 +102,9 @@ func Run(ctx context.Context, spec RunSpec) Result {
 	} else {
 		path, err = ResolveExecutable(spec.Argv[0], spec.Dir)
 	}
+	if err == nil && runtime.GOOS == "windows" {
+		err = batchArgsError(path, spec.Argv[1:])
+	}
 	if err != nil {
 		return Result{ExitCode: -1, Err: err, Duration: time.Since(start)}
 	}
@@ -225,6 +228,29 @@ func tail(b []byte, n int) []byte {
 		return b
 	}
 	return b[len(b)-n:]
+}
+
+// batchUnsafe lists the characters cmd.exe may interpret in a batch file's
+// command line, inside Go's argument quoting or not.
+const batchUnsafe = "\"%&|^<>!()\r\n"
+
+// batchArgsError refuses to run a Windows batch file (.cmd, .bat; npm installs
+// CLIs such as claude and gemini as .cmd shims) with an argument cmd.exe could
+// interpret. Go quotes arguments for the C runtime, not for cmd.exe, so a body
+// like `x" & calc & rem "` would run commands outside the agent and benign
+// bodies with % or quotes would be mangled. tincan does not attempt cmd.exe
+// escaping; the body has to arrive on stdin instead.
+func batchArgsError(path string, args []string) error {
+	lower := strings.ToLower(path)
+	if !strings.HasSuffix(lower, ".cmd") && !strings.HasSuffix(lower, ".bat") {
+		return nil
+	}
+	for _, arg := range args {
+		if i := strings.IndexAny(arg, batchUnsafe); i >= 0 {
+			return fmt.Errorf("%s is a batch file and an argument contains %q, which cmd.exe would interpret; use a preset that passes the body on stdin (--stdin body, without {body} in exec) or a non-batch executable", filepath.Base(path), arg[i])
+		}
+	}
+	return nil
 }
 
 // PinnedExecutable checks a pinned executable: an absolute path to an
