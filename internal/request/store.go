@@ -29,6 +29,22 @@ const MaxRecordBytes = spool.MaxMessageBytes + 6*MaxResultBytes + 64*1024
 
 var errReplyJournalBusy = errors.New("interactive reply journal is busy")
 
+// ErrCorruptRecord marks a failure of one ID's record file itself (unsafe,
+// too large, undecodable or invalid), and ErrIDCollision a request whose ID
+// belongs to different work. Neither is attached to failures of the shared
+// journal directories, locks or I/O. Wrapped errors keep their messages and
+// causes (errors.Is still finds fsutil.ErrUnsafeFile and the like).
+var (
+	ErrCorruptRecord = errors.New("corrupt request record")
+	ErrIDCollision   = errors.New("request ID collision")
+)
+
+// recordError attaches a sentinel to err without changing its message.
+type recordError struct{ kind, err error }
+
+func (e *recordError) Error() string   { return e.err.Error() }
+func (e *recordError) Unwrap() []error { return []error{e.kind, e.err} }
+
 type Record struct {
 	ID              string    `json:"id"`
 	Agent           string    `json:"agent"`
@@ -107,15 +123,22 @@ func Get(room, id string) (Record, error) {
 		return Record{}, err
 	}
 	data, err := fsutil.ReadFile(recordPath(room, id), MaxRecordBytes)
+	if errors.Is(err, fsutil.ErrUnsafeFile) || errors.Is(err, fsutil.ErrTooLarge) {
+		// ReadFile checks the journal directory too; only a sound directory
+		// makes the failure the record file's own.
+		if fsutil.CheckDir(Dir(room)) == nil {
+			err = &recordError{ErrCorruptRecord, err}
+		}
+	}
 	if err != nil {
 		return Record{}, err
 	}
 	var r Record
 	if err := json.Unmarshal(data, &r); err != nil {
-		return Record{}, err
+		return Record{}, &recordError{ErrCorruptRecord, err}
 	}
 	if r.ID != id || r.Envelope == nil || r.Envelope.ID != id || r.Agent != r.Envelope.To {
-		return Record{}, fmt.Errorf("corrupt request record %q", id)
+		return Record{}, &recordError{ErrCorruptRecord, fmt.Errorf("corrupt request record %q", id)}
 	}
 	return r, nil
 }
@@ -127,7 +150,7 @@ func save(room string, r Record) error {
 		return err
 	}
 	if int64(len(data)) > MaxRecordBytes {
-		return fmt.Errorf("encoded request record exceeds %d bytes", MaxRecordBytes)
+		return &recordError{ErrCorruptRecord, fmt.Errorf("encoded request record exceeds %d bytes", MaxRecordBytes)}
 	}
 	return fsutil.WriteFileAtomic(recordPath(room, r.ID), data)
 }
@@ -340,7 +363,7 @@ func Start(room string, e *envelope.Envelope) (Record, error) {
 		return Record{}, err
 	}
 	if !sameRequest(r, e) {
-		return Record{}, fmt.Errorf("request ID collision: %s", e.ID)
+		return Record{}, &recordError{ErrIDCollision, fmt.Errorf("request ID collision: %s", e.ID)}
 	}
 	if r.Terminal() {
 		return r, nil
@@ -396,7 +419,7 @@ func finish(room string, e *envelope.Envelope, body string, reply *envelope.Enve
 		return Record{}, err
 	}
 	if !sameRequest(r, e) {
-		return Record{}, fmt.Errorf("request ID collision: %s", e.ID)
+		return Record{}, &recordError{ErrIDCollision, fmt.Errorf("request ID collision: %s", e.ID)}
 	}
 	if reply != nil {
 		// A hosted handoff may have changed mode after Poll read the record.
