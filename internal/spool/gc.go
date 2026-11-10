@@ -2,7 +2,6 @@ package spool
 
 import (
 	"context"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,12 +202,17 @@ func replyChannel(name string) bool {
 	return true
 }
 
-// gcTemp removes temporary files that an interrupted write left behind:
-// tmp/send-* and tmp/present-*, and the .write-* files of atomic state writes
-// and .owner-* files of claim records anywhere in the spool. Every writer
-// removes its own temporary within moments, so one older than the cutoff
-// belongs to a process that died mid-write. log/ and quarantine/ hold
-// evidence and are not searched.
+// gcTemp removes temporary files that an interrupted spool write left
+// behind. Only the spool's own temporaries are candidates, matched by exact
+// generated name in the one directory each is created in:
+//
+//	tmp/send-<digits>          Send (os.CreateTemp)
+//	tmp/present-<32 hex>       writePresence
+//	.write-<digits>            ensureGitignore (fsutil.WriteFileAtomic in the root)
+//	owners/<name>/.owner-<digits>  setOwner (os.CreateTemp)
+//
+// Other directories (requests/, hosts/, sessions/, their locks) belong to
+// other packages and are never searched, whatever their files are called.
 func (s *Spool) gcTemp(before time.Time, stats *GCStats) error {
 	if err := fsutil.CheckDir(s.root); err != nil {
 		if os.IsNotExist(err) {
@@ -216,39 +220,79 @@ func (s *Spool) gcTemp(before time.Time, stats *GCStats) error {
 		}
 		return err
 	}
-	return filepath.WalkDir(s.root, func(path string, ent fs.DirEntry, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil // removed while walking
-			}
+	isSend := func(n string) bool { return generated(n, "send-", isDigit) }
+	isPresent := func(n string) bool { return generated(n, "present-", isHex) && len(n) == len("present-")+32 }
+	if err := s.sweepTemp(s.tmpDir(), before, stats, func(n string) bool { return isSend(n) || isPresent(n) }); err != nil {
+		return err
+	}
+	if err := s.sweepTemp(s.root, before, stats, func(n string) bool { return generated(n, ".write-", isDigit) }); err != nil {
+		return err
+	}
+	owners := filepath.Join(s.root, "owners")
+	entries, err := os.ReadDir(owners)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, ent := range entries {
+		if !ent.IsDir() || validName(ent.Name()) != nil {
+			continue
+		}
+		if err := s.sweepTemp(filepath.Join(owners, ent.Name()), before, stats, func(n string) bool { return generated(n, ".owner-", isDigit) }); err != nil {
 			return err
 		}
-		if ent.IsDir() {
-			if path == s.logDir() || path == filepath.Join(s.root, "quarantine") {
-				return filepath.SkipDir
-			}
+	}
+	return nil
+}
+
+// sweepTemp removes the regular files in dir that match and are older than
+// the cutoff. It does not descend into subdirectories.
+func (s *Spool) sweepTemp(dir string, before time.Time, stats *GCStats, match func(string) bool) error {
+	if err := fsutil.CheckDir(dir); err != nil {
+		if os.IsNotExist(err) {
 			return nil
 		}
-		name := ent.Name()
-		temp := strings.HasPrefix(name, ".write-") || strings.HasPrefix(name, ".owner-") ||
-			(filepath.Dir(path) == s.tmpDir() && (strings.HasPrefix(name, "send-") || strings.HasPrefix(name, "present-")))
-		if !temp || !ent.Type().IsRegular() {
-			return nil
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, ent := range entries {
+		if !ent.Type().IsRegular() || !match(ent.Name()) {
+			continue
 		}
 		info, err := ent.Info()
 		if err != nil {
 			if os.IsNotExist(err) {
-				return nil
+				continue
 			}
 			return err
 		}
 		if !info.ModTime().Before(before) {
-			return nil
+			continue
 		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(filepath.Join(dir, ent.Name())); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		stats.Temp++
-		return nil
-	})
+	}
+	return nil
 }
+
+// generated reports whether name is prefix followed by one or more runes
+// that all satisfy ok (os.CreateTemp fills "*" with decimal digits).
+func generated(name, prefix string, ok func(rune) bool) bool {
+	rest, found := strings.CutPrefix(name, prefix)
+	if !found || rest == "" {
+		return false
+	}
+	for _, c := range rest {
+		if !ok(c) {
+			return false
+		}
+	}
+	return true
+}
+
+func isDigit(c rune) bool { return c >= '0' && c <= '9' }
+func isHex(c rune) bool   { return isDigit(c) || (c >= 'a' && c <= 'f') }

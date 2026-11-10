@@ -117,20 +117,25 @@ func TestGCSweepsAbandonedReplyChannelsOnly(t *testing.T) {
 	}
 }
 
-// Temporary files of a crashed send, presence write or atomic state write are
-// collected once older than the retention; fresh ones may still be in use.
+// Temporary files of a crashed send, presence write, claim record or
+// .gitignore write are collected once older than the retention; fresh ones
+// may still be in use. Only the exact names the spool itself generates, in
+// the directories it generates them in, are candidates: other packages'
+// state (a request whose ID is ".write-job", its lock, host files) is never
+// touched however it is named.
 func TestGCSweepsOldTemporaryFiles(t *testing.T) {
 	sp, _ := Open(t.TempDir())
 	if err := sp.Send(msg("a", "b", "x", 1)); err != nil {
 		t.Fatal(err)
 	}
 	cutoff := time.Now().Add(-time.Hour)
-	old := cutoff.Add(-time.Hour)
-	write := func(path string, stale bool) string {
+	old := time.Now().Add(-48 * time.Hour)
+	deadToken := `{"pid":1073741824,"since":"2026-01-01T00:00:00Z","start":"x"}`
+	write := func(path, content string, stale bool) string {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte("partial"), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if stale {
@@ -140,17 +145,23 @@ func TestGCSweepsOldTemporaryFiles(t *testing.T) {
 		}
 		return path
 	}
+	requests := filepath.Join(sp.root, "requests")
 	stale := []string{
-		write(filepath.Join(sp.tmpDir(), "send-123"), true),
-		write(filepath.Join(sp.tmpDir(), "present-456"), true),
-		write(filepath.Join(sp.root, ".write-789"), true),
-		write(filepath.Join(sp.root, "hosts", ".write-abc"), true),
-		write(filepath.Join(sp.ownerDir("b"), ".owner-def"), true),
+		write(filepath.Join(sp.tmpDir(), "send-123"), "partial", true),
+		write(filepath.Join(sp.tmpDir(), "present-"+envelope.NewID()), deadToken, true),
+		write(filepath.Join(sp.root, ".write-789"), "partial", true),
+		write(filepath.Join(sp.ownerDir("b"), ".owner-456"), "partial", true),
 	}
 	kept := []string{
-		write(filepath.Join(sp.tmpDir(), "send-fresh"), false),
-		write(filepath.Join(sp.root, "hosts", ".write-fresh"), false),
-		write(filepath.Join(sp.root, "hosts", "codex.json"), true),
+		write(filepath.Join(sp.tmpDir(), "send-999"), "in use", false),
+		write(filepath.Join(sp.tmpDir(), "send-x1"), "not generated", true),
+		write(filepath.Join(sp.ownerDir("b"), ".owner-job"), "not generated", true),
+		write(filepath.Join(sp.root, "hosts", ".write-123"), "host state", true),
+		write(filepath.Join(sp.root, "hosts", "codex.json"), "host state", true),
+		write(filepath.Join(requests, ".write-job.json"), `{"status":"queued"}`, true),
+		write(filepath.Join(requests, ".write-job.jsonl"), "progress", true),
+		write(filepath.Join(requests, ".write-123"), "request write", true),
+		write(filepath.Join(requests, "locks", ".write-job.lock"), "", true),
 	}
 	stats, err := sp.GC(cutoff)
 	if err != nil || stats.Temp != len(stale) {

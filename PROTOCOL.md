@@ -441,8 +441,10 @@ when they were logged or quarantined, not from when the message was sent. The
 default age is seven days; the minimum is one hour. It also deletes presence
 files of receivers that provably exited, reply channels (`r-<hex>`) that are
 empty, unowned and unchanged for that long (a timed-out `ask` leaves one;
-`status` already hides them), and temporary files of writes interrupted that
-long ago (`tmp/send-*`, `tmp/present-*`, `.write-*`, `.owner-*`). It retains
+`status` already hides them), and the spool's own temporary files of writes
+interrupted that long ago (`tmp/send-<n>`, `tmp/present-<id>`, `.tincan/.write-<n>`,
+`owners/<name>/.owner-<n>`; nothing under `requests/`, `hosts/` or other
+state directories). It retains
 active work, queued messages, claims, session pointers and host logs. After a
 request record is collected, its result and idempotency protection are gone; do
 not reuse old request IDs for new work.
