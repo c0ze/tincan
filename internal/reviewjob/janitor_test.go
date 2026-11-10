@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c0ze/tincan/v2/internal/filelock"
 	"github.com/c0ze/tincan/v2/internal/host"
 	"github.com/c0ze/tincan/v2/internal/packet"
 	"github.com/c0ze/tincan/v2/internal/request"
@@ -122,6 +123,90 @@ func TestJanitorSettlesAnExpiredResumedJob(t *testing.T) {
 	}
 	if r, _ := request.Get(ws, req.JobID); !r.Terminal() {
 		t.Fatalf("request still runnable: %+v", r)
+	}
+}
+
+// holdJournal holds a request's journal lock (request's own lock file), as a
+// writer stopped while holding it would.
+func holdJournal(t *testing.T, ws, id string) *filelock.Lock {
+	t.Helper()
+	l, err := filelock.Try(filepath.Join(request.Dir(ws), "locks", id+".lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+// An expired job is recorded terminal only once its request can no longer
+// run: while the journal is locked the cancel cannot be recorded, so the job
+// stays retryable, and the next pass cancels it and records the expiry.
+func TestExpiredJobWaitsForTheCancelToBeRecorded(t *testing.T) {
+	s := testService(t, "echo")
+	s.cancelWait = 200 * time.Millisecond
+	ctx := context.Background()
+	exp := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+	req := jobRequest("rv-0000000000000000-m", "p", exp)
+	st := s.store()
+	writeInput(s.packetPath(req.JobID), req)
+	ws := s.workspace(req.JobID)
+	os.MkdirAll(ws, 0o700)
+	if _, err := request.Submit(ctx, ws, "reviewer", "review", "saved body", req.JobID); err != nil {
+		t.Fatal(err)
+	}
+	st.Save(Job{ID: req.JobID, ReviewID: req.ReviewID, Preset: "reviewer", PacketSHA: packet.Hash(req.Packet), PromptSHA: req.PromptSHA,
+		ExpiresAt: exp, State: "creating", Workspace: ws, Created: time.Now().UTC()})
+	held := holdJournal(t, ws, req.JobID)
+	start := time.Now()
+	s.Janitor(ctx)
+	s.Wait()
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("pass took %v", d)
+	}
+	if j, _, _ := st.Get(req.JobID); j.State != "creating" {
+		t.Fatalf("job settled without a recorded cancel: %+v", j)
+	}
+	if r, _ := request.Get(ws, req.JobID); r.Terminal() || r.CancelRequested {
+		t.Fatalf("request: %+v", r)
+	}
+	held.Close()
+	s.Janitor(ctx)
+	s.Wait()
+	if j, _, _ := st.Get(req.JobID); j.State != "error" || !strings.Contains(j.Result, "expired") {
+		t.Fatalf("job: %+v", j)
+	}
+	if r, _ := request.Get(ws, req.JobID); r.Status != "canceled" {
+		t.Fatalf("request: %+v", r)
+	}
+}
+
+// Cancel acknowledges a job whose host is gone only once the request's
+// cancellation is recorded.
+func TestCancelWithoutHostWaitsForTheRecordedCancel(t *testing.T) {
+	s := testService(t, "echo")
+	ctx := context.Background()
+	exp := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	req := jobRequest("rv-0000000000000000-n", "p", exp)
+	st := s.store()
+	ws := s.workspace(req.JobID)
+	os.MkdirAll(ws, 0o700)
+	if _, err := request.Submit(ctx, ws, "reviewer", "review", "saved body", req.JobID); err != nil {
+		t.Fatal(err)
+	}
+	st.Save(Job{ID: req.JobID, ReviewID: req.ReviewID, Preset: "reviewer", PacketSHA: packet.Hash(req.Packet), PromptSHA: req.PromptSHA,
+		ExpiresAt: exp, State: "running", Workspace: ws, Created: time.Now().UTC()})
+	held := holdJournal(t, ws, req.JobID)
+	short, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	j, acked, _ := s.Cancel(short, req.JobID, exp)
+	cancel()
+	if acked || j.Terminal() {
+		t.Fatalf("acknowledged without a recorded cancel: %+v acked=%v", j, acked)
+	}
+	held.Close()
+	if j, acked, err := s.Cancel(ctx, req.JobID, exp); err != nil || !acked || j.State != "cancelled" {
+		t.Fatalf("cancel: %+v acked=%v err=%v", j, acked, err)
+	}
+	if r, _ := request.Get(ws, req.JobID); r.Status != "canceled" {
+		t.Fatalf("request: %+v", r)
 	}
 }
 

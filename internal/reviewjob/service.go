@@ -48,6 +48,8 @@ type Service struct {
 	materialized func(ctx context.Context)
 	// relaunchWait bounds a relaunch of a resumed job's listener (0 = 15 s).
 	relaunchWait time.Duration
+	// cancelWait bounds cancelling a saved request (0 = 10 s).
+	cancelWait time.Duration
 
 	mu       sync.Mutex
 	inflight map[string]bool
@@ -229,10 +231,9 @@ func (s *Service) create(id string) {
 				// The job expired (its context with it): nothing may launch
 				// any more, and every probe would fail. Settle it as the
 				// launch-time expiry check does, with a fresh bounded context.
-				cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
-				request.Cancel(cctx, j.Workspace, j.ID)
-				ccancel()
-				fail("expired before launch")
+				if s.cancelSaved(j) {
+					fail("expired before launch")
+				} // else the journal is busy: still creating, retried next pass
 				return
 			}
 			if !r.Terminal() && !r.Interactive && !st.cancelRequested(id) {
@@ -256,10 +257,9 @@ func (s *Service) create(id string) {
 							return
 						}
 						if err != nil {
-							cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
-							request.Cancel(cctx, j.Workspace, j.ID)
-							ccancel()
-							fail("launch: " + err.Error())
+							if s.cancelSaved(j) {
+								fail("launch: " + err.Error())
+							} // else still creating: retried next pass
 							return
 						}
 					}
@@ -332,12 +332,11 @@ func (s *Service) create(id string) {
 	o := dispatch.Options{Room: j.Workspace, Executable: s.Executable, Presets: map[string]host.Preset{j.Preset: pinned}}
 	r, err := dispatch.Send(ctx, o, dispatch.SendSpec{Agent: j.Preset, Preset: j.Preset, From: "review", Body: body, RequestID: j.ID})
 	if err != nil {
-		// A launch failure after the request was saved must never run later.
-		// ctx may be the one a cancel just cut short: use a fresh one.
-		if saved, gerr := request.Get(j.Workspace, j.ID); gerr == nil && !saved.Terminal() {
-			cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
-			request.Cancel(cctx, j.Workspace, j.ID)
-			ccancel()
+		// A launch failure after the request was saved must never run later;
+		// until its cancellation is recorded the job stays creating, and the
+		// next pass resumes it from the saved request.
+		if !s.cancelSaved(j) {
+			return
 		}
 		if st.cancelRequested(id) {
 			j.State, j.Result, j.Tombstone = "cancelled", "ERROR canceled during launch", true
@@ -350,6 +349,21 @@ func (s *Service) create(id string) {
 	j.State = "running"
 	importRequest(&j, r)
 	st.Save(j)
+}
+
+// cancelSaved cancels the job's saved request with a fresh bounded context
+// (the creation context may have ended) and reports whether it can no longer
+// run: the cancellation is recorded, or the request is terminal or absent.
+// A busy journal (a writer stopped while holding it) reports false.
+func (s *Service) cancelSaved(j Job) bool {
+	wait := s.cancelWait
+	if wait == 0 {
+		wait = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	_, err := request.Cancel(ctx, j.Workspace, j.ID)
+	return err == nil || errors.Is(err, os.ErrNotExist)
 }
 
 // relaunch starts the listener of a saved request with the job's pinned
@@ -538,12 +552,16 @@ func (s *Service) Cancel(ctx context.Context, id string, expiresAt time.Time) (J
 		return j, true, st.Save(j)
 	}
 	if j.Workspace != "" {
-		if r, err := request.Cancel(ctx, j.Workspace, j.ID); err == nil {
+		r, cerr := request.Cancel(ctx, j.Workspace, j.ID)
+		if cerr == nil {
 			importRequest(&j, r)
 		}
+		// Without a recorded cancellation (a busy journal) the request may
+		// still run: the job is not cancelled until a later attempt records it.
+		recorded := cerr == nil || errors.Is(cerr, os.ErrNotExist)
 		if !j.Terminal() {
 			host.Cancel(ctx, j.Workspace, j.Preset, j.ID)
-			if _, alive := host.Existing(ctx, j.Workspace, j.Preset); !alive {
+			if _, alive := host.Existing(ctx, j.Workspace, j.Preset); !alive && recorded {
 				j.State, j.Result = "cancelled", "ERROR canceled: the reviewer's host is not running"
 			}
 		}

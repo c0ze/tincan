@@ -469,7 +469,8 @@ not answer (`host.Owned`) has the request: it is adopted without a
 relaunch. A relaunch that times out, or an ownership probe that cannot
 answer, leaves the job `creating` for the next janitor pass; any other
 relaunch failure, or the job having expired, cancels the request and
-records `error`);
+records `error` — once that cancellation is recorded; while the request's
+journal is busy the job stays `creating` and the next pass retries);
 only when none exists is creation restarted in a fresh workspace — the one
 place a member can run twice (§6.4).
 
@@ -483,7 +484,8 @@ one — a job that already finished stays `done` with its result, and the
 cancel is acknowledged. Otherwise record the tombstone (a launch is now
 refused), cancel the request (importing the result it returns if it had just
 finished), ask the host to stop it, and acknowledge once the request is
-terminal or the host has exited. A cancel that finds the job lock held
+terminal or the host has exited with the cancellation recorded (a busy
+request journal defers the acknowledgement to a later cancel). A cancel that finds the job lock held
 (creation holds it through clone and checkout) does not wait: it records
 `<job_id>.cancel` beside the record and is not acknowledged yet; creation
 watches for it, aborts materializing, and right before launch refuses to
