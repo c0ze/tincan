@@ -400,19 +400,40 @@ func finish(room string, e *envelope.Envelope, body string, reply *envelope.Enve
 	if len(body) > MaxResultBytes {
 		body = body[:MaxResultBytes] + "\n[output truncated]"
 	}
-	r.Status, r.Result = "completed", body
-	switch {
-	case r.CancelRequested || strings.HasPrefix(body, "ERROR canceled"):
+	outcome := "completed"
+	if reply == nil {
+		// An interactive reply is typed text; only hosted bodies carry outcomes.
+		outcome = hostedOutcome(body)
+	}
+	r.Status, r.Result = outcome, body
+	if r.CancelRequested || outcome == "canceled" {
 		r.Status = "canceled"
-		if !strings.HasPrefix(body, "ERROR") {
+		if outcome == "completed" {
 			r.Result = "ERROR canceled: the request may have produced changes before cancellation\n" + body
 		}
-	case strings.HasPrefix(body, "ERROR interrupted"):
-		r.Status = "interrupted"
-	case strings.HasPrefix(body, "ERROR"):
-		r.Status = "failed"
 	}
 	return r, save(room, r)
+}
+
+// hostedFailurePrefixes are the failure bodies a hosted listener produces
+// (host.ReplyBody and its serve loop). An answer that merely starts with
+// "ERROR" is not a failure. An explicit outcome passed by the host would be
+// sturdier than matching its text.
+var hostedFailurePrefixes = []string{"ERROR exit=", "ERROR timeout after ", "ERROR exec: ", "ERROR session: ", "ERROR reply file: "}
+
+func hostedOutcome(body string) string {
+	switch {
+	case strings.HasPrefix(body, "ERROR canceled: "):
+		return "canceled"
+	case strings.HasPrefix(body, "ERROR interrupted: "):
+		return "interrupted"
+	}
+	for _, prefix := range hostedFailurePrefixes {
+		if strings.HasPrefix(body, prefix) {
+			return "failed"
+		}
+	}
+	return "completed"
 }
 
 // Cancel prevents queued work from starting. Running work remains running until

@@ -391,9 +391,12 @@ bounded request progress, with at most a 1 MiB in-memory tail per stream.
   to repeat an agent run automatically.
 - Room rules are unchanged: pass `--room` explicitly; non-root rooms warn.
 
-A hosted `ERROR ` reply marks failed or interrupted work. Inspect its details to
-distinguish provider, session, process and storage failures before deciding what
-to do next.
+A hosted reply starting with one of these prefixes (`ERROR session:`,
+`ERROR exit=`, `ERROR timeout after`, `ERROR exec:`, `ERROR reply file:`,
+`ERROR interrupted:`) marks failed or interrupted work. Any other answer,
+including every reply typed by an interactive receiver, is `completed`, even
+when it begins with `ERROR`. Inspect a failure's details to distinguish
+provider, session, process and storage failures before deciding what to do next.
 
 ### Retention
 
