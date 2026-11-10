@@ -68,6 +68,11 @@ func TestUIContract(t *testing.T) {
 			t.Errorf("app.js missing %q", want)
 		}
 	}
+	// A non-JSON error body (a proxy's 502) has no .error and HTTP/2 has no
+	// statusText: the message falls back to the status and the body.
+	if !strings.Contains(src, "`HTTP ${res.status}`") || strings.Contains(src, "|| res.statusText") {
+		t.Error("api() error message can be empty for a non-JSON error body")
+	}
 	if strings.Contains(src, "r.missing) continue") {
 		t.Error("app.js still skips missing rooms")
 	}

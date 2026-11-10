@@ -81,7 +81,13 @@ async function api(key, path, opts = {}) {
   const res = await fetch(BASE + prefix(key) + path, init);
   const ct = res.headers.get("Content-Type") || "";
   const data = ct.includes("json") ? await res.json() : await res.text();
-  if (!res.ok) throw new Error((data && data.error) || res.statusText);
+  if (!res.ok) {
+    if (data && data.error) throw new Error(data.error);
+    // A text/plain or HTML error (tailscale's own 502) has no .error, and
+    // statusText is empty over HTTP/2.
+    const snippet = typeof data === "string" ? data.replace(/\s+/g, " ").trim().slice(0, 200) : "";
+    throw new Error(`HTTP ${res.status}` + (snippet ? `: ${snippet}` : ""));
+  }
   return data;
 }
 

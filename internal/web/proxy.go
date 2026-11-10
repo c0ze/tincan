@@ -84,22 +84,22 @@ func newPeer(p Peer) (*peer, error) {
 func (s *Server) proxyPeer(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.peers[r.PathValue("peer")]
 	if !ok {
-		http.NotFound(w, r)
+		s.fail(w, http.StatusNotFound, fmt.Errorf("peer %q is not configured", r.PathValue("peer")))
 		return
 	}
 	rest := r.PathValue("rest")
 	if strings.HasPrefix(rest, "/") || strings.Contains(rest, "//") {
-		http.Error(w, "invalid path", http.StatusBadRequest)
+		s.fail(w, http.StatusBadRequest, errors.New("invalid path"))
 		return
 	}
 	for _, seg := range strings.Split(rest, "/") {
 		if seg == ".." || seg == "." {
-			http.Error(w, "invalid path", http.StatusBadRequest)
+			s.fail(w, http.StatusBadRequest, errors.New("invalid path"))
 			return
 		}
 	}
 	if strings.HasPrefix(strings.TrimLeft(rest, "/"), "peers/") {
-		http.Error(w, "peers are not chained", http.StatusBadRequest)
+		s.fail(w, http.StatusBadRequest, errors.New("peers are not chained"))
 		return
 	}
 	if rest == "events" {
