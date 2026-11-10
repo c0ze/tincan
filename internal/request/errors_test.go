@@ -66,8 +66,16 @@ func TestRecordErrorsCarrySentinels(t *testing.T) {
 			func(err error) bool { var s *json.SyntaxError; return errors.As(err, &s) }, "unexpected end"},
 		"unparsable time": {func(t *testing.T, room string, e *envelope.Envelope) { rewriteField(t, room, e, "created", `"bad"`) },
 			func(err error) bool { var p *time.ParseError; return errors.As(err, &p) }, "parsing time"},
+		// The decoder's error here depends on the Go version: time.Time's own
+		// UnmarshalJSON text before Go 1.27, a *json.UnmarshalTypeError from
+		// the json/v2-backed decoder since. The record error keeps whichever.
 		"non-string time": {func(t *testing.T, room string, e *envelope.Envelope) { rewriteField(t, room, e, "updated", `5`) },
-			func(error) bool { return true }, "Time.UnmarshalJSON"},
+			func(err error) bool {
+				want := json.Unmarshal([]byte(`{"updated":5}`), new(Record))
+				return want != nil && err.Error() == want.Error()
+			}, ""},
+		"wrong field type": {func(t *testing.T, room string, e *envelope.Envelope) { rewriteField(t, room, e, "status", `5`) },
+			func(err error) bool { var u *json.UnmarshalTypeError; return errors.As(err, &u) }, "status"},
 		"mismatched ID": {func(t *testing.T, room string, e *envelope.Envelope) { rewriteField(t, room, e, "id", `"other"`) },
 			func(error) bool { return true }, "corrupt request record"},
 		"too large": {func(t *testing.T, room string, e *envelope.Envelope) {
@@ -112,6 +120,14 @@ func TestRecordErrorsCarrySentinels(t *testing.T) {
 		os.Symlink(filepath.Join(room, "elsewhere"), recordPath(room, e.ID))
 	}); !errors.Is(err, ErrCorruptRecord) || !errors.Is(err, fsutil.ErrUnsafeFile) {
 		t.Fatalf("symlinked record = %v", err)
+	}
+	// A record that cannot be read is an I/O failure, not a corrupt record.
+	if os.Geteuid() != 0 {
+		if err := record(t, func(t *testing.T, room string, e *envelope.Envelope) {
+			os.Chmod(recordPath(room, e.ID), 0)
+		}); !errors.Is(err, os.ErrPermission) || errors.Is(err, ErrCorruptRecord) {
+			t.Fatalf("unreadable record = %v", err)
+		}
 	}
 	for _, dir := range []string{"locks", ""} {
 		room := canonicalRoom(t.TempDir())
