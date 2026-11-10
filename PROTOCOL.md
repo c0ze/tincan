@@ -13,7 +13,11 @@ that the `/tell` and `/listen` skills point to.
   `<room>/.tincan/inbox/<name>/`. Names and message IDs are portable path
   components, at most 128 bytes. Empty names, `.`/`..`, path separators, control
   characters, Windows-reserved characters/device names, and trailing dots/spaces
-  are rejected. Interior dots are allowed.
+  are rejected. Interior dots are allowed. On a case-insensitive filesystem
+  (the macOS and Windows defaults) names that differ only by case would share
+  one inbox, so sending to or receiving as a second spelling is refused with an
+  error naming the existing one; a queued message whose `to` differs from its
+  inbox only by such case folding is delivered, not quarantined.
 - **Send** = publish a synced message file into the recipient's inbox with an
   atomic hard link, without overwriting existing work. The local spool filesystem
   must support hard links (for example POSIX filesystems or NTFS).

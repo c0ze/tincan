@@ -129,6 +129,9 @@ func (s *Spool) Send(e *envelope.Envelope) error {
 			return err
 		}
 	}
+	if err := s.checkCaseAlias(e.To); err != nil {
+		return err
+	}
 	if published, err := s.published(e); err != nil || published {
 		return err
 	}
@@ -208,6 +211,9 @@ func (s *Spool) ClaimContext(ctx context.Context, name string, timeout time.Dura
 	if err := fsutil.MkdirPrivate(inbox); err != nil {
 		return nil, err
 	}
+	if err := s.checkCaseAlias(name); err != nil {
+		return nil, err
+	}
 	token := envelope.NewID()
 	s.writePresence(name, token)
 	defer s.removePresence(name, token)
@@ -273,6 +279,44 @@ func (s *Spool) ClaimContext(ctx context.Context, name string, timeout time.Dura
 			return nil, ctx.Err()
 		}
 	}
+}
+
+// checkCaseAlias refuses name when a case-folding filesystem (the macOS and
+// Windows defaults) maps it onto an inbox created under another spelling:
+// both names would share one directory, and messages addressed to one would
+// be claimed by the other. The error names the spelling that owns the inbox.
+// Directories that merely differ by case on a case-sensitive filesystem are
+// separate inboxes, so the name grammar stays the same everywhere.
+func (s *Spool) checkCaseAlias(name string) error {
+	root := filepath.Join(s.root, "inbox")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, ent := range entries {
+		if ent.Name() == name {
+			return nil // the inbox is stored under exactly this spelling
+		}
+	}
+	for _, ent := range entries {
+		if strings.EqualFold(ent.Name(), name) && s.sameInbox(ent.Name(), name) {
+			return fmt.Errorf("tincan: name %q shares the existing inbox %q on this case-insensitive filesystem; use %q", name, ent.Name(), ent.Name())
+		}
+	}
+	return nil
+}
+
+// sameInbox reports whether two spellings resolve to one inbox directory.
+func (s *Spool) sameInbox(a, b string) bool {
+	ai, err := os.Lstat(s.InboxDir(a))
+	if err != nil {
+		return false
+	}
+	bi, err := os.Lstat(s.InboxDir(b))
+	return err == nil && os.SameFile(ai, bi)
 }
 
 // retryClaimOp runs op, retrying briefly while it fails with a Windows

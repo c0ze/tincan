@@ -160,6 +160,9 @@ func (s *Spool) TryClaim(ctx context.Context, name string) (*Delivery, bool, err
 	if err := fsutil.MkdirPrivate(s.InboxDir(name)); err != nil {
 		return nil, false, err
 	}
+	if err := s.checkCaseAlias(name); err != nil {
+		return nil, false, err
+	}
 	lock, err := filelock.Try(filepath.Join(s.root, "transport.lock"))
 	if errors.Is(err, filelock.ErrLocked) {
 		return nil, false, nil
@@ -257,7 +260,10 @@ func (s *Spool) readDelivery(name, filename string) (*Delivery, error) {
 	if err != nil {
 		return nil, malformedError{err}
 	}
-	if e.To != name || envelope.Filename(e) != filename {
+	// A spelling that differs only by case and names this same directory on a
+	// case-folding filesystem (published by an older binary) is this inbox.
+	sameInbox := e.To == name || (strings.EqualFold(e.To, name) && s.sameInbox(e.To, name))
+	if !sameInbox || envelope.Filename(e) != filename {
 		return nil, malformedError{fmt.Errorf("tincan: envelope routing or filename mismatch")}
 	}
 	return &Delivery{Envelope: e, spool: s, name: name, filename: filename, dir: dir}, nil
