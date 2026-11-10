@@ -54,6 +54,45 @@ func TestHostFilesArePrivate(t *testing.T) {
 	}
 }
 
+func TestOpenLogRotatesLargeLog(t *testing.T) {
+	room := t.TempDir()
+	path := LogPath(room, "agent")
+	f, err := OpenLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("small"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if f, err = OpenLog(path); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
+		t.Fatalf("small log rotated: %v", err)
+	}
+	for generation := 0; generation < 2; generation++ {
+		if err := os.Truncate(path, maxLogBytes+1); err != nil {
+			t.Fatal(err)
+		}
+		f, err := OpenLog(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		for p, size := range map[string]int64{path: 0, path + ".1": maxLogBytes + 1} {
+			info, err := os.Lstat(p)
+			if err != nil || !info.Mode().IsRegular() || info.Size() != size {
+				t.Fatalf("%s after rotation: %v %v", p, info, err)
+			}
+			if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+				t.Fatalf("%s mode %o", p, info.Mode().Perm())
+			}
+		}
+	}
+}
+
 func TestOpenLogRejectsSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation may need privileges")
