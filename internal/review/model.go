@@ -8,6 +8,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -72,6 +74,28 @@ type State struct {
 	Closure         *Closure   `json:"closure,omitempty"`
 	ThreadDone      bool       `json:"thread_done,omitempty"`
 	Members         []Member   `json:"members"`
+}
+
+// check rejects a stored state that is valid JSON but breaks the invariants
+// the coordinator and renderer index by (hand-edited, or written by another
+// version), so it fails that one review instead of panicking.
+func (st State) check() error {
+	for i, m := range st.Members {
+		if m.Index != i {
+			return fmt.Errorf("member %d has index %d", i, m.Index)
+		}
+	}
+	if st.Status == "closing" && st.Closure == nil {
+		return errors.New("status closing without a closure")
+	}
+	if st.Closure != nil {
+		for _, cm := range st.Closure.Members {
+			if cm.Index < 0 || cm.Index >= len(st.Members) {
+				return fmt.Errorf("closure names member %d of %d", cm.Index, len(st.Members))
+			}
+		}
+	}
+	return nil
 }
 
 // Final reports member states that need no further collection.

@@ -442,6 +442,9 @@ func (c *Coordinator) close(room string, in Input, st *State, save func() error)
 	if st.Status != "closing" {
 		return nil
 	}
+	if st.Closure == nil {
+		return errors.New("status closing without a closure")
+	}
 	results := map[int]string{}
 	for _, cm := range st.Closure.Members {
 		if cm.Included {

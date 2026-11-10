@@ -228,6 +228,35 @@ func TestPlannedMembersPastDeadlineAreNotSubmitted(t *testing.T) {
 	}
 }
 
+// Valid JSON that breaks the state's invariants (hand-edited or written by
+// another version) is an error for that review, never a panic.
+func TestInconsistentStateIsAnErrorNotAPanic(t *testing.T) {
+	for name, mutate := range map[string]func(*State){
+		"closing without closure": func(st *State) { st.Status, st.Closure = "closing", nil },
+		"closure index": func(st *State) {
+			st.Status, st.Closure = "closing", &Closure{Members: []ClosedMember{{Index: 7, Late: true}}}
+		},
+		"member index": func(st *State) { st.Members[0].Index = -1 },
+	} {
+		room, in := published(t, []string{"a@macmini"}, 10*time.Minute, false)
+		st, _ := ReadState(room, in.ReviewID)
+		mutate(&st)
+		WriteState(room, in.ReviewID, st)
+		if _, err := ReadState(room, in.ReviewID); err == nil {
+			t.Errorf("%s: read without error", name)
+		}
+		c := &Coordinator{Transport: newFake(), Now: time.Now}
+		if err := c.Reconcile(context.Background(), room, nil); err == nil || !strings.Contains(err.Error(), in.ReviewID) {
+			t.Errorf("%s: reconcile: %v", name, err)
+		}
+	}
+	// The renderer guards its own indexes too.
+	st := State{Members: []Member{{Member: "a@m"}}, Closure: &Closure{Members: []ClosedMember{{Index: 3, Late: true}, {Index: -1, State: "done"}}}}
+	if b := RenderBundle(Input{}, st, nil); len(b) == 0 {
+		t.Fatal("no bundle")
+	}
+}
+
 func TestLostCreateResponseIsAdoptedByPolling(t *testing.T) {
 	room, in := published(t, []string{"grok@cachyos"}, 10*time.Minute, false)
 	f := newFake()

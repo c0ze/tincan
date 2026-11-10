@@ -1,10 +1,14 @@
 package thread
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/committee"
+	"github.com/c0ze/tincan/v2/internal/dispatch"
+	"github.com/c0ze/tincan/v2/internal/host"
 )
 
 func TestKeyedReservationsCountOnce(t *testing.T) {
@@ -30,6 +34,37 @@ func TestCommitteeIntentAndReviewReference(t *testing.T) {
 	}
 	if m2, _ := s.Message("m2"); m2.Review != "rv-abc/0" {
 		t.Fatalf("review message: %+v", m2)
+	}
+}
+
+// A pending committee message whose intent carries no committee snapshot
+// (a hand-edited or version-skewed journal) fails that message instead of
+// panicking the room pass.
+func TestCommitteeMessageWithoutSnapshotFails(t *testing.T) {
+	room, _ := filepath.EvalSymlinks(t.TempDir())
+	th, err := Create(room, "t", "claude", "", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mid string
+	th.Update(context.Background(), func(tx *Tx) error {
+		m := tx.Append(Event{Kind: KindMessage, Author: "reviewers", Role: RoleCommittee})
+		tx.Append(Event{Kind: KindIntent, Message: m.ID, RequestID: th.ID + "-" + m.ID, Review: "rv-0123456789abcdef"})
+		tx.Append(Event{Kind: KindState, Message: m.ID, State: StatePending})
+		mid = m.ID
+		return nil
+	})
+	d := New(dispatch.Options{Room: room, Presets: map[string]host.Preset{}})
+	if err := d.Acquire(); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ := th.Snapshot()
+	if m, _ := snap.Message(mid); m.State != StateError {
+		t.Fatalf("message: %+v", m)
 	}
 }
 

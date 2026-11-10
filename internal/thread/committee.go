@@ -106,6 +106,9 @@ func (d *Dispatcher) buildReview(ctx context.Context, t *Thread, m Message) erro
 		if in.Origin != origin {
 			buildErr = errors.New("review " + m.Review + " belongs to " + in.Origin)
 		}
+	} else if m.Committee == nil {
+		// A journal edited by hand or written by another version.
+		buildErr = errors.New("the committee message has no committee snapshot")
 	} else {
 		trigger, _ := snap.Message(m.ReplyTo)
 		from := d.CommitteesFrom
