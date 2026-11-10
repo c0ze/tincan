@@ -23,8 +23,9 @@ import (
 
 // The test binary doubles as the hosted listener ("serve") and as scripted
 // agents ("fixture <name>"): each run appends to <name>.count, stores its
-// stdin in <name>.last, optionally sleeps for <name>.sleep, and prints
-// <name>.reply (default "done by <name>").
+// stdin in <name>.last, optionally sleeps for <name>.sleep or (when
+// <name>.gate exists) waits for <name>.open, and prints <name>.reply
+// (default "done by <name>").
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -50,6 +51,14 @@ func fixtureAgent(name string) int {
 		f.Close()
 	}
 	os.WriteFile(filepath.Join(dir, name+".last"), body, 0o600)
+	if _, err := os.Stat(filepath.Join(dir, name+".gate")); err == nil {
+		// Gated: stay busy until the test opens the gate.
+		for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if _, err := os.Stat(filepath.Join(dir, name+".open")); err == nil {
+				break
+			}
+		}
+	}
 	if b, err := os.ReadFile(filepath.Join(dir, name+".sleep")); err == nil {
 		d, _ := time.ParseDuration(strings.TrimSpace(string(b)))
 		time.Sleep(d)
@@ -334,15 +343,53 @@ func TestRelaunchGivesUpWithAnError(t *testing.T) {
 	e.opts.Presets["broken"] = host.Preset{Exec: []string{filepath.Join(e.fixture, "not-installed")}, Stdin: "body", Reply: "stdout"}
 	th, _ := thread.Create(e.room, "t", "a", "", 6)
 	d := e.dispatcher()
+	relaunches := countRelaunches(d)
 	thread.SetRedriveEvery(d, time.Millisecond)
 	mid := runningWithoutHost(t, th, e.room, "broken."+th.ID, "broken", false)
 	snap := e.settle(d, th, func(s thread.Snapshot) bool { m, _ := s.Message(mid); return !m.Active() })
 	m, _ := snap.Message(mid)
-	if m.State != thread.StateError || !strings.Contains(m.Text, "could not be restarted") {
-		t.Fatalf("turn: %+v", m)
+	if m.State != thread.StateError || !strings.Contains(m.Text, "could not be restarted") || *relaunches != 3 {
+		t.Fatalf("turn: %+v (relaunches %d)", m, *relaunches)
 	}
 	if r, err := request.Get(e.room, m.RequestID); err != nil || r.Status != "interrupted" {
 		t.Fatalf("request: %+v %v", r, err)
+	}
+}
+
+// countRelaunches counts the dispatcher's relaunch attempts.
+func countRelaunches(d *thread.Dispatcher) *int {
+	n := new(int)
+	d.Hook = func(point string) error {
+		if point == "relaunch" {
+			*n++
+		}
+		return nil
+	}
+	return n
+}
+
+// A listener that did run here and is gone, with its preset now broken:
+// every relaunch fails, and after the limit the turn ends interrupted.
+func TestGoneHostWithBrokenPresetEndsInterrupted(t *testing.T) {
+	e := newEnv(t, "a")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d := e.dispatcher()
+	if _, err := d.Post(context.Background(), th.ID, "@a hi", ""); err != nil {
+		t.Fatal(err)
+	}
+	e.settle(d, th, quiescent)
+	listener := "a." + th.ID
+	if err := host.Down(context.Background(), e.room, listener, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	e.opts.Presets["a"] = host.Preset{Exec: []string{filepath.Join(e.fixture, "not-installed")}, Stdin: "body", Reply: "stdout"}
+	relaunches := countRelaunches(d)
+	thread.SetRedrive(d, time.Millisecond, 2)
+	mid := runningWithoutHost(t, th, e.room, listener, "a", false)
+	snap := e.settle(d, th, func(s thread.Snapshot) bool { m, _ := s.Message(mid); return !m.Active() })
+	m, _ := snap.Message(mid)
+	if m.State != thread.StateError || !strings.Contains(m.Text, "could not be restarted") || *relaunches != 2 {
+		t.Fatalf("turn: %+v (relaunches %d)", m, *relaunches)
 	}
 }
 

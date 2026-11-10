@@ -437,11 +437,11 @@ func (d *Dispatcher) collect(ctx context.Context, t *Thread, m Message) error {
 // host left uncertain. It resubmits under the same request ID, which only
 // launches the host (dispatch.Send serializes with a host that is just
 // starting). Probes and relaunches are spaced. host.Existing also reports
-// false for a busy host that stops answering, which still owns the
-// listener's lifetime lock: only a relaunch that fails past host.Up's lock
-// checks counts, and after redriveMax of those the request is finished as
-// interrupted. Interactive receivers answer through Poll and are never
-// relaunched.
+// false for a busy host that stops answering, so the decision comes from
+// host.Owned: an owned listener is left alone. Every failed relaunch of an
+// unowned one counts, and after redriveMax of them the request is finished
+// as interrupted unless a host owns the listener by then. Interactive
+// receivers answer through Poll and are never relaunched.
 func (d *Dispatcher) redrive(ctx context.Context, r request.Record, preset string) (request.Record, error) {
 	if r.Interactive {
 		return r, nil
@@ -471,27 +471,37 @@ func (d *Dispatcher) redrive(ctx context.Context, r request.Record, preset strin
 	if !due {
 		return r, nil
 	}
-	if _, alive := host.Existing(ctx, d.Opts.Room, r.Agent); alive || ctx.Err() != nil {
+	if _, alive := host.Existing(ctx, d.Opts.Room, r.Agent); alive {
 		return r, nil
 	}
-	// Bounded: a hung host can hold the request's or the listener's locks.
-	sctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	_, err := dispatch.Send(sctx, d.Opts, dispatch.SendSpec{Agent: r.Agent, Preset: preset, From: r.Envelope.From, Body: r.Envelope.Body, RequestID: r.ID})
-	cancel()
-	if err == nil || ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
-		// Launched; or the launch timed out waiting on a lock another
-		// process owns (a host that is busy but not answering, or one just
-		// starting). That host still owns the request: keep waiting, and
-		// never count this as a failed relaunch.
+	// One probe and relaunch hold the room pass for a bounded time.
+	pctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if owned, err := host.Owned(pctx, d.Opts.Room, r.Agent); err != nil || owned {
+		// A host that is busy but not answering still has the request (its
+		// exec timeout or a Stop ends the turn), or the answer is unknown:
+		// no relaunch, nothing counted.
 		return r, nil
 	}
-	// The launch failed past host.Up's lock checks: no host owns the
-	// listener, so after the last attempt nothing can finish the request.
+	if err := d.hook("relaunch"); err != nil {
+		return r, err
+	}
+	_, err := dispatch.Send(pctx, d.Opts, dispatch.SendSpec{Agent: r.Agent, Preset: preset, From: r.Envelope.From, Body: r.Envelope.Body, RequestID: r.ID})
+	if err == nil {
+		return r, nil
+	}
 	d.mu.Lock()
 	rs.attempts++
 	attempts := rs.attempts
 	d.mu.Unlock()
 	if attempts < limit {
+		return r, nil
+	}
+	// A host may have taken the listener since the probe: then it has the
+	// request, and finishing it here would discard its result.
+	octx, ocancel := context.WithTimeout(ctx, 10*time.Second)
+	defer ocancel()
+	if owned, oerr := host.Owned(octx, d.Opts.Room, r.Agent); oerr != nil || owned {
 		return r, nil
 	}
 	return request.Finish(d.Opts.Room, r.Envelope, "ERROR interrupted: hosted listener "+r.Agent+" is not running and could not be restarted: "+err.Error())

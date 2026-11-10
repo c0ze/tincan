@@ -34,14 +34,19 @@ func TestMain(m *testing.M) {
 
 // fakeReview is the reviewer: mode echo (default) appends a line to
 // runs.log in its working directory and prints the prompt; pwd prints the
-// working directory; sleep sleeps 30 s; nap sleeps 2 s, then echoes.
+// working directory; sleep sleeps 30 s; gate waits until gate.open exists
+// in its working directory, then echoes.
 func fakeReview(args []string) int {
 	mode := ""
 	if len(args) > 0 {
 		mode, args = args[0], args[1:]
 	}
-	if mode == "nap" {
-		time.Sleep(2 * time.Second)
+	if mode == "gate" {
+		for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if _, err := os.Stat("gate.open"); err == nil {
+				break
+			}
+		}
 		mode = "echo"
 	}
 	switch mode {

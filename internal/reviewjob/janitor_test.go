@@ -93,6 +93,46 @@ func TestJanitorRelaunchesASavedRequestWithoutHost(t *testing.T) {
 	}
 }
 
+// A relaunch that times out before launching anything (here on the route
+// lock another submitter holds) proves nothing about a host: the job stays
+// creating, the request untouched, and the next janitor pass runs it.
+func TestJanitorRetriesARelaunchThatTimedOut(t *testing.T) {
+	s := testService(t, "echo")
+	s.relaunchWait = 200 * time.Millisecond
+	ctx := context.Background()
+	exp := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	req := jobRequest("rv-0000000000000000-k", "p", exp)
+	st := s.store()
+	if err := writeInput(s.packetPath(req.JobID), req); err != nil {
+		t.Fatal(err)
+	}
+	ws := s.workspace(req.JobID)
+	os.MkdirAll(ws, 0o700)
+	if _, err := request.Submit(ctx, ws, "reviewer", "review", "saved body", req.JobID); err != nil {
+		t.Fatal(err)
+	}
+	st.Save(Job{ID: req.JobID, ReviewID: req.ReviewID, Preset: "reviewer", PacketSHA: packet.Hash(req.Packet), PromptSHA: req.PromptSHA,
+		ExpiresAt: exp, State: "creating", Workspace: ws, Created: time.Now().UTC()})
+	route, err := request.LockRoute(ctx, ws, "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Janitor(ctx)
+	s.Wait()
+	route.Close()
+	if j, _, _ := st.Get(req.JobID); j.State != "creating" {
+		t.Fatalf("job settled on a timed-out relaunch: %+v", j)
+	}
+	if r, _ := request.Get(ws, req.JobID); r.Status != "queued" || r.CancelRequested {
+		t.Fatalf("request: %+v", r)
+	}
+	s.Janitor(ctx)
+	s.Wait()
+	if j := waitTerminal(t, s, req.JobID); j.State != "done" || countRuns(t, ws, req.JobID) != 1 {
+		t.Fatalf("job: %+v", j)
+	}
+}
+
 // Seven days after expiry a record is forgotten only once its workspace is
 // cleaned up, under the job lock, and the lock file stays (lock files are
 // never unlinked: that would allow split ownership).

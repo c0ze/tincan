@@ -383,10 +383,12 @@ a later launch of that listener never runs the stale prompt.
 If a running turn's hosted listener disappears (a reboot, a killed process),
 tincan web relaunches it under the same request: a queued turn then runs,
 and one that was mid-run ends as interrupted (it is never replayed). A
-listener that is busy but not answering still owns its turn and is waited
-for. After three relaunches spaced 30 s apart fail with no host owning the
-listener, the turn ends with an error saying the listener could not be
-restarted. Interactive listeners are never relaunched.
+listener whose process still runs but does not answer (it holds its
+lifetime lock) still owns its turn: it is never relaunched, and the turn
+waits for it, for its exec timeout, or for Stop. After three relaunches
+spaced 30 s apart fail with no process owning the listener, the turn ends
+with an error saying the listener could not be restarted. Interactive
+listeners are never relaunched.
 
 ## Rooms in the sidebar
 

@@ -227,15 +227,31 @@ func (s *Service) create(id string) {
 			// the saved request.
 			if !r.Terminal() && !r.Interactive && !st.cancelRequested(id) {
 				if _, alive := host.Existing(ctx, j.Workspace, j.Preset); !alive {
-					// A timeout means a lock the launch needs is owned: a host
-					// that is busy but not answering still owns the request,
-					// so it is adopted as running, never cancelled.
-					if err := s.relaunch(ctx, j, r); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-						cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
-						request.Cancel(cctx, j.Workspace, j.ID)
-						ccancel()
-						fail("launch: " + err.Error())
-						return
+					octx, ocancel := context.WithTimeout(ctx, 10*time.Second)
+					owned, oerr := host.Owned(octx, j.Workspace, j.Preset)
+					ocancel()
+					switch {
+					case oerr != nil:
+						return // unknown: still creating, the next janitor pass retries
+					case owned:
+						// A host that is busy but not answering has the
+						// request: adopt it, never relaunch or cancel.
+					default:
+						err := s.relaunch(ctx, j, r)
+						if err != nil && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+							// Timed out with nothing owning the listener (a
+							// lock another submitter holds, or a host Up gave
+							// up on and stopped): retry on the next pass,
+							// until expiry makes the launch fail for good.
+							return
+						}
+						if err != nil {
+							cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
+							request.Cancel(cctx, j.Workspace, j.ID)
+							ccancel()
+							fail("launch: " + err.Error())
+							return
+						}
 					}
 				}
 			}

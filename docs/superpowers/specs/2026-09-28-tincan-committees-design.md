@@ -464,8 +464,11 @@ A replay of an identical create that finds `creating` with the job lock free
 there is adopted (terminal → its result is imported; otherwise → `running`,
 after resubmitting it under the same request ID to launch its listener when
 no host is running it — the creator may have died between saving and
-launching; a relaunch that times out on a lock another host owns adopts the
-request instead of cancelling it);
+launching. A host that still holds the listener's lifetime lock but does
+not answer (`host.Owned`) has the request: it is adopted without a
+relaunch. A relaunch that times out, or an ownership probe that cannot
+answer, leaves the job `creating` for the next janitor pass; any other
+relaunch failure cancels the request and records `error`);
 only when none exists is creation restarted in a fresh workspace — the one
 place a member can run twice (§6.4).
 
