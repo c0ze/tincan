@@ -179,6 +179,7 @@ func (p *sessionParser) mayCarryAnswer(head []byte) bool {
 func headFields(head []byte) (fields map[string]string, ok bool) {
 	fields = map[string]string{}
 	dec := json.NewDecoder(bytes.NewReader(head))
+	dec.UseNumber() // a valid number beyond float64 must not read as invalid JSON
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
 		return fields, false
 	}
