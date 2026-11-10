@@ -105,9 +105,16 @@ type Server struct {
 	jobs  *reviewjob.Service  // reviewer jobs; nil without a state directory
 	coord *review.Coordinator // review coordinator; nil without a state directory
 
+	jobsMu     sync.Mutex     // guards jobsClosed and creating.Add
+	jobsClosed bool           // Run is shutting down: job creations are refused
+	creating   sync.WaitGroup // admitted job creations still inside Create
+
 	committeesMu       sync.Mutex // serializes peer committee-cache refreshes
 	committeesAttempt  time.Time  // last hub fetch attempt (guarded by committeesMu)
 	committeesAttempts int        // hub fetch attempts, for tests (guarded by committeesMu)
+
+	streams     context.Context    // done once Run starts shutting down: event streams end
+	stopStreams context.CancelFunc // ends streams
 }
 
 func New(cfg Config) (*Server, error) {
@@ -163,6 +170,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, hosts: hosts, base: base, mux: http.NewServeMux(), index: idx, hub: newHub(), peers: map[string]*peer{}, dispatchers: map[string]*thread.Dispatcher{}, inFlight: map[string]bool{}, lastLog: map[string]string{}, started: time.Now()}
 	s.reconcileRoom = s.runRoomPass
+	s.streams, s.stopStreams = context.WithCancel(context.Background())
 	for _, p := range cfg.Peers {
 		pp, err := newPeer(p)
 		if err != nil {
@@ -275,7 +283,10 @@ func (s *Server) hostsOK(r *http.Request) bool {
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'self'")
+		// Identity comes from tailscale serve, not cookies, so any page could
+		// frame a working UI: forbid framing (X-Frame-Options for old browsers).
+		h.Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")
+		h.Set("X-Frame-Options", "DENY")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		refuse := func(msg string) { s.fail(w, http.StatusForbidden, errors.New(msg)) }
@@ -432,27 +443,66 @@ func Listen(spec string) (net.Listener, error) {
 	return net.Listen("tcp", spec)
 }
 
+// shutdownGrace bounds how long Run lets in-flight requests finish, and
+// backgroundGrace how long it then waits for the dispatch loop and job
+// creations, before returning anyway. Variables so tests can shorten them.
+var (
+	shutdownGrace   = 5 * time.Second
+	backgroundGrace = 20 * time.Second
+)
+
 // Run serves until ctx is done, running the dispatch loop and peer checks.
+// It returns only after shutdown has finished: requests drained (or cut off
+// at shutdownGrace), room passes joined and dispatcher locks released, job
+// creations joined, and the heartbeat removed.
 func (s *Server) Run(ctx context.Context, ln net.Listener) error {
-	go s.loop(ctx)       // Task 10
-	go s.watchPeers(ctx) // Task 11
-	go s.syncCommittees(ctx)
-	go s.runJobJanitor(ctx)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var bg sync.WaitGroup
+	for _, run := range []func(context.Context){s.loop, s.watchPeers, s.syncCommittees, s.runJobJanitor} {
+		bg.Add(1)
+		go func() {
+			defer bg.Done()
+			run(ctx)
+		}()
+	}
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		srv.Shutdown(shutdown)
-	}()
-	defer func() {
-		if s.cfg.StateDir != "" {
-			rooms.RemoveHeartbeat(s.cfg.StateDir, os.Getpid())
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(ln) }()
+	var err error
+	select {
+	case <-ctx.Done():
+	case err = <-served: // the listener failed: stop everything else too
+		cancel()
+	}
+	// Event streams never end on their own and would hold Shutdown for its
+	// whole grace; a request still running at the grace is cut off. A job
+	// creation admitted from now on would start work nothing joins.
+	s.stopStreams()
+	s.closeJobs()
+	shutdown, cancelShutdown := context.WithTimeout(context.Background(), shutdownGrace)
+	if srv.Shutdown(shutdown) != nil {
+		srv.Close()
+	}
+	cancelShutdown()
+	if err == nil {
+		if e := <-served; !errors.Is(e, http.ErrServerClosed) {
+			err = e
 		}
+	}
+	joined := make(chan struct{})
+	go func() {
+		bg.Wait()
+		s.joinJobs()
+		close(joined)
 	}()
-	err := srv.Serve(ln)
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+	select {
+	case <-joined:
+	case <-time.After(backgroundGrace):
+		fmt.Fprintln(os.Stderr, "tincan web: shutdown: background work still running after", backgroundGrace)
+	}
+	if s.cfg.StateDir != "" {
+		rooms.RemoveHeartbeat(s.cfg.StateDir, os.Getpid())
 	}
 	return err
 }

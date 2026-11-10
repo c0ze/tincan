@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -465,6 +466,19 @@ type requestView struct {
 	Result  string    `json:"result,omitempty"`
 }
 
+// activityRequests is how many recent requests the Activity page lists;
+// activityReads bounds the records it parses to find them, and
+// activitySkew is how far timestamp precision can put a record's file time
+// before its Updated time.
+const (
+	activityRequests = 50
+	activityReads    = 4 * activityRequests
+	activitySkew     = 2 * time.Second
+)
+
+// getRequest reads a request record; a variable so tests can count reads.
+var getRequest = request.Get
+
 func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 	room, ok := s.room(w, r)
 	if !ok {
@@ -487,14 +501,38 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sort.Slice(listeners, func(i, j int) bool { return listeners[i].Name < listeners[j].Name })
+	// A record is rewritten on every update, so its file time roughly tracks its
+	// Updated time: sort by that and parse only the newest records, not
+	// every record the room has ever had.
 	entries, _ := os.ReadDir(request.Dir(room.Path))
-	var reqs []requestView
+	type recordFile struct {
+		id  string
+		mod time.Time
+	}
+	var files []recordFile
 	for _, e := range entries {
 		id, ok := strings.CutSuffix(e.Name(), ".json")
 		if !ok {
 			continue
 		}
-		rec, err := request.Get(room.Path, id)
+		if info, err := e.Info(); err == nil {
+			files = append(files, recordFile{id, info.ModTime()})
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
+	// A file time only approximates Updated: Updated is stamped before the
+	// write (a paused writer leaves a file time far newer than it), and
+	// coarse timestamps can put the file time up to activitySkew before it.
+	// So reqs holds the newest records by Updated read so far, and reading
+	// stops only at a file too old to hold a record newer than the oldest
+	// of them. Unparsable records are skipped, and activityReads caps the
+	// reads either way, so fewer may be listed.
+	var reqs []requestView // newest Updated first, at most activityRequests
+	for i, f := range files {
+		if i == activityReads || (len(reqs) == activityRequests && f.mod.Add(activitySkew).Before(reqs[len(reqs)-1].Updated)) {
+			break
+		}
+		rec, err := getRequest(room.Path, f.id)
 		if err != nil {
 			continue
 		}
@@ -505,11 +543,11 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 		if len(v.Result) > 2048 {
 			v.Result = truncateUTF8(v.Result, 2048) + "…"
 		}
-		reqs = append(reqs, v)
-	}
-	sort.Slice(reqs, func(i, j int) bool { return reqs[i].Updated.After(reqs[j].Updated) })
-	if len(reqs) > 50 {
-		reqs = reqs[:50]
+		at := sort.Search(len(reqs), func(j int) bool { return reqs[j].Updated.Before(v.Updated) })
+		reqs = slices.Insert(reqs, at, v)
+		if len(reqs) > activityRequests {
+			reqs = reqs[:activityRequests]
+		}
 	}
 	if reqs == nil {
 		reqs = []requestView{}

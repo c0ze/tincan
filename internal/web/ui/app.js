@@ -23,11 +23,14 @@ const state = {
   agents: { presets: [], listeners: [] },
   progress: new Map(), // request id -> {cursor, text}
   sources: {},
+  down: {},            // key -> true while that machine's event stream is disconnected
+  retries: {},         // key -> reconnects since its event stream last opened
   quotas: {},          // key -> [quota entry]
   showArchived: {},    // key/rid -> true when the room lists its archived threads
   committeeNotice: "", // outcome of the last committee save/delete, shown above the list
   editingCommittee: false, // the committee editor is open: notes must not re-render over it
   reviewOpen: null,    // {key, rid, id} while a review's detail is shown
+  reviewGen: 0,        // bumped per showReview call; drops stale responses
   reviewDraft: {},     // key/rid -> {committee, scope, question} typed into "Start a review"
 };
 
@@ -81,7 +84,13 @@ async function api(key, path, opts = {}) {
   const res = await fetch(BASE + prefix(key) + path, init);
   const ct = res.headers.get("Content-Type") || "";
   const data = ct.includes("json") ? await res.json() : await res.text();
-  if (!res.ok) throw new Error((data && data.error) || res.statusText);
+  if (!res.ok) {
+    if (data && data.error) throw new Error(data.error);
+    // A text/plain or HTML error (tailscale's own 502) has no .error, and
+    // statusText is empty over HTTP/2.
+    const snippet = typeof data === "string" ? data.replace(/\s+/g, " ").trim().slice(0, 200) : "";
+    throw new Error(`HTTP ${res.status}` + (snippet ? `: ${snippet}` : ""));
+  }
   return data;
 }
 
@@ -131,7 +140,8 @@ function renderSidebar() {
   for (const m of state.machines) {
     const box = el("div", "machine" + (m.online ? "" : " offline"));
     const name = el("div", "name");
-    name.append(el("span", "dot" + (m.online ? " on" : "")), document.createTextNode(m.name + (m.online ? "" : " (offline)")));
+    const down = m.online && state.down[m.key];
+    name.append(el("span", "dot" + (m.online && !down ? " on" : "")), document.createTextNode(m.name + (!m.online ? " (offline)" : down ? " (reconnecting…)" : "")));
     box.append(name, renderLimits(m));
     for (const r of state.rooms[m.key] || []) {
       if (r.hidden && !showHidden) continue;
@@ -494,10 +504,11 @@ function reviewForm(key, rid) {
   const go = el("button", "", "Request review");
   go.type = "button";
   go.onclick = async () => {
+    const cur = state.current;
     try {
       const r = await api(key, `rooms/${encodeURIComponent(rid)}/reviews`, { method: "POST", body: { committee: committee.value, scope: scope.value, question: question.value, request_id: clientId() } });
       delete state.reviewDraft[key + "/" + rid];
-      showReview(key, rid, r.review_id);
+      if (state.current === cur) showReview(key, rid, r.review_id); // not after navigating away
     } catch (e) { status.textContent = e.message; }
   };
   const label = (t, i) => { const l = el("label", "", t + " "); l.append(i); return l; };
@@ -506,8 +517,13 @@ function reviewForm(key, rid) {
 }
 
 async function showReview(key, rid, id, from) {
-  from = from || (state.reviewOpen && state.reviewOpen.id === id ? state.reviewOpen.from : "activity");
+  const refresh = !!(state.reviewOpen && state.reviewOpen.id === id);
+  from = from || (refresh ? state.reviewOpen.from : "activity");
+  const cur = state.current, gen = ++state.reviewGen;
   const d = await api(key, `rooms/${encodeURIComponent(rid)}/reviews/${encodeURIComponent(id)}`);
+  // Drop a response that a newer showReview, navigation or (for a refresh
+  // of the open review) Back has overtaken.
+  if (gen !== state.reviewGen || state.current !== cur || (refresh && !state.reviewOpen)) return;
   const view = $("view");
   const box = el("div", "review");
   box.append(el("h3", "", `${d.committee} · ${d.status}${d.settled ? "" : " …"}`), el("p", "muted", d.question));
@@ -744,6 +760,8 @@ function connect(key) {
   const src = new EventSource(BASE + prefix(key) + "events");
   state.sources[key] = src;
   src.onopen = () => {
+    state.retries[key] = 0;
+    delete state.down[key];
     if (key === "local") { loadMachines().then(openCurrent); return; }
     const m = state.machines.find((x) => x.key === key);
     if (!m) return;
@@ -751,6 +769,17 @@ function connect(key) {
       renderSidebar();
       if (state.current && state.current.key === key) openCurrent();
     });
+  };
+  // The browser retries a dropped stream by itself, but gives up for good
+  // when a retry is answered with an error status (a 502 while the server
+  // restarts): reconnect then, with capped backoff. onopen refetches the
+  // state, which recovers the notes missed meanwhile.
+  src.onerror = () => {
+    if (state.sources[key] !== src) return; // replaced or closed on purpose
+    if (!state.down[key]) { state.down[key] = true; renderSidebar(); }
+    if (src.readyState !== EventSource.CLOSED) return;
+    const tries = state.retries[key] = (state.retries[key] || 0) + 1;
+    setTimeout(() => { if (state.sources[key] === src) connect(key); }, Math.min(30000, 1000 * 2 ** (tries - 1)));
   };
   src.onmessage = async (ev) => {
     const n = JSON.parse(ev.data);

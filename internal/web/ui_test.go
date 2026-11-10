@@ -51,6 +51,19 @@ func TestUIContract(t *testing.T) {
 		// A review opened from a thread is not re-rendered over by thread notes.
 		"n.thread === cur.tid && !state.reviewOpen",
 		"function renderThread() {\n  if (state.reviewOpen) return;",
+		// EventSource gives up for good when a reconnect is answered with
+		// an error status (a 502 while the server restarts): reconnect it
+		// with capped backoff, only if it is still the current source, and
+		// show that the stream is down meanwhile.
+		"src.onerror = () => {",
+		"src.readyState !== EventSource.CLOSED",
+		"if (state.sources[key] === src) connect(key);",
+		"Math.min(30000,",
+		"state.retries[key] = 0;",
+		"(reconnecting…)",
+		// A review response that arrives after navigation, a newer
+		// showReview or Back must not take over the view.
+		"gen !== state.reviewGen || state.current !== cur || (refresh && !state.reviewOpen)",
 		// The Activity page re-renders on every activity note; a question being
 		// typed into "Start a review" must survive it.
 		"state.reviewDraft",
@@ -67,6 +80,11 @@ func TestUIContract(t *testing.T) {
 		if !strings.Contains(src, want) {
 			t.Errorf("app.js missing %q", want)
 		}
+	}
+	// A non-JSON error body (a proxy's 502) has no .error and HTTP/2 has no
+	// statusText: the message falls back to the status and the body.
+	if !strings.Contains(src, "`HTTP ${res.status}`") || strings.Contains(src, "|| res.statusText") {
+		t.Error("api() error message can be empty for a non-JSON error body")
 	}
 	if strings.Contains(src, "r.missing) continue") {
 		t.Error("app.js still skips missing rooms")

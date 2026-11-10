@@ -105,6 +105,33 @@ func TestProxyRejectsTraversalAndUnknownPeer(t *testing.T) {
 	}
 }
 
+// The UI reads a refusal's message from its JSON body; a text/plain one
+// left it with an empty error.
+func TestProxyRefusalsAreJSON(t *testing.T) {
+	hub, _, _, _ := peerPair(t)
+	for path, want := range map[string]struct {
+		code int
+		msg  string
+	}{
+		"/api/peers/nobody/rooms":                {404, `peer "nobody" is not configured`},
+		"/api/peers/macmini/peers/cachyos/rooms": {400, "peers are not chained"},
+		"/api/peers/macmini/%2e%2e/x":            {400, "invalid path"},
+	} {
+		rec := do(t, hub.Handler(), "GET", path, "", ownerHdr())
+		if rec.Code != want.code || rec.Header().Get("Content-Type") != "application/json" {
+			t.Errorf("%s: %d %q %s", path, rec.Code, rec.Header().Get("Content-Type"), rec.Body)
+			continue
+		}
+		var body struct {
+			Error string `json:"error"`
+		}
+		decode(t, rec.Body.String(), &body)
+		if body.Error != want.msg {
+			t.Errorf("%s: error %q, want %q", path, body.Error, want.msg)
+		}
+	}
+}
+
 func TestPeerHealthTracksOffline(t *testing.T) {
 	hub, _, peerSrv, _ := peerPair(t)
 	hub.checkPeers(context.Background())

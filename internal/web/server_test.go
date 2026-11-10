@@ -86,6 +86,24 @@ func TestOwnerCheck(t *testing.T) {
 	}
 }
 
+// Identity comes from tailscale serve, not cookies, so a framing page would
+// get a working UI: every response, refusals included, forbids framing.
+func TestResponsesForbidFraming(t *testing.T) {
+	h := testServer(t).Handler()
+	for _, rec := range []*httptest.ResponseRecorder{
+		do(t, h, "GET", "/", "", ownerHdr()),
+		do(t, h, "GET", "/api/self", "", ownerHdr()),
+		do(t, h, "GET", "/api/self", "", nil),
+	} {
+		if got := rec.Header().Get("Content-Security-Policy"); got != "default-src 'self'; frame-ancestors 'none'" {
+			t.Errorf("%d: Content-Security-Policy %q", rec.Code, got)
+		}
+		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+			t.Errorf("%d: X-Frame-Options %q", rec.Code, got)
+		}
+	}
+}
+
 func TestMutationsNeedCSRFHeaderAndSameOrigin(t *testing.T) {
 	h := testServer(t).Handler()
 	hdr := ownerHdr()

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -79,6 +80,8 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-s.streams.Done(): // shutting down; the client reconnects
 			return
 		case n := <-ch:
 			data, _ := json.Marshal(n)
@@ -371,6 +374,25 @@ func (b *debouncer) stop() {
 	}
 }
 
+// kqueueWatch reports whether fsnotify watches with kqueue on this platform.
+var kqueueWatch = runtime.GOOS == "darwin" || runtime.GOOS == "ios" || runtime.GOOS == "dragonfly" || strings.HasSuffix(runtime.GOOS, "bsd")
+
+// watchDirs lists the directories loop watches for room. requests/ is left
+// out under kqueue, which holds an open fd for every file in a watched
+// directory: one per request record and progress file, growing toward the
+// process limit. The tick's scan still picks up changes there.
+func watchDirs(room rooms.Room) []string {
+	dirs := []string{thread.Root(room.Path), review.Root(room.Path), filepath.Join(room.Path, ".tincan", "hosts"), filepath.Join(room.Path, ".tincan", "present")}
+	if !kqueueWatch {
+		dirs = append(dirs, filepath.Join(room.Path, ".tincan", "requests"))
+	}
+	metas, _ := thread.List(room.Path)
+	for _, m := range metas {
+		dirs = append(dirs, filepath.Join(thread.Root(room.Path), m.ID))
+	}
+	return dirs
+}
+
 func (s *Server) loop(ctx context.Context) {
 	watcher, err := fsnotify.NewWatcher()
 	var events chan fsnotify.Event
@@ -396,12 +418,7 @@ func (s *Server) loop(ctx context.Context) {
 		if watcher != nil {
 			list, _ := s.cfg.Registry.List()
 			for _, room := range list {
-				dirs := []string{thread.Root(room.Path), review.Root(room.Path), filepath.Join(room.Path, ".tincan", "requests"), filepath.Join(room.Path, ".tincan", "hosts"), filepath.Join(room.Path, ".tincan", "present")}
-				metas, _ := thread.List(room.Path)
-				for _, m := range metas {
-					dirs = append(dirs, filepath.Join(thread.Root(room.Path), m.ID))
-				}
-				for _, d := range dirs {
+				for _, d := range watchDirs(room) {
 					if !watched[d] && watcher.Add(d) == nil {
 						watched[d] = true
 					}
