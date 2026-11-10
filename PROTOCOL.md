@@ -43,6 +43,11 @@ bare will silently create a *second* room there. Always pass the room explicitly
 --room "$(git rev-parse --show-toplevel)"     # or an absolute path
 ```
 
+The messaging commands (`send`, `recv`, `ask`, `reply`, `status`, `ping`,
+`stop`) refuse a `--room` that is not an existing directory (exit 1) instead of
+creating it, so a mistyped path cannot strand messages in a new room. The
+room's `.tincan/` itself is still created on first use.
+
 If `--room` resolves to a directory that's inside a git repo but isn't that
 repo's root, messaging and hosted lifecycle commands print an advisory to stderr naming the
 repo root it found — the warning never fails the command or changes its exit

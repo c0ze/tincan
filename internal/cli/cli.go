@@ -142,6 +142,24 @@ func bodyFrom(body, bodyFile string) (string, int, error) {
 	}
 }
 
+// requireRoom refuses a --room that is not an existing directory. The spool
+// would otherwise create it with all its parents, so a mistyped path would
+// succeed into a room no peer reads. The room's own .tincan is still created
+// on demand.
+func requireRoom(room string) error {
+	info, err := os.Stat(room)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("room %s does not exist (--room must be an existing directory)", room)
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("room %s is not a directory", room)
+	}
+	return nil
+}
+
 // roomRootWarning returns a non-empty advisory string iff room is inside a
 // git repo but is not that repo's root — the "cd into a subdir silently
 // creates a second room" footgun. It never errors: any failure to stat while
@@ -232,6 +250,10 @@ func cmdSend(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tincan send: %v\n", err)
 		return ec
 	}
+	if err := requireRoom(*room); err != nil {
+		fmt.Fprintf(stderr, "tincan send: %v\n", err)
+		return ExitError
+	}
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)
 	}
@@ -273,6 +295,10 @@ func cmdRecv(args []string, stdout, stderr io.Writer) int {
 	if *format != "json" && *format != "body" {
 		fmt.Fprintln(stderr, "tincan recv: --format must be json or body")
 		return ExitUsage
+	}
+	if err := requireRoom(*room); err != nil {
+		fmt.Fprintf(stderr, "tincan recv: %v\n", err)
+		return ExitError
 	}
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)
@@ -341,6 +367,10 @@ func cmdAsk(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
 		return ec
 	}
+	if err := requireRoom(*room); err != nil {
+		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
+		return ExitError
+	}
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)
 	}
@@ -406,6 +436,10 @@ func cmdReply(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tincan reply: %v\n", err)
 		return ec
 	}
+	if err := requireRoom(*room); err != nil {
+		fmt.Fprintf(stderr, "tincan reply: %v\n", err)
+		return ExitError
+	}
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)
 	}
@@ -439,6 +473,10 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	if *format != "table" && *format != "json" {
 		fmt.Fprintln(stderr, "tincan status: --format must be table or json")
 		return ExitUsage
+	}
+	if err := requireRoom(*roomFlag); err != nil {
+		fmt.Fprintf(stderr, "tincan status: %v\n", err)
+		return ExitError
 	}
 	room, err := filepath.Abs(*roomFlag)
 	if err != nil {
@@ -567,6 +605,10 @@ func cmdPing(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tincan ping: --to is required")
 		return ExitUsage
 	}
+	if err := requireRoom(*room); err != nil {
+		fmt.Fprintf(stderr, "tincan ping: %v\n", err)
+		return ExitError
+	}
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)
 	}
@@ -602,6 +644,10 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 	if *to == "" || *from == "" {
 		fmt.Fprintln(stderr, "tincan stop: --to and --from are required")
 		return ExitUsage
+	}
+	if err := requireRoom(*room); err != nil {
+		fmt.Fprintf(stderr, "tincan stop: %v\n", err)
+		return ExitError
 	}
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)

@@ -244,6 +244,36 @@ func TestBodyFileReadErrorExitsOne(t *testing.T) {
 	}
 }
 
+// A mistyped --room must fail instead of creating a new room (with all its
+// parents) that no peer will ever read.
+func TestMissingRoomIsRefusedNotCreated(t *testing.T) {
+	base := canonTempDir(t) // a symlinked /var would fail for another reason
+	room := filepath.Join(base, "typo", "deeper", "room")
+	file := filepath.Join(base, "file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []string{room, file} {
+		for _, args := range [][]string{
+			{"send", "--to", "x", "--from", "y", "--body", "hi"},
+			{"recv", "--as", "x", "--timeout", "1"},
+			{"ask", "--to", "x", "--from", "y", "--body", "hi", "--timeout", "1"},
+			{"reply", "--channel", "r-1", "--body", "hi"},
+			{"status"},
+			{"ping", "--to", "x"},
+			{"stop", "--to", "x", "--from", "y"},
+		} {
+			code, _, stderr := run(append(args, "--room", r)...)
+			if code != ExitError || !strings.Contains(stderr, "room "+r+" ") {
+				t.Errorf("%s --room %s: exit %d, stderr=%q; want exit 1 naming the room", args[0], r, code, stderr)
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(base, "typo")); !os.IsNotExist(err) {
+		t.Fatalf("missing room was created: %v", err)
+	}
+}
+
 // writePresenceFile writes a single token file under
 // <room>/.tincan/present/<name>/, in the same on-disk JSON shape and layout
 // spool.Recv's heartbeat produces (one file per parked Recv, named by a
