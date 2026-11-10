@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -303,6 +304,49 @@ func TestServeForegroundAnswersAndStopsOnStop(t *testing.T) {
 	log, err := os.ReadFile(host.LogPath(room, "fake"))
 	if err != nil || !strings.Contains(string(log), "=== ") {
 		t.Fatalf("host log missing or empty: %v %q", err, log)
+	}
+}
+
+// Closing the terminal of a foreground serve (SIGHUP) or SIGQUIT must shut it
+// down like SIGTERM: the agent is stopped and the state file removed.
+func TestServeForegroundCleansUpOnHangup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no SIGHUP or SIGQUIT on Windows")
+	}
+	fakeAgentConfig(t)
+	exe, _ := os.Executable()
+	for _, sig := range []syscall.Signal{syscall.SIGHUP, syscall.SIGQUIT} {
+		t.Run(sig.String(), func(t *testing.T) {
+			room := t.TempDir()
+			serve := exec.Command(exe, "serve", "fake", "--room", room)
+			if err := serve.Start(); err != nil {
+				t.Fatal(err)
+			}
+			exited := make(chan error, 1)
+			go func() { exited <- serve.Wait() }()
+			t.Cleanup(func() {
+				serve.Process.Kill()
+				<-exited
+			})
+			if !waitUntilTrue(func() bool { st, ok, _ := host.ReadState(room, "fake"); return ok && st.State == "parked" }, 10*time.Second) {
+				t.Fatal("serve never parked")
+			}
+			if err := serve.Process.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-exited:
+				exited <- err
+				if err != nil {
+					t.Fatalf("serve exit after %v: %v", sig, err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("serve did not exit after %v", sig)
+			}
+			if _, ok, _ := host.ReadState(room, "fake"); ok {
+				t.Fatalf("state file left behind after %v", sig)
+			}
+		})
 	}
 }
 

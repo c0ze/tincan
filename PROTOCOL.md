@@ -193,7 +193,8 @@ a detached `tincan serve` process that
 3. persists the terminal result, sends a reply if `reply_to` is present, then
    acknowledges the claimed message;
 4. loops. A `kind == "stop"` message (`tincan stop`), authenticated shutdown
-   (`tincan down`), or SIGTERM/SIGINT ends the loop.
+   (`tincan down`), or SIGTERM/SIGINT/SIGHUP/SIGQUIT ends the loop (a closed
+   terminal stops a foreground `serve` cleanly).
 
 Each request runs one provider CLI process. Claude, Grok, Agy, Kimi and Cursor native
 executable presets resume a conversation scoped to the room and listener name by

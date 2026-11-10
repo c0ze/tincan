@@ -225,7 +225,9 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		logw = io.MultiWriter(f, stderr)
 		fmt.Fprintf(stdout, "serving name=%s preset=%s room=%s (Ctrl-C to stop)\n", h.name, label, room)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// A closed terminal (SIGHUP) or Ctrl-\ (SIGQUIT) must still stop the agent's
+	// process group and remove the state file. Windows never delivers these two.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer stop()
 	if err := host.Serve(ctx, host.ServeOptions{Room: room, Name: h.name, Label: label, Preset: p, Log: logw, Owner: owner}); err != nil {
 		fmt.Fprintf(stderr, "tincan serve: %v\n", err)
