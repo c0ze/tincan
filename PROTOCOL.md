@@ -348,7 +348,7 @@ before resetting. Stopping alone preserves the conversation.
 ```
 .tincan/hosts/<name>.json   # private owner/control credentials, preset, session_mode, state, current_id
 .tincan/hosts/<name>.log    # per message: "=== <id> from=<from> started=<ts>" … agent stdout+stderr … "=== exit=<code> duration=<s>s"
-.tincan/hosts/<name>.log.1  # the previous log: a log over 16 MiB is rotated when a listener starts
+.tincan/hosts/<name>.log.1  # the previous log: a log over 16 MiB is rotated when a listener starts, never while one runs
 .tincan/hosts/config/<name>/<owner>.json # a launch's resolved preset (0600), read and removed by the daemon at startup
 .tincan/sessions/<name>.json # saved provider conversation pointer and preset identity
 .tincan/requests/<id>.json # durable request status and result

@@ -54,7 +54,9 @@ func TestHostFilesArePrivate(t *testing.T) {
 	}
 }
 
-func TestOpenLogRotatesLargeLog(t *testing.T) {
+// Rotation happens only where the caller owns the listener (see Serve and
+// Up); opening a large log never moves it out from under its writer.
+func TestRotateLogKeepsOneGeneration(t *testing.T) {
 	room := t.TempDir()
 	path := LogPath(room, "agent")
 	f, err := OpenLog(path)
@@ -65,17 +67,25 @@ func TestOpenLogRotatesLargeLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
+	rotateLog(path)
+	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
+		t.Fatalf("small log rotated: %v", err)
+	}
+	if err := os.Truncate(path, maxLogBytes+1); err != nil {
+		t.Fatal(err)
+	}
 	if f, err = OpenLog(path); err != nil {
 		t.Fatal(err)
 	}
 	f.Close()
 	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
-		t.Fatalf("small log rotated: %v", err)
+		t.Fatalf("OpenLog rotated: %v", err)
 	}
 	for generation := 0; generation < 2; generation++ {
 		if err := os.Truncate(path, maxLogBytes+1); err != nil {
 			t.Fatal(err)
 		}
+		rotateLog(path)
 		f, err := OpenLog(path)
 		if err != nil {
 			t.Fatal(err)

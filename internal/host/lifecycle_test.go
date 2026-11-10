@@ -70,11 +70,24 @@ func TestUpStopsItsDaemonWhenReadinessTimesOut(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	room := canonicalTempDir(t)
+	// Up rotates a large log while it holds the free lifetime lock.
+	if f, err := OpenLog(LogPath(room, "agent")); err != nil {
+		t.Fatal(err)
+	} else {
+		f.Close()
+	}
+	if err := os.Truncate(LogPath(room, "agent"), maxLogBytes+1); err != nil {
+		t.Fatal(err)
+	}
 	daemon := make(chan int, 1)
 	go func() { daemon <- readPID(t, pidfile); cancel() }()
-	_, err := Up(ctx, UpOptions{Room: t.TempDir(), Name: "agent", Label: "fake", Preset: p, Wait: 10 * time.Second, Executable: exe})
+	_, err := Up(ctx, UpOptions{Room: room, Name: "agent", Label: "fake", Preset: p, Wait: 10 * time.Second, Executable: exe})
 	if err == nil || !strings.Contains(err.Error(), "did not become ready") {
 		t.Fatalf("Up = %v", err)
+	}
+	if info, err := os.Stat(LogPath(room, "agent") + ".1"); err != nil || info.Size() != maxLogBytes+1 {
+		t.Fatalf("Up did not rotate the log: %v %v", info, err)
 	}
 	pid := <-daemon
 	t.Cleanup(func() {

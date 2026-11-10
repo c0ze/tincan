@@ -28,6 +28,10 @@ type ServeOptions struct {
 	Label  string    // preset label recorded in the state file / status
 	Preset Preset    // resolved preset (see Resolve)
 	Log    io.Writer // host log sink; nil discards
+	// LogPath, when set, is a host log Serve rotates and opens once it owns
+	// the listener, then writes ahead of Log (a foreground serve). Opening it
+	// earlier could rotate the log of a listener that is still running.
+	LogPath string
 }
 
 // Serve parks on <room>/.tincan/inbox/<name> with the normal Recv (so
@@ -72,6 +76,15 @@ func Serve(ctx context.Context, o ServeOptions) error {
 		return fmt.Errorf("listener %s already owns its lifetime or cannot be locked: %w", o.Name, err)
 	}
 	defer lifetime.Close()
+	if o.LogPath != "" {
+		rotateLog(o.LogPath)
+		f, err := OpenLog(o.LogPath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		o.Log = io.MultiWriter(f, o.Log)
+	}
 	// The lock excludes the previous lifetime and all replacement writers.
 	if previous, ok, err := ReadState(o.Room, o.Name); err != nil {
 		if err := RemoveState(o.Room, o.Name); err != nil {

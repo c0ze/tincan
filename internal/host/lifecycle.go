@@ -91,6 +91,8 @@ func Up(ctx context.Context, o UpOptions) (UpResult, error) {
 		}
 		owner, err := filelock.Try(lifetimePath(room, o.Name))
 		if err == nil {
+			// No listener writes the log while this lock is held.
+			rotateLog(LogPath(room, o.Name))
 			owner.Close()
 			break
 		}

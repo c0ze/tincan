@@ -350,6 +350,39 @@ func TestServeForegroundCleansUpOnHangup(t *testing.T) {
 	}
 }
 
+// A duplicate serve must not rotate the log that the owning listener still
+// writes to, even when that log is over the rotation size.
+func TestDuplicateServeLeavesOwnersLogInPlace(t *testing.T) {
+	fakeAgentConfig(t)
+	room := t.TempDir()
+	done := make(chan int, 1)
+	go func() { code, _, _ := run("serve", "fake", "--room", room); done <- code }()
+	if !waitUntilTrue(func() bool { st, ok, _ := host.ReadState(room, "fake"); return ok && st.State == "parked" }, 10*time.Second) {
+		t.Fatal("serve never parked")
+	}
+	t.Cleanup(func() {
+		run("stop", "--room", room, "--to", "fake", "--from", "orch")
+		<-done
+	})
+	logPath := host.LogPath(room, "fake")
+	if err := os.Truncate(logPath, 16<<20+1); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := run("serve", "fake", "--room", room); code != ExitError {
+		t.Fatalf("duplicate serve exit %d", code)
+	}
+	if _, err := os.Stat(logPath + ".1"); !os.IsNotExist(err) {
+		t.Fatalf("duplicate serve rotated the owner's log: %v", err)
+	}
+	if code, out, stderr := run("ask", "--room", room, "--to", "fake", "--from", "orch", "--body", "still logged", "--timeout", "20", "--format", "body"); code != ExitOK {
+		t.Fatalf("ask: %d %q %q", code, out, stderr)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil || !strings.Contains(string(data[16<<20:]), "echo: still logged") {
+		t.Fatalf("owner's output missing from %s: %v", logPath, err)
+	}
+}
+
 func TestUpDownUsageErrorsExitTwo(t *testing.T) {
 	setHomeEnv(t, t.TempDir()) // no user presets
 	cases := [][]string{

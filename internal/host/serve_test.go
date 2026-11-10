@@ -660,6 +660,39 @@ func TestServeLogHasPerMessageMarkers(t *testing.T) {
 	}
 }
 
+func TestServeRotatesLargeLogOnceItOwnsTheListener(t *testing.T) {
+	t.Setenv("TINCAN_FAKE_AGENT", "1")
+	room := canonicalTempDir(t)
+	path := LogPath(room, "agent")
+	f, err := OpenLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if err := os.Truncate(path, maxLogBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, ServeOptions{Room: room, Name: "agent", Label: "fake", Preset: echoPreset(), LogPath: path})
+	}()
+	if !waitFor(func() bool { st, ok, _ := ReadState(room, "agent"); return ok && st.State == "parked" }, 10*time.Second) {
+		cancel()
+		t.Fatal("serve never parked")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path + ".1"); err != nil || info.Size() != maxLogBytes+1 {
+		t.Fatalf("previous log: %v %v", info, err)
+	}
+	if data, err := os.ReadFile(path); err != nil || !strings.HasPrefix(string(data), "serve name=agent ") {
+		t.Fatalf("new log: %q %v", data, err)
+	}
+}
+
 func TestServeRejectsInvalidName(t *testing.T) {
 	err := Serve(context.Background(), ServeOptions{Room: t.TempDir(), Name: "../x", Preset: echoPreset()})
 	if err == nil {
