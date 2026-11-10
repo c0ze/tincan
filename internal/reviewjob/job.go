@@ -159,17 +159,40 @@ func (s Store) List() ([]Job, error) {
 	return out, nil
 }
 
-// Remove deletes the job record; the caller holds the job lock. The lock
-// file itself stays: unlinking a lock file another process may be waiting
-// on would let two owners hold "the" lock (see filelock).
+// Remove deletes the job record and its cancel request; the caller holds the
+// job lock. The lock file itself stays: unlinking a lock file another
+// process may be waiting on would let two owners hold "the" lock (see
+// filelock).
 func (s Store) Remove(id string) error {
 	if err := validID(id); err != nil {
 		return err
 	}
-	if err := os.Remove(s.Path(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	for _, p := range []string{s.Path(id), s.cancelPath(id)} {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	return nil
+}
+
+// cancelPath records a cancel that arrived while another operation held the
+// job lock (creation holds it through materializing); creation checks it
+// before launching.
+func (s Store) cancelPath(id string) string { return filepath.Join(s.jobsDir(), id+".cancel") }
+
+func (s Store) requestCancel(id string) error {
+	if err := validID(id); err != nil {
+		return err
+	}
+	if err := fsutil.MkdirPrivate(s.jobsDir()); err != nil {
+		return err
+	}
+	return fsutil.WriteFileAtomic(s.cancelPath(id), nil)
+}
+
+func (s Store) cancelRequested(id string) bool {
+	_, err := os.Lstat(s.cancelPath(id))
+	return err == nil
 }
 
 // HTTPStatus lets callers classify the error (committees §6.4).

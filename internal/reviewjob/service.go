@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/dispatch"
+	"github.com/c0ze/tincan/v2/internal/filelock"
 	"github.com/c0ze/tincan/v2/internal/fsutil"
 	"github.com/c0ze/tincan/v2/internal/host"
 	"github.com/c0ze/tincan/v2/internal/packet"
@@ -42,6 +43,9 @@ type Service struct {
 
 	// down stops a listener; nil means host.Down (tests inject failures).
 	down func(ctx context.Context, room, name string, wait time.Duration) error
+	// materialized, when set, runs after the workspace is built and before
+	// the launch (tests hold creation there).
+	materialized func(ctx context.Context)
 
 	mu       sync.Mutex
 	inflight map[string]bool
@@ -181,9 +185,37 @@ func (s *Service) create(id string) {
 	// repack or checkout is cut off at expiry and releases the lock.
 	ctx, cancel := context.WithDeadline(context.Background(), j.ExpiresAt)
 	defer cancel()
+	// A cancel recorded meanwhile (Cancel does not wait for this lock)
+	// cuts materializing short and refuses the launch.
+	go func() {
+		tick := time.NewTicker(250 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				if st.cancelRequested(id) {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 	fail := func(msg string) {
 		j.State, j.Result = "error", "ERROR "+msg
 		st.Save(j)
+	}
+	cancelled := func() bool {
+		if !st.cancelRequested(id) {
+			return false
+		}
+		if j.Workspace != "" {
+			os.RemoveAll(j.Workspace) // nothing was launched in it
+		}
+		j.State, j.Result, j.Tombstone = "cancelled", "ERROR canceled before launch", true
+		st.Save(j)
+		return true
 	}
 	if j.Workspace != "" {
 		if r, err := request.Get(j.Workspace, j.ID); err == nil {
@@ -193,6 +225,9 @@ func (s *Service) create(id string) {
 			return
 		}
 		os.RemoveAll(j.Workspace)
+	}
+	if cancelled() {
+		return
 	}
 	req, err := readInput(s.packetPath(id))
 	if err != nil {
@@ -234,6 +269,12 @@ func (s *Service) create(id string) {
 		return
 	}
 	j.Note = note
+	if s.materialized != nil {
+		s.materialized(ctx)
+	}
+	if cancelled() {
+		return
+	}
 	// Materializing takes time: recheck the time left right before launch.
 	timeout, err := s.launchTimeout(j)
 	if err != nil {
@@ -246,8 +287,16 @@ func (s *Service) create(id string) {
 	r, err := dispatch.Send(ctx, o, dispatch.SendSpec{Agent: j.Preset, Preset: j.Preset, From: "review", Body: body, RequestID: j.ID})
 	if err != nil {
 		// A launch failure after the request was saved must never run later.
+		// ctx may be the one a cancel just cut short: use a fresh one.
 		if saved, gerr := request.Get(j.Workspace, j.ID); gerr == nil && !saved.Terminal() {
-			request.Cancel(ctx, j.Workspace, j.ID)
+			cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
+			request.Cancel(cctx, j.Workspace, j.ID)
+			ccancel()
+		}
+		if st.cancelRequested(id) {
+			j.State, j.Result, j.Tombstone = "cancelled", "ERROR canceled during launch", true
+			st.Save(j)
+			return
 		}
 		fail("launch: " + err.Error())
 		return
@@ -367,10 +416,25 @@ func (s *Service) Ack(ctx context.Context, id string) (Job, error) {
 
 // Cancel stops a job. A job that already finished keeps its result and the
 // cancel is acknowledged; an unknown job gets a tombstone that refuses a
-// later create. acked reports whether the member can no longer run.
+// later create. acked reports whether the member can no longer run. While
+// another operation (creation) holds the job lock, the cancel is recorded for
+// it to honour before launch and is not acknowledged yet.
 func (s *Service) Cancel(ctx context.Context, id string, expiresAt time.Time) (Job, bool, error) {
 	st := s.store()
-	lock, err := st.Lock(ctx, id)
+	lock, err := st.TryLock(id)
+	if errors.Is(err, filelock.ErrLocked) {
+		// Creation holds the lock through clone and checkout: do not wait
+		// for it. The recorded request stops creation before launch; the
+		// requester's next cancel finds the job terminal.
+		if err := st.requestCancel(id); err != nil {
+			return Job{}, false, err
+		}
+		j, ok, _ := st.Get(id)
+		if !ok {
+			j = Job{ID: id}
+		}
+		return j, false, nil
+	}
 	if err != nil {
 		return Job{}, false, invalid(err.Error())
 	}

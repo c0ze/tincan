@@ -475,7 +475,12 @@ one — a job that already finished stays `done` with its result, and the
 cancel is acknowledged. Otherwise record the tombstone (a launch is now
 refused), cancel the request (importing the result it returns if it had just
 finished), ask the host to stop it, and acknowledge once the request is
-terminal or the host has exited. If the host died, its
+terminal or the host has exited. A cancel that finds the job lock held
+(creation holds it through clone and checkout) does not wait: it records
+`<job_id>.cancel` beside the record and is not acknowledged yet; creation
+watches for it, aborts materializing, and right before launch refuses to
+launch, removes the workspace and records `cancelled`, so the requester's
+next cancel is acknowledged. If the host died, its
 agent process may outlive it until the exec timeout (phase 1 behaviour); the
 docs list this as residual risk.
 
