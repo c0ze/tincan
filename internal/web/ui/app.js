@@ -23,6 +23,8 @@ const state = {
   agents: { presets: [], listeners: [] },
   progress: new Map(), // request id -> {cursor, text}
   sources: {},
+  down: {},            // key -> true while that machine's event stream is disconnected
+  retries: {},         // key -> reconnects since its event stream last opened
   quotas: {},          // key -> [quota entry]
   showArchived: {},    // key/rid -> true when the room lists its archived threads
   committeeNotice: "", // outcome of the last committee save/delete, shown above the list
@@ -138,7 +140,8 @@ function renderSidebar() {
   for (const m of state.machines) {
     const box = el("div", "machine" + (m.online ? "" : " offline"));
     const name = el("div", "name");
-    name.append(el("span", "dot" + (m.online ? " on" : "")), document.createTextNode(m.name + (m.online ? "" : " (offline)")));
+    const down = m.online && state.down[m.key];
+    name.append(el("span", "dot" + (m.online && !down ? " on" : "")), document.createTextNode(m.name + (!m.online ? " (offline)" : down ? " (reconnecting…)" : "")));
     box.append(name, renderLimits(m));
     for (const r of state.rooms[m.key] || []) {
       if (r.hidden && !showHidden) continue;
@@ -757,6 +760,8 @@ function connect(key) {
   const src = new EventSource(BASE + prefix(key) + "events");
   state.sources[key] = src;
   src.onopen = () => {
+    state.retries[key] = 0;
+    delete state.down[key];
     if (key === "local") { loadMachines().then(openCurrent); return; }
     const m = state.machines.find((x) => x.key === key);
     if (!m) return;
@@ -764,6 +769,17 @@ function connect(key) {
       renderSidebar();
       if (state.current && state.current.key === key) openCurrent();
     });
+  };
+  // The browser retries a dropped stream by itself, but gives up for good
+  // when a retry is answered with an error status (a 502 while the server
+  // restarts): reconnect then, with capped backoff. onopen refetches the
+  // state, which recovers the notes missed meanwhile.
+  src.onerror = () => {
+    if (state.sources[key] !== src) return; // replaced or closed on purpose
+    if (!state.down[key]) { state.down[key] = true; renderSidebar(); }
+    if (src.readyState !== EventSource.CLOSED) return;
+    const tries = state.retries[key] = (state.retries[key] || 0) + 1;
+    setTimeout(() => { if (state.sources[key] === src) connect(key); }, Math.min(30000, 1000 * 2 ** (tries - 1)));
   };
   src.onmessage = async (ev) => {
     const n = JSON.parse(ev.data);

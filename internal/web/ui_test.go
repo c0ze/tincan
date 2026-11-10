@@ -51,6 +51,16 @@ func TestUIContract(t *testing.T) {
 		// A review opened from a thread is not re-rendered over by thread notes.
 		"n.thread === cur.tid && !state.reviewOpen",
 		"function renderThread() {\n  if (state.reviewOpen) return;",
+		// EventSource gives up for good when a reconnect is answered with
+		// an error status (a 502 while the server restarts): reconnect it
+		// with capped backoff, only if it is still the current source, and
+		// show that the stream is down meanwhile.
+		"src.onerror = () => {",
+		"src.readyState !== EventSource.CLOSED",
+		"if (state.sources[key] === src) connect(key);",
+		"Math.min(30000,",
+		"state.retries[key] = 0;",
+		"(reconnecting…)",
 		// A review response that arrives after navigation, a newer
 		// showReview or Back must not take over the view.
 		"gen !== state.reviewGen || state.current !== cur || (refresh && !state.reviewOpen)",
