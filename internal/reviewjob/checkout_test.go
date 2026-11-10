@@ -110,6 +110,33 @@ func TestCheckoutFallsBack(t *testing.T) {
 	}
 }
 
+// The member fetched origin but its local branch is behind: the base is
+// reachable only from a remote-tracking ref, which clone --shared does not
+// copy. The workspace must still own the base after dissociating.
+func TestCheckoutBaseOnlyOnRemoteTrackingRef(t *testing.T) {
+	_, reg, member := checkoutFixture(t)
+	src := stateDir(t)
+	gitIn(t, src, "clone", "-q", member, "up")
+	up := filepath.Join(src, "up")
+	os.WriteFile(filepath.Join(up, "a.txt"), []byte("a\nupstream\n"), 0o644)
+	gitIn(t, up, "commit", "-qam", "upstream")
+	gitIn(t, member, "fetch", "-q", up, "main:refs/remotes/origin/main")
+	gitIn(t, up, "remote", "set-url", "origin", "https://github.com/c0ze/fixture")
+	os.WriteFile(filepath.Join(up, "new.txt"), []byte("n\n"), 0o644)
+	q, err := packet.Build(context.Background(), up, "uncommitted", "q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gitIn(t, member, "rev-parse", "main") == q.Manifest.BaseCommit {
+		t.Fatal("fixture: local main already has the base")
+	}
+	ws := filepath.Join(stateDir(t), "ws")
+	if _, reason, err := materializeCheckout(context.Background(), ws, q, reg); err != nil || reason != "" {
+		t.Fatalf("checkout: %q %v", reason, err)
+	}
+	gitIn(t, ws, "fsck", "--no-progress")
+}
+
 // hostilePacket turns the fixture's packet into one a compromised peer could
 // send: its manifest lists only the given paths, and its included_tree is
 // whatever the patch produces on the base, so the tree check alone cannot

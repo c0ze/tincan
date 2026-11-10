@@ -212,7 +212,14 @@ func materializeCheckout(ctx context.Context, ws string, p *packet.Packet, reg *
 	// core.symlinks=false is kept in the workspace, not just passed per
 	// command, so the reviewer's own git (status, restore, reset --hard)
 	// writes tracked links as plain files too (committees §6.6).
-	steps := [][]string{{"config", "core.symlinks", "false"}, {"repack", "-a", "-d", "-q"}, {"remote", "remove", "origin"}}
+	steps := [][]string{{"config", "core.symlinks", "false"}}
+	if m.BaseKind == "commit" {
+		// The clone copies only heads and tags; a base reachable only from
+		// the candidate's remote-tracking refs would be lost with the
+		// alternates. Pin it so repack copies it.
+		steps = append(steps, []string{"update-ref", "refs/tincan/base", m.BaseCommit})
+	}
+	steps = append(steps, []string{"repack", "-a", "-d", "-q"}, []string{"remote", "remove", "origin"})
 	for _, s := range steps {
 		if _, err := g.Run(ctx, nil, s...); err != nil {
 			return fail(s[0], err)

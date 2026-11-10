@@ -399,7 +399,9 @@ promisor remote) are skipped. With lazy fetching disabled
 1. `git clone --no-checkout --shared <candidate root> <ws>`, then
    `git -C <ws> config core.symlinks false` (persisted, so the reviewer's own
    `git restore`/`reset --hard` never creates a real symlink either),
-   `git -C <ws> repack -a -d -q` and remove `.git/objects/info/alternates`, so
+   `git -C <ws> update-ref refs/tincan/base <base_commit>` (the clone copies
+   only heads and tags; the base may be reachable only from a remote-tracking
+   ref), `git -C <ws> repack -a -d -q` and remove `.git/objects/info/alternates`, so
    the clone owns its objects and survives maintenance in the candidate.
 2. Base: `git -C <ws> checkout --detach <base_commit>`, or for an empty base
    `git -C <ws> checkout --orphan tincan-review` with an empty index and tree.
