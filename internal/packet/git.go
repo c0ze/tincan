@@ -32,6 +32,11 @@ func (g Git) command(ctx context.Context, stdin []byte, args []string) *exec.Cmd
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.Dir
 	cmd.Env = append(cmd.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0", "LC_ALL=C")
+	// Pathspecs here use their own magic (snapshot's ":/" and literal
+	// excludes); inherited global pathspec modes (git --literal-pathspecs and
+	// friends) would make Git misread or refuse them. Later entries win, on
+	// Windows regardless of case.
+	cmd.Env = append(cmd.Env, "GIT_LITERAL_PATHSPECS=0", "GIT_GLOB_PATHSPECS=0", "GIT_NOGLOB_PATHSPECS=0", "GIT_ICASE_PATHSPECS=0")
 	cmd.Env = append(cmd.Env, g.Env...)
 	cmd.WaitDelay = gitWaitDelay
 	if stdin != nil {
