@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -467,7 +468,8 @@ type requestView struct {
 
 // activityRequests is how many recent requests the Activity page lists;
 // activityReads bounds the records it parses to find them, and
-// activitySkew is how far a record's file time may trail its Updated time.
+// activitySkew is how far timestamp precision can put a record's file time
+// before its Updated time.
 const (
 	activityRequests = 50
 	activityReads    = 4 * activityRequests
@@ -518,15 +520,16 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
-	// A file time only approximates Updated, which is stamped before the
-	// write, and coarse timestamps tie: once activityRequests records are
-	// in, keep reading files within activitySkew of the last one taken,
-	// then order by Updated. Unparsable records are skipped, and
-	// activityReads caps the reads either way, so fewer may be listed.
-	var reqs []requestView
-	var edge time.Time
+	// A file time only approximates Updated: Updated is stamped before the
+	// write (a paused writer leaves a file time far newer than it), and
+	// coarse timestamps can put the file time up to activitySkew before it.
+	// So reqs holds the newest records by Updated read so far, and reading
+	// stops only at a file too old to hold a record newer than the oldest
+	// of them. Unparsable records are skipped, and activityReads caps the
+	// reads either way, so fewer may be listed.
+	var reqs []requestView // newest Updated first, at most activityRequests
 	for i, f := range files {
-		if i == activityReads || (len(reqs) >= activityRequests && f.mod.Before(edge)) {
+		if i == activityReads || (len(reqs) == activityRequests && f.mod.Add(activitySkew).Before(reqs[len(reqs)-1].Updated)) {
 			break
 		}
 		rec, err := getRequest(room.Path, f.id)
@@ -540,14 +543,11 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 		if len(v.Result) > 2048 {
 			v.Result = truncateUTF8(v.Result, 2048) + "…"
 		}
-		reqs = append(reqs, v)
-		if len(reqs) == activityRequests {
-			edge = f.mod.Add(-activitySkew)
+		at := sort.Search(len(reqs), func(j int) bool { return reqs[j].Updated.Before(v.Updated) })
+		reqs = slices.Insert(reqs, at, v)
+		if len(reqs) > activityRequests {
+			reqs = reqs[:activityRequests]
 		}
-	}
-	sort.Slice(reqs, func(i, j int) bool { return reqs[i].Updated.After(reqs[j].Updated) })
-	if len(reqs) > activityRequests {
-		reqs = reqs[:activityRequests]
 	}
 	if reqs == nil {
 		reqs = []requestView{}

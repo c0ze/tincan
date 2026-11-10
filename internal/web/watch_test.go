@@ -100,6 +100,29 @@ func TestActivityToleratesMtimeDisorderAndTies(t *testing.T) {
 	}
 }
 
+// A writer paused between stamping Updated and writing leaves a file time
+// much newer than its Updated: that record must not push a genuinely newer
+// request out of the list.
+func TestActivityToleratesPausedWriter(t *testing.T) {
+	s, rid := apiServer(t)
+	room, _ := s.roomByID(rid)
+	base := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	var want []string
+	for i := range activityRequests - 1 {
+		id := fmt.Sprintf("rec-%03d", i)
+		when := base.Add(-time.Duration(i) * time.Second)
+		writeRecord(t, room.Path, id, when, when, true)
+		want = append(want, id)
+	}
+	writeRecord(t, room.Path, "paused", base.Add(-100*time.Second), base.Add(time.Second), true)
+	older := base.Add(-51 * time.Second)
+	writeRecord(t, room.Path, "older", older, older, true)
+	want = append(want, "older")
+	if ids, _ := activityIDs(t, s, rid); !slices.Equal(ids, want) {
+		t.Fatalf("got %v\nwant %v", ids, want)
+	}
+}
+
 // Malformed records cost reads too: however many recent ones fail to
 // parse, one Activity call parses a bounded number of records.
 func TestActivityBoundsReadsOfMalformedRecords(t *testing.T) {
