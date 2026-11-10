@@ -279,6 +279,8 @@ forever.
    - 410 → `expired`.
    - 5xx, timeout, connection failure → stay `submitting`; retry every 15 s
      until the deadline, then `unreachable` ("peer not reachable").
+   - A member still `planned` after the deadline (no coordinator ran in
+     time) is never submitted: it becomes `expired` ("not submitted").
 2. **Collect** (`submitting`, `submitted`, `running`, `unreachable`): read the
    job every 5 s (and on notes); `unreachable` members are still polled,
    because a lost response may hide an accepted job. On a terminal job write

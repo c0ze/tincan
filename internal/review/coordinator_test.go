@@ -201,6 +201,33 @@ func TestOfflinePeerEndsWithinBounds(t *testing.T) {
 	}
 }
 
+// tincan web was down from publication until after the deadline: members
+// still planned are never contacted, and the bundle says so instead of
+// calling them late.
+func TestPlannedMembersPastDeadlineAreNotSubmitted(t *testing.T) {
+	room, in := published(t, []string{"codex@macmini", "grok@cachyos"}, 10*time.Minute, false)
+	f := newFake()
+	clk := &clock{in.Deadline.Add(time.Second)}
+	c := &Coordinator{Transport: f, Now: clk.now}
+	c.Reconcile(context.Background(), room, nil)
+	st, _ := ReadState(room, in.ReviewID)
+	if len(f.creates) != 0 {
+		t.Fatalf("jobs created after the deadline: %v", f.creates)
+	}
+	for _, m := range st.Members {
+		if m.State != "expired" || m.Late || !strings.Contains(m.Note, "not submitted") {
+			t.Fatalf("member: %+v", m)
+		}
+	}
+	b, _, _ := ReadBundle(room, in.ReviewID)
+	if st.Status != "closed" || strings.Contains(b, "late") || !strings.Contains(b, "not submitted") {
+		t.Fatalf("status %s, bundle:\n%s", st.Status, b)
+	}
+	if !st.Settled {
+		t.Fatalf("not settled: %+v", st)
+	}
+}
+
 func TestLostCreateResponseIsAdoptedByPolling(t *testing.T) {
 	room, in := published(t, []string{"grok@cachyos"}, 10*time.Minute, false)
 	f := newFake()

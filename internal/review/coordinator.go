@@ -292,6 +292,13 @@ func (c *Coordinator) member(ctx context.Context, room string, in Input, st *Sta
 		}
 		return nil
 	case m.State == "planned" && !st.CancelRequested:
+		if now.After(in.Deadline) {
+			// Nothing contacted the member before the deadline (tincan web
+			// was not running): a job now would run for a closed review.
+			m.State, m.Finished = "expired", now
+			m.Note = "not submitted: the deadline passed before the member was contacted"
+			return save()
+		}
 		if machineDown(ctx, machine) {
 			return nil
 		}
