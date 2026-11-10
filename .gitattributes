@@ -1,0 +1,6 @@
+# Every OS checks out the same bytes: text files with LF line endings, even
+# where core.autocrlf=true (as on GitHub's Windows runners). The web UI is
+# embedded into the binary and its tests match multi-line source, and the
+# shell scripts, skills and docs are copied or run as they are.
+* text=auto eol=lf
+*.png binary

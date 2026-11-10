@@ -454,7 +454,12 @@ func TestWaitLeavesLivePublicationIntentPending(t *testing.T) {
 	if err := save(room, r); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	// ctx only catches a Wait blocked on the publisher's lock; Wait's own
+	// 10 ms timeout must end it first. The first Poll of a fresh room creates
+	// the spool's directories and takes tens of milliseconds, much more on a
+	// loaded Windows runner: a short ctx expired during it and Wait returned
+	// ctx.Err() although nothing blocked.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	pending, err := Wait(ctx, room, e.ID, 10*time.Millisecond)
 	if err != nil || pending.Status != "queued" {

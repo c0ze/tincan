@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -275,12 +276,20 @@ func TestStdioTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cs.Close()
+	// Over stdio the server offers the same tools as in process.
+	tools, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("stdio discovery: %v", err)
+	}
+	inProcess, err := connect(t, t.TempDir()).ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := toolNames(tools), toolNames(inProcess); got != want {
+		t.Fatalf("stdio tools %s, in process %s", got, want)
+	}
 	if runtime.GOOS == "windows" {
-		tools, err := cs.ListTools(ctx, nil)
-		if err != nil || len(tools.Tools) != 8 {
-			t.Fatalf("stdio discovery: %+v %v", tools, err)
-		}
-		return
+		return // detached hosts, which tincan_send starts, are unsupported
 	}
 	defer host.Down(context.Background(), room, "fixture", 3*time.Second)
 	call(t, cs, "tincan_send", map[string]any{"agent": "fixture", "body": "over stdio", "request_id": "stdio-job"})
@@ -289,6 +298,15 @@ func TestStdioTransport(t *testing.T) {
 		t.Fatal(result)
 	}
 	call(t, cs, "tincan_stop", map[string]any{"name": "fixture"})
+}
+
+func toolNames(listed *mcp.ListToolsResult) string {
+	var names []string
+	for _, tool := range listed.Tools {
+		names = append(names, tool.Name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, " ")
 }
 
 func TestPresetsReportSessionSupportFromProvider(t *testing.T) {
