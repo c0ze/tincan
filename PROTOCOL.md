@@ -483,8 +483,10 @@ Clients that supply an MCP progress token also receive progress notifications.
 
 An explicit `request_id` is an idempotency key for identical agent/from/body
 values while the record is retained. Different work with the same ID is rejected.
-New or omitted IDs submit new work. The prompt limit is 1 MiB; `from` defaults to
-`mcp`. If startup fails after saving work, retain the ID from the error, launch
+New or omitted IDs submit new work. The prompt limit is 1 MiB, a blank prompt is
+refused, and `from` defaults to `mcp`. New work for an agent that is neither
+running nor a configured preset (a typo, say) is refused before anything is
+saved. If startup fails after saving work, retain the ID from the error, launch
 the intended listener and collect or retry that same ID. A custom listener name
 such as `reviewer` needs an explicit launch with its preset after being stopped.
 A retry resends hosted work only when its enqueue was never confirmed. If a

@@ -230,6 +230,27 @@ func TestCancelAndInvalidInput(t *testing.T) {
 	}
 }
 
+func TestSendRefusesBlankBodyAndUnknownAgentWithoutSaving(t *testing.T) {
+	room := t.TempDir()
+	cs := connect(t, room)
+	for _, args := range []map[string]any{
+		{"agent": "fixture", "body": "  \n", "request_id": "blank-job"},
+		{"agent": "fixtrue", "body": "typo", "request_id": "typo-job"},
+	} {
+		result, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "tincan_send", Arguments: args})
+		if err == nil && !result.IsError {
+			t.Fatalf("accepted %+v", args)
+		}
+		if _, err := request.Get(room, args["request_id"].(string)); !os.IsNotExist(err) {
+			t.Fatalf("%v saved a request: %v", args, err)
+		}
+	}
+	status := call(t, cs, "tincan_status", map[string]any{})
+	if agents, _ := status["agents"].([]any); len(agents) != 0 {
+		t.Fatalf("phantom agents %+v", agents)
+	}
+}
+
 func TestStdioTransport(t *testing.T) {
 	room := t.TempDir()
 	exe, err := os.Executable()
