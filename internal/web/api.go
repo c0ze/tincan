@@ -465,8 +465,14 @@ type requestView struct {
 	Result  string    `json:"result,omitempty"`
 }
 
-// activityRequests is how many recent requests the Activity page lists.
-const activityRequests = 50
+// activityRequests is how many recent requests the Activity page lists;
+// activityReads bounds the records it parses to find them, and
+// activitySkew is how far a record's file time may trail its Updated time.
+const (
+	activityRequests = 50
+	activityReads    = 4 * activityRequests
+	activitySkew     = 2 * time.Second
+)
 
 // getRequest reads a request record; a variable so tests can count reads.
 var getRequest = request.Get
@@ -493,7 +499,7 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sort.Slice(listeners, func(i, j int) bool { return listeners[i].Name < listeners[j].Name })
-	// A record is rewritten on every update, so its file time tracks its
+	// A record is rewritten on every update, so its file time roughly tracks its
 	// Updated time: sort by that and parse only the newest records, not
 	// every record the room has ever had.
 	entries, _ := os.ReadDir(request.Dir(room.Path))
@@ -512,9 +518,15 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
+	// A file time only approximates Updated, which is stamped before the
+	// write, and coarse timestamps tie: once activityRequests records are
+	// in, keep reading files within activitySkew of the last one taken,
+	// then order by Updated. Unparsable records are skipped, and
+	// activityReads caps the reads either way, so fewer may be listed.
 	var reqs []requestView
-	for _, f := range files {
-		if len(reqs) == activityRequests {
+	var edge time.Time
+	for i, f := range files {
+		if i == activityReads || (len(reqs) >= activityRequests && f.mod.Before(edge)) {
 			break
 		}
 		rec, err := getRequest(room.Path, f.id)
@@ -529,8 +541,14 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 			v.Result = truncateUTF8(v.Result, 2048) + "…"
 		}
 		reqs = append(reqs, v)
+		if len(reqs) == activityRequests {
+			edge = f.mod.Add(-activitySkew)
+		}
 	}
 	sort.Slice(reqs, func(i, j int) bool { return reqs[i].Updated.After(reqs[j].Updated) })
+	if len(reqs) > activityRequests {
+		reqs = reqs[:activityRequests]
+	}
 	if reqs == nil {
 		reqs = []requestView{}
 	}
