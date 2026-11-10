@@ -385,6 +385,11 @@ bounded request progress, with at most a 1 MiB in-memory tail per stream.
   `ERROR exec: <message>`; the listener keeps running.
 - The listener is stopped (`down`/SIGTERM) mid-run → the agent is killed and
   the asker gets `ERROR interrupted: hosted listener was stopped while running`.
+- Stopping a running agent (timeout, cancel, shutdown) on Linux/macOS sends
+  SIGTERM to its process group, then SIGKILL to the group once the agent exits
+  or after 2 s. The grace lets the agent stop descendants that left its group;
+  a descendant that left the group and ignores its parent's exit is out of
+  reach. On Windows the agent's Job Object is terminated.
 - Malformed envelopes are quarantined; an unknown `kind` is not executed.
 - A hard crash may prevent an immediate reply. Retained claims and request state
   allow recovery to report interrupted work; a missing reply is not permission
