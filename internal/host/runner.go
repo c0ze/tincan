@@ -140,6 +140,15 @@ func Run(ctx context.Context, spec RunSpec) Result {
 
 	res := Result{ExitCode: -1}
 	err = runProcess(runCtx, cmd)
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil {
+		// The agent exited, but a descendant outside its group kept the output
+		// pipes open past WaitDelay. The exit status and the output captured so
+		// far are still the agent's.
+		err = nil
+		if !cmd.ProcessState.Success() {
+			err = &exec.ExitError{ProcessState: cmd.ProcessState}
+		}
+	}
 	res.Stdout, res.Stderr = stdout.data, stderr.data
 	res.StdoutTruncated, res.StderrTruncated = stdout.truncated, stderr.truncated
 	res.Duration = time.Since(start)

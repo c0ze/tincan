@@ -105,11 +105,18 @@ func fakeAgent(args []string) int {
 			}
 		}
 	default:
+		if mode, ok := platformFakeModes[args[0]]; ok {
+			return mode(args[1:])
+		}
 		fmt.Fprintf(os.Stderr, "fake agent: unknown mode %q\n", args[0])
 		return 2
 	}
 	return 0
 }
+
+// platformFakeModes holds fake agent modes that need platform process control;
+// see main_unix_test.go.
+var platformFakeModes = map[string]func(args []string) int{}
 
 // fakeExec returns the exec template that runs this test binary as the fake
 // agent in the given mode. Callers must t.Setenv("TINCAN_FAKE_AGENT", "1").
