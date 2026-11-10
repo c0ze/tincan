@@ -23,7 +23,12 @@ set -euo pipefail
 REPO_URL="https://github.com/c0ze/tincan"
 RELEASE_BASE="${TINCAN_RELEASE_BASE:-$REPO_URL/releases}"
 RAW_BASE="${TINCAN_RAW_BASE:-https://raw.githubusercontent.com/c0ze/tincan}"
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# Only a script run from a file can sit in a checkout. On stdin (curl | bash)
+# BASH_SOURCE is empty and the working directory is not ours to build or copy.
+REPO_DIR=""
+if [ -f "${BASH_SOURCE[0]:-}" ]; then
+  REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 AGENTS_SKILLS_DIR="${AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
 CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
 TINCAN_BIN_DIR="${TINCAN_BIN_DIR:-$HOME/.local/bin}"
@@ -131,7 +136,8 @@ install_release() {
 }
 
 install_go() {
-  if [ -d "$REPO_DIR/cmd/tincan" ]; then
+  if [ -n "$REPO_DIR" ] && [ -d "$REPO_DIR/cmd/tincan" ] &&
+     grep -qx 'module github.com/c0ze/tincan/v2' "$REPO_DIR/go.mod" 2>/dev/null; then
     echo ">> building tincan from source ($REPO_DIR)"
     ( cd "$REPO_DIR" && go install ./cmd/tincan )
   else
@@ -209,7 +215,7 @@ remote_skills() {
 install_skills() {
   local s root src
   # A checkout ships install.sh beside skills/; anything else is curl | bash.
-  { [ -f "$REPO_DIR/install.sh" ] && [ -d "$REPO_DIR/skills" ]; } || remote_skills
+  { [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/install.sh" ] && [ -d "$REPO_DIR/skills" ]; } || remote_skills
   # Validate before changing any installation.
   for s in tell listen; do
     [ -f "$REPO_DIR/skills/$s/SKILL.md" ] || { echo "!! missing skills/$s/SKILL.md" >&2; exit 1; }
