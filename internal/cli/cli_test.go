@@ -150,6 +150,20 @@ func TestHelpExitsZero(t *testing.T) {
 	}
 }
 
+// The usage text lists the flags up/serve and review actually define.
+func TestUsageNamesSessionAndReviewTimeout(t *testing.T) {
+	for _, want := range []string{
+		"tincan up      <name> [--preset <p>]",
+		"[--session persistent|stateless]",
+		"[--request-id <id>] [--wait] [--timeout <sec>]",
+		"tincan review --wait <id> [--timeout <sec>] | --cancel <id>",
+	} {
+		if !strings.Contains(usageText, want) {
+			t.Errorf("usage text lacks %q", want)
+		}
+	}
+}
+
 func TestAskReplyRoundTrip(t *testing.T) {
 	room := t.TempDir()
 	askDone := make(chan int, 1)
@@ -227,6 +241,36 @@ func TestBodyFileReadErrorExitsOne(t *testing.T) {
 		"--body-file", "/nonexistent-tincan-body")
 	if code != 1 {
 		t.Fatalf("want exit 1 for unreadable --body-file, got %d (stderr=%q)", code, stderr)
+	}
+}
+
+// A mistyped --room must fail instead of creating a new room (with all its
+// parents) that no peer will ever read.
+func TestMissingRoomIsRefusedNotCreated(t *testing.T) {
+	base := canonTempDir(t) // a symlinked /var would fail for another reason
+	room := filepath.Join(base, "typo", "deeper", "room")
+	file := filepath.Join(base, "file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []string{room, file} {
+		for _, args := range [][]string{
+			{"send", "--to", "x", "--from", "y", "--body", "hi"},
+			{"recv", "--as", "x", "--timeout", "1"},
+			{"ask", "--to", "x", "--from", "y", "--body", "hi", "--timeout", "1"},
+			{"reply", "--channel", "r-1", "--body", "hi"},
+			{"status"},
+			{"ping", "--to", "x"},
+			{"stop", "--to", "x", "--from", "y"},
+		} {
+			code, _, stderr := run(append(args, "--room", r)...)
+			if code != ExitError || !strings.Contains(stderr, "room "+r+" ") {
+				t.Errorf("%s --room %s: exit %d, stderr=%q; want exit 1 naming the room", args[0], r, code, stderr)
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(base, "typo")); !os.IsNotExist(err) {
+		t.Fatalf("missing room was created: %v", err)
 	}
 }
 

@@ -39,6 +39,20 @@ func TestHeartbeatFreshness(t *testing.T) {
 		t.Fatal("garbage heartbeat counted as alive")
 	}
 }
+
+// A heartbeat dated in the future (the clock stepped back after it was
+// written) proves nothing about the coordinator, so it is not fresh.
+func TestFutureHeartbeatIsNotAlive(t *testing.T) {
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	now := time.Now()
+	if err := WriteHeartbeat(dir, Heartbeat{PID: 42, Updated: now.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if CoordinatorAlive(dir, now) {
+		t.Fatal("future-dated heartbeat counted as alive")
+	}
+}
+
 func TestHeartbeatCarriesCommitteeSource(t *testing.T) {
 	dir, _ := filepath.EvalSymlinks(t.TempDir())
 	WriteHeartbeat(dir, Heartbeat{PID: 1, Machine: "cachyos", CommitteesFrom: "macmini", Updated: time.Now()})

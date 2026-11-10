@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/host"
+	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
 // writeStateFile records a hosted listener the way serve does, so status
@@ -55,6 +57,50 @@ func statusJSON(t *testing.T, room string) map[string]statusRow {
 		byName[r.Name] = r
 	}
 	return byName
+}
+
+// A claimed but unacknowledged message is no longer queued; status shows it
+// in flight instead of making it vanish.
+func TestStatusCountsInFlightClaims(t *testing.T) {
+	room := t.TempDir()
+	if code, _, stderr := run("send", "--room", room, "--to", "worker", "--from", "orch", "--body", "hi"); code != 0 {
+		t.Fatal(stderr)
+	}
+	sp, err := spool.Open(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := sp.ClaimContext(context.Background(), "worker", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Ack(false)
+	if r := statusJSON(t, room)["worker"]; r.Queued != 0 || r.InFlight != 1 {
+		t.Fatalf("status row = %+v, want queued 0, in flight 1", r)
+	}
+	_, table, _ := run("status", "--room", room)
+	if !strings.Contains(table, "INFLIGHT") {
+		t.Fatalf("table lacks INFLIGHT column: %q", table)
+	}
+}
+
+// A timed-out ask leaves an empty reply channel behind; status does not list
+// it as if it were a participant.
+func TestStatusHidesAbandonedReplyChannel(t *testing.T) {
+	room := t.TempDir()
+	code, stdout, stderr := run("ask", "--room", room, "--to", "worker", "--from", "orch", "--body", "q", "--timeout", "1")
+	if code != ExitTimeout || !strings.HasPrefix(stdout, "pending channel=r-") {
+		t.Fatalf("ask: exit %d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	rows := statusJSON(t, room)
+	for name := range rows {
+		if strings.HasPrefix(name, "r-") {
+			t.Fatalf("status lists empty reply channel %s: %+v", name, rows)
+		}
+	}
+	if rows["worker"].Queued != 1 {
+		t.Fatalf("status rows = %+v, want worker with one queued request", rows)
+	}
 }
 
 func TestStatusHostedParked(t *testing.T) {

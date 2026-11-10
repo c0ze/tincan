@@ -13,7 +13,11 @@ that the `/tell` and `/listen` skills point to.
   `<room>/.tincan/inbox/<name>/`. Names and message IDs are portable path
   components, at most 128 bytes. Empty names, `.`/`..`, path separators, control
   characters, Windows-reserved characters/device names, and trailing dots/spaces
-  are rejected. Interior dots are allowed.
+  are rejected. Interior dots are allowed. On a case-insensitive filesystem
+  (the macOS and Windows defaults) names that differ only by case would share
+  one inbox, so sending to or receiving as a second spelling is refused with an
+  error naming the existing one; a queued message whose `to` differs from its
+  inbox only by such case folding is delivered, not quarantined.
 - **Send** = publish a synced message file into the recipient's inbox with an
   atomic hard link, without overwriting existing work. The local spool filesystem
   must support hard links (for example POSIX filesystems or NTFS).
@@ -42,6 +46,11 @@ bare will silently create a *second* room there. Always pass the room explicitly
 ```
 --room "$(git rev-parse --show-toplevel)"     # or an absolute path
 ```
+
+The messaging commands (`send`, `recv`, `ask`, `reply`, `status`, `ping`,
+`stop`) refuse a `--room` that is not an existing directory (exit 1) instead of
+creating it, so a mistyped path cannot strand messages in a new room. The
+room's `.tincan/` itself is still created on first use.
 
 If `--room` resolves to a directory that's inside a git repo but isn't that
 repo's root, messaging and hosted lifecycle commands print an advisory to stderr naming the
@@ -125,13 +134,15 @@ agent CLI for you so no human terminal is needed per agent; see below.
 
 Before `status`/`ping`, checking "is a listener alive?" meant `ps` plus a
 round-trip `ask`/`reply` — a real message, a real agent wake. `status` and
-`ping` answer it for free: a `Recv` writes a small presence file (holding its
-pid and a since-timestamp) for the duration it is parked, under
-`<room>/.tincan/present/<name>/<token>` — one file per parked receive, keyed
-by a token unique to that `Recv` call, since more than one receiver can be
-parked as the same name at once. `status`/`ping` just read that directory
-(a name is "present" if any token's pid is still alive) plus a pid-liveness
-check per token. **No message is sent; nothing wakes an agent.**
+`ping` answer it for free: a `Recv` writes a small presence file for the
+duration it is parked, under `<room>/.tincan/present/<name>/<token>` — one file
+per parked receive, keyed by a token unique to that `Recv` call, since more
+than one receiver can be parked as the same name at once. The file is JSON:
+`pid`, `since` (when it parked) and `start`, an opaque per-OS identity of the
+writing process (its kernel start time) that a later process reusing the pid
+cannot share. `status`/`ping` just read that directory: a name is "present" if
+any token's writer is still running. **No message is sent; nothing wakes an
+agent.**
 
 ```
 tincan status [--room <path>] [--format table|json]
@@ -139,7 +150,8 @@ tincan ping   --to <name> [--room <path>]
 ```
 
 - `status` lists every name that has a queue and/or a live listener: name,
-  queued count, `MODE` (`hosted:<preset>` for a listener tincan hosts, `agent`
+  queued count, in-flight count (claimed, not yet acknowledged),
+  `MODE` (`hosted:<preset>` for a listener tincan hosts, `agent`
   for an interactive `/listen` session, `—` for none), `STATE` (`parked`,
   `busy` — a hosted listener running its agent right now — or `—`), pid, and
   how long it's been parked. `--format json` prints the same data as a JSON
@@ -153,10 +165,20 @@ tincan ping   --to <name> [--room <path>]
   shows as not-parked. A listener that re-arms in a loop (see below) is
   "parked" during each wait and briefly "—" between messages; that's
   expected, not a bug.
-- A presence file surviving its process (e.g. the listener was killed rather
-  than exiting normally) is detected and reported as absent: `status`/`ping`
-  also check that the recorded pid is actually alive, so a crashed listener
-  doesn't linger as a false "parked" row.
+- `recv` and `ask` remove their presence file when interrupted by SIGINT,
+  SIGTERM or SIGHUP. A presence file surviving its process (the listener was
+  killed with SIGKILL, crashed, or the machine rebooted) is detected and
+  reported as absent: the recorded pid must be alive and its process must
+  still have the recorded `start` identity, so a crashed listener doesn't
+  linger as a false "parked" row even after the OS reuses its pid. Such files
+  are deleted when presence is read and by `tincan gc`.
+- Files written by older versions have no `start`. They count as present only
+  while their pid is alive and its current process did not start after the
+  file's `since` (allowing a few seconds of clock granularity). A file whose
+  pid is gone is deleted; one whose pid now belongs to a newer process is
+  ignored, but kept until that pid exits, because that proof relies on the
+  wall clock. Where the OS cannot report a process's start (other than Linux,
+  macOS and Windows), the pid check alone decides, as before.
 
 ## Control messages — `kind` / `stop`
 
@@ -362,13 +384,35 @@ permissions and existing child file modes are left alone. On Windows, protect
 the room with the appropriate user ACLs.
 Spool paths reject symlinks. Inbox input must be a regular file containing a
 valid envelope no larger than 8 MiB; malformed, mismatched or unsafe input is
-quarantined so later valid work can continue.
+quarantined so later valid work can continue. A read error that says nothing
+about the message (permissions, too many open files, I/O) fails the receive
+instead and leaves the claim in flight.
 
 Unacknowledged claims live under `.tincan/inflight/<name>/`. A host restart treats
 leftover work as interrupted/uncertain. A process may have changed the workspace
 before it died, so tincan does not automatically execute that work again.
 Inspect the log and files before deliberately submitting a new task. This is
 durable delivery bookkeeping, not a guarantee of exactly-once external effects.
+
+Interactive receives (`recv`, the reply half of `ask`) only print what they
+claim, so their claims are requeued instead. Each records its owner in
+`.tincan/owners/<name>/<message file>` (the same `pid`/`since`/`start` JSON as a
+presence file) while the claim exists. Before claiming, any receive of `<name>`
+returns to the queue every claim whose recorded owner provably exited before
+acknowledging it (SIGKILL, a crash, a failed requeue), so a receive that
+re-arms loses nothing. This is at-least-once: a receiver killed after printing
+a message but before acknowledging it delivers that message again. Claims of
+live owners, and claims with no owner record (hosted listeners, MCP request
+collection, older tincan versions), are never requeued this way. Hosted and
+MCP recovery of in-flight work leaves a live interactive owner's claim alone
+(as it does, like requeueing, when the owner record cannot be read or parsed),
+and takes a dead owner's claim over (removing its record) instead of letting
+it be requeued as well. An empty claim directory that a crash left behind
+(after creating it, or in a requeue after the message went back to the
+inbox) is cleared by the next receive instead of hiding its queued message.
+`status`
+counts claimed but unacknowledged messages per name (`INFLIGHT`, JSON
+`in_flight`).
 
 The state file is written atomically (tmp + rename) and removed on clean
 exit; status validates the authenticated host lifetime before reporting it as
@@ -429,12 +473,23 @@ provider, session, process and storage failures before deciding what to do next.
 
 `tincan gc --room "$ROOM" --older-than 168h` removes old terminal request records
 and progress once they are no longer needed by a queued/in-flight delivery, plus
-old consumed-message audit logs and quarantine entries. The default age is seven
-days; the minimum is one hour. It retains active work, queued messages, claims,
-session pointers and host logs. An unreadable request record is kept and named on
-stderr; the rest of the sweep still runs, and `gc` then exits 1. After a request
-record is collected, its result and idempotency protection are gone; do not
-reuse old request IDs for new work.
+old consumed-message audit logs and quarantine entries; their age counts from
+when they were logged or quarantined, not from when the message was sent. The
+default age is seven days; the minimum is one hour. It also deletes presence
+files of receivers that provably exited, reply channels (`r-<hex>`) that are
+empty, unowned and unchanged for that long (a timed-out `ask` leaves one;
+`status` already hides them), and the spool's own temporary files of writes
+interrupted that long ago (`tmp/send-<n>`, `tmp/present-<id>`, `.tincan/.write-<n>`,
+`owners/<name>/.owner-<n>`; nothing under `requests/`, `hosts/` or other
+state directories) once their writer provably stopped: send and owner
+temporaries only exist while their writer holds `transport.lock`, which gc
+takes; presence temporaries name their writer; a `.write-<n>` (or an
+unreadable presence temporary) must also be at least a day old. It retains
+active work, queued messages, claims, session pointers and host logs. An
+unreadable request record is kept and named on stderr; the rest of the sweep
+still runs, and `gc` then exits 1. After a request record is collected, its
+result and idempotency protection are gone; do not reuse old request IDs for
+new work.
 
 ## MCP stdio
 

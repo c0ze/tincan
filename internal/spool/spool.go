@@ -129,6 +129,9 @@ func (s *Spool) Send(e *envelope.Envelope) error {
 			return err
 		}
 	}
+	if err := s.checkCaseAlias(e.To); err != nil {
+		return err
+	}
 	if published, err := s.published(e); err != nil || published {
 		return err
 	}
@@ -193,8 +196,25 @@ func (s *Spool) RecvContext(ctx context.Context, name string, timeout time.Durat
 
 // ClaimContext waits for a queued envelope and moves it to durable in-flight
 // storage. The caller must Ack only after delivery succeeds, or explicitly Nack
-// to retry. Cancellation never deletes an already claimed envelope.
+// to retry. Cancellation never deletes an already claimed envelope. A claim
+// left by a process that died stays in flight for the caller's own recovery
+// (RecoverInFlight); see ClaimInteractive for claims that should be requeued.
 func (s *Spool) ClaimContext(ctx context.Context, name string, timeout time.Duration) (*Delivery, error) {
+	return s.claim(ctx, name, timeout, false)
+}
+
+// ClaimInteractive is ClaimContext for a receiver that hands the message on
+// itself (tincan recv and ask). It records this process as the claim's owner
+// under owners/<name>/, so if the process exits before Ack or Nack (killed,
+// crashed, a failed Nack), the next claim of the same name requeues the
+// message instead of leaving it stranded in flight. Hosted listeners and
+// request polling recover their own claims and must not have them delivered
+// again, so they use ClaimContext or TryClaim, which record no owner.
+func (s *Spool) ClaimInteractive(ctx context.Context, name string, timeout time.Duration) (*Delivery, error) {
+	return s.claim(ctx, name, timeout, true)
+}
+
+func (s *Spool) claim(ctx context.Context, name string, timeout time.Duration, owned bool) (*Delivery, error) {
 	if err := validName(name); err != nil {
 		return nil, err
 	}
@@ -204,20 +224,8 @@ func (s *Spool) ClaimContext(ctx context.Context, name string, timeout time.Dura
 	if err := s.ensurePrivateRoot(); err != nil {
 		return nil, err
 	}
-	inbox := s.InboxDir(name)
-	if err := fsutil.MkdirPrivate(inbox); err != nil {
-		return nil, err
-	}
-	token := envelope.NewID()
-	s.writePresence(name, token)
-	defer s.removePresence(name, token)
-	watcher, watchErr := fsnotify.NewWatcher()
-	var events <-chan fsnotify.Event
-	var watchErrors <-chan error
-	if watchErr == nil {
-		defer watcher.Close()
-		events, watchErrors = watcher.Events, watcher.Errors
-	}
+	// The timeout starts before registration, which waits for the transport
+	// lock: a sender or gc holding it must not stretch the receive.
 	var deadlineC <-chan time.Time
 	claimCtx := ctx
 	if timeout > 0 {
@@ -227,6 +235,22 @@ func (s *Spool) ClaimContext(ctx context.Context, name string, timeout time.Dura
 		t := time.NewTimer(timeout)
 		defer t.Stop()
 		deadlineC = t.C
+	}
+	inbox := s.InboxDir(name)
+	token := envelope.NewID()
+	if err := s.register(claimCtx, name, token); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return nil, ErrTimeout
+		}
+		return nil, err
+	}
+	defer s.removePresence(name, token)
+	watcher, watchErr := fsnotify.NewWatcher()
+	var events <-chan fsnotify.Event
+	var watchErrors <-chan error
+	if watchErr == nil {
+		defer watcher.Close()
+		events, watchErrors = watcher.Events, watcher.Errors
 	}
 	// Poll even when the watch succeeds: a dropped/coalesced event or closed
 	// watcher must not leave an existing queue parked forever.
@@ -245,7 +269,7 @@ func (s *Spool) ClaimContext(ctx context.Context, name string, timeout time.Dura
 		if !armed && watcher != nil {
 			armed = watcher.Add(inbox) == nil
 		}
-		delivery, ok, err := s.claimOldest(claimCtx, name)
+		delivery, ok, err := s.claimOldest(claimCtx, name, owned)
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 				return nil, ErrTimeout
@@ -273,6 +297,64 @@ func (s *Spool) ClaimContext(ctx context.Context, name string, timeout time.Dura
 			return nil, ctx.Err()
 		}
 	}
+}
+
+// checkCaseAlias refuses name when a case-folding filesystem (the macOS and
+// Windows defaults) maps it onto an inbox created under another spelling:
+// both names would share one directory, and messages addressed to one would
+// be claimed by the other. The error names the spelling that owns the inbox.
+// Directories that merely differ by case on a case-sensitive filesystem are
+// separate inboxes, so the name grammar stays the same everywhere.
+func (s *Spool) checkCaseAlias(name string) error {
+	root := filepath.Join(s.root, "inbox")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, ent := range entries {
+		if ent.Name() == name {
+			return nil // the inbox is stored under exactly this spelling
+		}
+	}
+	for _, ent := range entries {
+		if strings.EqualFold(ent.Name(), name) && s.sameInbox(ent.Name(), name) {
+			return fmt.Errorf("tincan: name %q shares the existing inbox %q on this case-insensitive filesystem; use %q", name, ent.Name(), ent.Name())
+		}
+	}
+	return nil
+}
+
+// sameInbox reports whether two spellings resolve to one inbox directory.
+func (s *Spool) sameInbox(a, b string) bool {
+	ai, err := os.Lstat(s.InboxDir(a))
+	if err != nil {
+		return false
+	}
+	bi, err := os.Lstat(s.InboxDir(b))
+	return err == nil && os.SameFile(ai, bi)
+}
+
+// register creates name's inbox and publishes this receive's presence token
+// while holding the transport lock. gc sweeps abandoned reply channels under
+// the same lock, so it never removes a channel between a receiver creating
+// (or finding) its inbox and announcing itself in it.
+func (s *Spool) register(ctx context.Context, name, token string) error {
+	lock, err := s.lockTransport(ctx)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := fsutil.MkdirPrivate(s.InboxDir(name)); err != nil {
+		return err
+	}
+	if err := s.checkCaseAlias(name); err != nil {
+		return err
+	}
+	s.writePresence(name, token)
+	return nil
 }
 
 // retryClaimOp runs op, retrying briefly while it fails with a Windows
@@ -322,7 +404,35 @@ func (s *Spool) RemoveInbox(name string) error {
 	if err := os.RemoveAll(s.InboxDir(name)); err != nil {
 		return err
 	}
-	return os.RemoveAll(s.presentNameDir(name))
+	if err := os.RemoveAll(s.presentNameDir(name)); err != nil {
+		return err
+	}
+	// The in-flight and owner directories go only when empty: a claim that
+	// is still unacknowledged must never be discarded with its channel.
+	for _, dir := range []string{s.ownerDir(name), s.inFlightDir(name)} {
+		if err := removeEmptyDir(dir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeEmptyDir removes dir if it exists and is empty.
+func removeEmptyDir(dir string) error {
+	if err := fsutil.CheckDir(dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) > 0 {
+		return err
+	}
+	if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // Presence describes one name's listener state, as reported by `status`/`ping`.
@@ -332,13 +442,17 @@ type Presence struct {
 	Since  time.Time `json:"since"`
 	Queued int       `json:"queued"`
 	Alive  bool      `json:"alive"`
+	// InFlight counts claimed messages not yet acknowledged.
+	InFlight int `json:"in_flight"`
 }
 
 // presenceFile is the on-disk JSON shape of one token file under
-// <root>/present/<name>/.
+// <root>/present/<name>/. Start is the writer's process start identity
+// (processStart); tokens written before it existed omit it.
 type presenceFile struct {
 	PID   int       `json:"pid"`
 	Since time.Time `json:"since"`
+	Start string    `json:"start,omitempty"`
 }
 
 // presentNameDir returns <root>/present/<name>, the directory holding one
@@ -358,7 +472,7 @@ func (s *Spool) writePresence(name, token string) {
 			return
 		}
 	}
-	data, err := json.Marshal(presenceFile{PID: os.Getpid(), Since: time.Now().UTC()})
+	data, err := json.Marshal(presenceFile{PID: os.Getpid(), Since: time.Now().UTC(), Start: selfStart()})
 	if err != nil {
 		return
 	}
@@ -395,7 +509,8 @@ func (s *Spool) removePresence(name, token string) {
 
 // ListPresence returns Presence for the union of names that have an inbox
 // directory and/or a present/<name>/ dir (regardless of whether any token in
-// it is currently live), sorted by name.
+// it is currently live), sorted by name. Reply channels (r-<hex>) with nothing
+// queued, nothing in flight and no live receiver are left out.
 func (s *Spool) ListPresence() ([]Presence, error) {
 	names := map[string]bool{}
 	inboxRoot := filepath.Join(s.root, "inbox")
@@ -429,6 +544,9 @@ func (s *Spool) ListPresence() ([]Presence, error) {
 		if err != nil {
 			return nil, err
 		}
+		if replyChannel(name) && p.Queued == 0 && p.InFlight == 0 && !p.Alive {
+			continue // an exhausted or abandoned reply channel; gc removes it
+		}
 		list = append(list, p)
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
@@ -450,12 +568,12 @@ func (s *Spool) Present(name string) (Presence, bool, error) {
 
 // presenceFor builds the Presence for one name: queued count from its inbox,
 // plus an aggregate view of its present/<name>/ token files. A name is
-// present iff at least one token's stored pid is alive (processAlive); the
-// representative PID/Since come from the live token with the most-recent
+// present iff at least one token's writer is still running (ownerLiveness);
+// the representative PID/Since come from the live token with the most-recent
 // Since. A missing present/<name>/ dir means absent, not an error. Individual
 // token files that are missing (removed mid-scan by a racing Recv exit),
-// corrupt, or store a dead pid are skipped rather than failing the whole
-// listing — best-effort, same as writePresence/removePresence.
+// corrupt, or whose writer has exited are skipped rather than failing the
+// whole listing — best-effort, same as writePresence/removePresence.
 func (s *Spool) presenceFor(name string) (Presence, error) {
 	p := Presence{Name: name}
 	for _, dir := range []string{s.InboxDir(name), s.presentNameDir(name)} {
@@ -472,37 +590,12 @@ func (s *Spool) presenceFor(name string) (Presence, error) {
 			p.Queued++
 		}
 	}
-	tokenEntries, err := os.ReadDir(s.presentNameDir(name))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return p, nil
-		}
+	if p.InFlight, err = s.countInFlight(name); err != nil {
 		return Presence{}, err
 	}
-	var best *presenceFile
-	for _, ent := range tokenEntries {
-		if ent.IsDir() {
-			continue
-		}
-		data, err := fsutil.ReadFile(filepath.Join(s.presentNameDir(name), ent.Name()), 4096)
-		if err != nil {
-			// Removed mid-scan by a racing Recv exit, or unreadable; skip
-			// rather than fail the whole listing.
-			continue
-		}
-		var pf presenceFile
-		if err := json.Unmarshal(data, &pf); err != nil {
-			// A malformed token file (e.g. torn write) is skipped, same as a
-			// missing one: it self-heals on the next Recv.
-			continue
-		}
-		if !processAlive(pf.PID) {
-			continue
-		}
-		if best == nil || pf.Since.After(best.Since) {
-			pfCopy := pf
-			best = &pfCopy
-		}
+	best, _, err := s.scanPresence(name)
+	if err != nil {
+		return Presence{}, err
 	}
 	if best == nil {
 		return p, nil
@@ -511,4 +604,85 @@ func (s *Spool) presenceFor(name string) (Presence, error) {
 	p.Since = best.Since
 	p.Alive = true
 	return p, nil
+}
+
+// countInFlight counts name's claims that hold a message (not yet Ack'd).
+func (s *Spool) countInFlight(name string) (int, error) {
+	dir := s.inFlightDir(name)
+	if err := fsutil.CheckDir(dir); err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	n := 0
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(dir, ent.Name(), "message.json")); err == nil {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// scanPresence returns the live token with the most recent Since for name, and
+// removes tokens whose writer provably exited without its deferred cleanup
+// (killed, crashed, rebooted). Token names are unique per receive, so no live
+// receiver can own a removed path; removal is best-effort. A missing
+// present/<name>/ dir yields no token and no error.
+func (s *Spool) scanPresence(name string) (best *presenceFile, reaped int, err error) {
+	dir := s.presentNameDir(name)
+	if err := fsutil.CheckDir(dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, nil
+		}
+		return nil, 0, err
+	}
+	tokenEntries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, nil
+		}
+		return nil, 0, err
+	}
+	for _, ent := range tokenEntries {
+		if ent.IsDir() {
+			continue
+		}
+		path := filepath.Join(dir, ent.Name())
+		data, err := fsutil.ReadFile(path, 4096)
+		if err != nil {
+			// Removed mid-scan by a racing Recv exit, or unreadable; skip
+			// rather than fail the whole listing.
+			continue
+		}
+		var pf presenceFile
+		if err := json.Unmarshal(data, &pf); err != nil {
+			// A malformed token file is skipped, same as a missing one.
+			continue
+		}
+		switch ownerLiveness(pf.PID, pf.Start, pf.Since) {
+		case ownerDead:
+			if os.Remove(path) == nil {
+				reaped++
+			}
+			continue
+		case ownerReplaced:
+			continue
+		}
+		if best == nil || pf.Since.After(best.Since) {
+			pfCopy := pf
+			best = &pfCopy
+		}
+	}
+	return best, reaped, nil
 }

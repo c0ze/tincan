@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -43,7 +45,7 @@ Usage:
 
 Hosted listeners (tincan runs a headless agent CLI for you):
   tincan up      <name> [--preset <p>] [--exec '<tpl>'] [--stdin body|none] [--reply stdout|file]
-                        [--exec-timeout <sec>] [--wait <sec>] [flags]
+                        [--session persistent|stateless] [--exec-timeout <sec>] [--wait <sec>] [flags]
   tincan serve   <name> [same flags as up] [--daemon]
   tincan down    <name> [--wait <sec>] [flags]
   tincan presets [--format table|json]
@@ -52,9 +54,9 @@ Hosted listeners (tincan runs a headless agent CLI for you):
   tincan web [--listen unix:<path>|127.0.0.1:<port>] [--public-path /tincan] [--peer name=url]...
                                  chat UI for agents; expose with tailscale serve (see docs/web.md)
   tincan review --committee <name> (--question <s> | --question-file <f>) [--scope <s>]
-                [--request-id <id>] [--wait] [flags]
+                [--request-id <id>] [--wait] [--timeout <sec>] [flags]
                                  ask a committee to review the change (needs tincan web)
-  tincan review --wait <id> | --cancel <id> [flags]
+  tincan review --wait <id> [--timeout <sec>] | --cancel <id> [flags]
   tincan version [--format json]
   tincan gc [--older-than 168h] [--room <path>]
 
@@ -140,6 +142,24 @@ func bodyFrom(body, bodyFile string) (string, int, error) {
 	default:
 		return "", ExitUsage, errors.New("--body or --body-file is required (--body must be non-empty)")
 	}
+}
+
+// requireRoom refuses a --room that is not an existing directory. The spool
+// would otherwise create it with all its parents, so a mistyped path would
+// succeed into a room no peer reads. The room's own .tincan is still created
+// on demand.
+func requireRoom(room string) error {
+	info, err := os.Stat(room)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("room %s does not exist (--room must be an existing directory)", room)
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("room %s is not a directory", room)
+	}
+	return nil
 }
 
 // roomRootWarning returns a non-empty advisory string iff room is inside a
@@ -232,6 +252,10 @@ func cmdSend(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tincan send: %v\n", err)
 		return ec
 	}
+	if err := requireRoom(*room); err != nil {
+		fmt.Fprintf(stderr, "tincan send: %v\n", err)
+		return ExitError
+	}
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)
 	}
@@ -274,6 +298,10 @@ func cmdRecv(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tincan recv: --format must be json or body")
 		return ExitUsage
 	}
+	if err := requireRoom(*room); err != nil {
+		fmt.Fprintf(stderr, "tincan recv: %v\n", err)
+		return ExitError
+	}
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)
 	}
@@ -283,15 +311,33 @@ func cmdRecv(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tincan recv: %v\n", err)
 		return ExitError
 	}
-	d, err := sp.ClaimContext(context.Background(), *as, time.Duration(*timeout)*time.Second)
+	ctx, stop := receiveContext()
+	defer stop()
+	// An interactive claim is requeued by the next receive if this process
+	// dies (SIGKILL) before acknowledging it.
+	d, err := sp.ClaimInteractive(ctx, *as, time.Duration(*timeout)*time.Second)
 	if errors.Is(err, spool.ErrTimeout) {
 		return ExitTimeout
 	}
 	if err != nil {
+		if ctx.Err() != nil {
+			err = errors.New("interrupted")
+		}
 		fmt.Fprintf(stderr, "tincan recv: %v\n", err)
 		return ExitError
 	}
 	return deliver(d, *format, *logMsgs, stdout, stderr)
+}
+
+// receiveContext is canceled by SIGINT, SIGTERM or SIGHUP, so a parked
+// receive returns through its normal cleanup (removing its presence token)
+// instead of dying with it. It also ignores SIGPIPE: output to a closed pipe
+// then fails as an error and the claimed message is requeued instead of
+// stranded in flight. Once a message is claimed, these signals no longer
+// interrupt anything; delivery and Ack or Nack finish first.
+func receiveContext() (context.Context, context.CancelFunc) {
+	signal.Ignore(syscall.SIGPIPE)
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 }
 
 // A failed sink must not consume the message. Explicit Nack makes it available
@@ -341,6 +387,10 @@ func cmdAsk(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
 		return ec
 	}
+	if err := requireRoom(*room); err != nil {
+		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
+		return ExitError
+	}
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)
 	}
@@ -355,16 +405,24 @@ func cmdAsk(args []string, stdout, stderr io.Writer) int {
 		ID: envelope.NewID(), CorrID: channel, From: *from, To: *to,
 		ReplyTo: channel, TS: time.Now().UTC(), Body: b, Artifacts: artifacts,
 	}
+	ctx, stop := receiveContext()
+	defer stop()
 	if err := sp.Send(e); err != nil {
 		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
 		return ExitError
 	}
-	reply, err := sp.ClaimContext(context.Background(), channel, time.Duration(*timeout)*time.Second)
+	reply, err := sp.ClaimInteractive(ctx, channel, time.Duration(*timeout)*time.Second)
 	if errors.Is(err, spool.ErrTimeout) {
 		// Leave the channel in place: a late reply still lands there and is
 		// collected with `tincan recv --as <channel>`.
 		fmt.Fprintf(stdout, "pending channel=%s\n", channel)
 		return ExitTimeout
+	}
+	if err != nil && ctx.Err() != nil {
+		// The request was sent; its reply can still be collected.
+		fmt.Fprintf(stdout, "pending channel=%s\n", channel)
+		fmt.Fprintln(stderr, "tincan ask: interrupted")
+		return ExitError
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
@@ -376,7 +434,7 @@ func cmdAsk(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := sp.RemoveInbox(channel); err != nil {
 		// Non-fatal: the answer is already delivered; a leaked r-<id> channel
-		// is reclaimed by the Phase-2 gc sweep.
+		// is reclaimed by `tincan gc`.
 		fmt.Fprintf(stderr, "tincan ask: cleanup warning: %v\n", err)
 	}
 	return code
@@ -405,6 +463,10 @@ func cmdReply(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan reply: %v\n", err)
 		return ec
+	}
+	if err := requireRoom(*room); err != nil {
+		fmt.Fprintf(stderr, "tincan reply: %v\n", err)
+		return ExitError
 	}
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)
@@ -439,6 +501,10 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	if *format != "table" && *format != "json" {
 		fmt.Fprintln(stderr, "tincan status: --format must be table or json")
 		return ExitUsage
+	}
+	if err := requireRoom(*roomFlag); err != nil {
+		fmt.Fprintf(stderr, "tincan status: %v\n", err)
+		return ExitError
 	}
 	room, err := filepath.Abs(*roomFlag)
 	if err != nil {
@@ -531,11 +597,11 @@ func statusRows(sp *spool.Spool, room string) ([]statusRow, error) {
 }
 
 // printStatusTable renders rows as a tab-aligned table: name, queued count,
-// mode (hosted:<preset> / agent / —), listener state (parked / busy / —),
-// pid (or -), and parked-since age.
+// claimed-but-unacknowledged count, mode (hosted:<preset> / agent / —),
+// listener state (parked / busy / —), pid (or -), and parked-since age.
 func printStatusTable(rows []statusRow, stdout io.Writer) {
 	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tQUEUED\tMODE\tSTATE\tPID\tSINCE")
+	fmt.Fprintln(tw, "NAME\tQUEUED\tINFLIGHT\tMODE\tSTATE\tPID\tSINCE")
 	for _, r := range rows {
 		mode, state, pid, since := "—", "—", "-", "-"
 		if r.Mode != "" {
@@ -548,7 +614,7 @@ func printStatusTable(rows []statusRow, stdout io.Writer) {
 			state, pid = "parked", strconv.Itoa(r.PID)
 			since = time.Since(r.Since).Round(time.Second).String() + " ago"
 		}
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n", r.Name, r.Queued, mode, state, pid, since)
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t%s\t%s\t%s\n", r.Name, r.Queued, r.InFlight, mode, state, pid, since)
 	}
 	tw.Flush()
 }
@@ -566,6 +632,10 @@ func cmdPing(args []string, stdout, stderr io.Writer) int {
 	if *to == "" {
 		fmt.Fprintln(stderr, "tincan ping: --to is required")
 		return ExitUsage
+	}
+	if err := requireRoom(*room); err != nil {
+		fmt.Fprintf(stderr, "tincan ping: %v\n", err)
+		return ExitError
 	}
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)
@@ -602,6 +672,10 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 	if *to == "" || *from == "" {
 		fmt.Fprintln(stderr, "tincan stop: --to and --from are required")
 		return ExitUsage
+	}
+	if err := requireRoom(*room); err != nil {
+		fmt.Fprintf(stderr, "tincan stop: %v\n", err)
+		return ExitError
 	}
 	if w := roomRootWarning(*room); w != "" {
 		fmt.Fprintln(stderr, w)

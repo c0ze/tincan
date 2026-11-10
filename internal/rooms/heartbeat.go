@@ -62,8 +62,16 @@ func RemoveHeartbeat(stateDir string, pid int) error {
 }
 
 // CoordinatorAlive reports whether web.json was updated within
-// HeartbeatFresh of now. A missing or unreadable file means no coordinator.
+// HeartbeatFresh of now. A missing or unreadable file means no coordinator,
+// and so does a future-dated one (the clock stepped back since it was
+// written): a live coordinator rewrites it with the current time. The
+// one-second allowance only covers a heartbeat written between the caller
+// reading its clock and reading the file.
 func CoordinatorAlive(stateDir string, now time.Time) bool {
 	hb, err := ReadHeartbeat(stateDir)
-	return err == nil && !hb.Updated.IsZero() && now.Sub(hb.Updated) < HeartbeatFresh
+	if err != nil || hb.Updated.IsZero() {
+		return false
+	}
+	age := now.Sub(hb.Updated)
+	return age > -time.Second && age < HeartbeatFresh
 }
