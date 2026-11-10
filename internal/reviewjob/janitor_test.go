@@ -93,6 +93,38 @@ func TestJanitorRelaunchesASavedRequestWithoutHost(t *testing.T) {
 	}
 }
 
+// A resumed creation whose job has expired, with no host left but a
+// lifetime lock file from an earlier one, ends in the expiry error in one
+// pass instead of staying creating on every pass.
+func TestJanitorSettlesAnExpiredResumedJob(t *testing.T) {
+	s := testService(t, "echo")
+	ctx := context.Background()
+	exp := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+	req := jobRequest("rv-0000000000000000-l", "p", exp)
+	st := s.store()
+	if err := writeInput(s.packetPath(req.JobID), req); err != nil {
+		t.Fatal(err)
+	}
+	ws := s.workspace(req.JobID)
+	os.MkdirAll(ws, 0o700)
+	if _, err := request.Submit(ctx, ws, "reviewer", "review", "saved body", req.JobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.WithoutHost(ctx, ws, "reviewer", func() error { return nil }); err != nil { // leaves the lock file
+		t.Fatal(err)
+	}
+	st.Save(Job{ID: req.JobID, ReviewID: req.ReviewID, Preset: "reviewer", PacketSHA: packet.Hash(req.Packet), PromptSHA: req.PromptSHA,
+		ExpiresAt: exp, State: "creating", Workspace: ws, Created: time.Now().UTC()})
+	s.Janitor(ctx)
+	s.Wait()
+	if j, _, _ := st.Get(req.JobID); j.State != "error" || !strings.Contains(j.Result, "expired") {
+		t.Fatalf("job: %+v", j)
+	}
+	if r, _ := request.Get(ws, req.JobID); !r.Terminal() {
+		t.Fatalf("request still runnable: %+v", r)
+	}
+}
+
 // A relaunch that times out before launching anything (here on the route
 // lock another submitter holds) proves nothing about a host: the job stays
 // creating, the request untouched, and the next janitor pass runs it.

@@ -225,6 +225,16 @@ func (s *Service) create(id string) {
 			// The creator may have died between saving the request and
 			// launching its listener: launch it now, or nothing ever runs
 			// the saved request.
+			if !r.Terminal() && !r.Interactive && !st.cancelRequested(id) && ctx.Err() != nil {
+				// The job expired (its context with it): nothing may launch
+				// any more, and every probe would fail. Settle it as the
+				// launch-time expiry check does, with a fresh bounded context.
+				cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
+				request.Cancel(cctx, j.Workspace, j.ID)
+				ccancel()
+				fail("expired before launch")
+				return
+			}
 			if !r.Terminal() && !r.Interactive && !st.cancelRequested(id) {
 				if _, alive := host.Existing(ctx, j.Workspace, j.Preset); !alive {
 					octx, ocancel := context.WithTimeout(ctx, 10*time.Second)
