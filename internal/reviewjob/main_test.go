@@ -34,11 +34,15 @@ func TestMain(m *testing.M) {
 
 // fakeReview is the reviewer: mode echo (default) appends a line to
 // runs.log in its working directory and prints the prompt; pwd prints the
-// working directory; sleep sleeps 30 s.
+// working directory; sleep sleeps 30 s; nap sleeps 2 s, then echoes.
 func fakeReview(args []string) int {
 	mode := ""
 	if len(args) > 0 {
 		mode, args = args[0], args[1:]
+	}
+	if mode == "nap" {
+		time.Sleep(2 * time.Second)
+		mode = "echo"
 	}
 	switch mode {
 	case "sleep":

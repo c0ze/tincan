@@ -62,8 +62,15 @@ func RenderBundle(in Input, st State, results map[int]string) []byte {
 		fmt.Fprintf(&b, " · included tree %s", in.IncludedTree)
 	}
 	fmt.Fprintf(&b, "\nClosed: %s\n", st.Closure.At.UTC().Format(time.RFC3339))
-	var late []string
+	// ReadState rejects closures naming missing members; skip them here too.
+	var closed []ClosedMember
 	for _, cm := range st.Closure.Members {
+		if cm.Index >= 0 && cm.Index < len(st.Members) {
+			closed = append(closed, cm)
+		}
+	}
+	var late []string
+	for _, cm := range closed {
 		if cm.Late {
 			late = append(late, st.Members[cm.Index].Member)
 		}
@@ -71,12 +78,12 @@ func RenderBundle(in Input, st State, results map[int]string) []byte {
 	if len(late) > 0 {
 		fmt.Fprintf(&b, "Late (still running at close): %s\n", strings.Join(late, ", "))
 	}
-	n := len(st.Closure.Members)
+	n := len(closed)
 	per := 200 << 10
 	if n > 0 && (896<<10)/n < per {
 		per = (896 << 10) / n
 	}
-	for _, cm := range st.Closure.Members {
+	for _, cm := range closed {
 		m := st.Members[cm.Index]
 		switch {
 		case cm.Late:

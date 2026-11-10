@@ -17,6 +17,7 @@ import (
 	"github.com/c0ze/tincan/v2/internal/cli"
 	"github.com/c0ze/tincan/v2/internal/dispatch"
 	"github.com/c0ze/tincan/v2/internal/host"
+	"github.com/c0ze/tincan/v2/internal/request"
 	"github.com/c0ze/tincan/v2/internal/thread"
 )
 
@@ -285,6 +286,86 @@ func TestDispatchInRoomWithSpaces(t *testing.T) {
 	snap := e.settle(d, th, quiescent)
 	if len(agentMessages(snap, thread.StateDone)) != 1 {
 		t.Fatalf("messages %+v", snap.Messages)
+	}
+}
+
+// runningWithoutHost records a running turn whose request is saved and
+// queued but whose listener is not running: the state after a reboot or a
+// killed listener (or a crash between saving and launching).
+func runningWithoutHost(t *testing.T, th *thread.Thread, room, listener, preset string, interactive bool) string {
+	t.Helper()
+	ctx := context.Background()
+	var mid, rid string
+	if err := th.Update(ctx, func(tx *thread.Tx) error {
+		u := tx.Append(thread.Event{Kind: thread.KindMessage, Author: "you", Role: thread.RoleUser, Text: "hi", Chain: "c1"})
+		m := tx.Append(thread.Event{Kind: thread.KindMessage, Author: listener, Role: thread.RoleAgent, ReplyTo: u.ID, Chain: "c1"})
+		mid, rid = m.ID, th.ID+"-"+m.ID
+		tx.Append(thread.Event{Kind: thread.KindIntent, Message: m.ID, Listener: listener, Preset: preset, RequestID: rid})
+		tx.Append(thread.Event{Kind: thread.KindState, Message: m.ID, State: thread.StateRunning})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	submit := request.Submit
+	if interactive {
+		submit = request.SubmitInteractive
+	}
+	if _, err := submit(ctx, room, listener, "web", "prompt", rid); err != nil {
+		t.Fatal(err)
+	}
+	return mid
+}
+
+func TestRunningTurnWithoutHostIsRelaunched(t *testing.T) {
+	e := newEnv(t, "a")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d := e.dispatcher()
+	mid := runningWithoutHost(t, th, e.room, "a."+th.ID, "a", false)
+	snap := e.settle(d, th, func(s thread.Snapshot) bool { m, _ := s.Message(mid); return !m.Active() })
+	if m, _ := snap.Message(mid); m.State != thread.StateDone || m.Text != "done by a" || e.count("a") != 1 {
+		t.Fatalf("turn: %+v (runs %d)", m, e.count("a"))
+	}
+}
+
+// A listener that cannot be restarted ends the turn after a bounded number
+// of spaced attempts, with a clear error.
+func TestRelaunchGivesUpWithAnError(t *testing.T) {
+	e := newEnv(t, "a")
+	e.opts.Presets["broken"] = host.Preset{Exec: []string{filepath.Join(e.fixture, "not-installed")}, Stdin: "body", Reply: "stdout"}
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d := e.dispatcher()
+	thread.SetRedriveEvery(d, time.Millisecond)
+	mid := runningWithoutHost(t, th, e.room, "broken."+th.ID, "broken", false)
+	snap := e.settle(d, th, func(s thread.Snapshot) bool { m, _ := s.Message(mid); return !m.Active() })
+	m, _ := snap.Message(mid)
+	if m.State != thread.StateError || !strings.Contains(m.Text, "could not be restarted") {
+		t.Fatalf("turn: %+v", m)
+	}
+	if r, err := request.Get(e.room, m.RequestID); err != nil || r.Status != "interrupted" {
+		t.Fatalf("request: %+v %v", r, err)
+	}
+}
+
+// An interactive receiver answers through its reply channel: it is never
+// relaunched as a hosted listener.
+func TestInteractiveTurnIsNotRelaunched(t *testing.T) {
+	e := newEnv(t, "a")
+	th, _ := thread.Create(e.room, "t", "a", "", 6)
+	d := e.dispatcher()
+	thread.SetRedriveEvery(d, time.Millisecond)
+	mid := runningWithoutHost(t, th, e.room, "a", "a", true)
+	for i := 0; i < 5; i++ {
+		if err := d.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	snap, _ := th.Snapshot()
+	if m, _ := snap.Message(mid); m.State != thread.StateRunning {
+		t.Fatalf("turn: %+v", m)
+	}
+	if _, ok, _ := host.ReadState(e.room, "a"); ok || e.count("a") != 0 {
+		t.Fatal("an interactive listener was launched as a host")
 	}
 }
 

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/host"
+	"github.com/c0ze/tincan/v2/internal/packet"
+	"github.com/c0ze/tincan/v2/internal/request"
 )
 
 func TestJanitorResumesAdoptsAndCleans(t *testing.T) {
@@ -60,6 +62,78 @@ func TestJanitorResumesAdoptsAndCleans(t *testing.T) {
 func countRuns(t *testing.T, ws, _ string) int {
 	data, _ := os.ReadFile(filepath.Join(ws, "runs.log"))
 	return strings.Count(string(data), "\n")
+}
+
+// The creator died after saving the request but before launching its
+// listener: resuming the creation launches it instead of adopting a request
+// nothing will ever run.
+func TestJanitorRelaunchesASavedRequestWithoutHost(t *testing.T) {
+	s := testService(t, "echo")
+	ctx := context.Background()
+	exp := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	req := jobRequest("rv-0000000000000000-i", "p", exp)
+	st := s.store()
+	if err := writeInput(s.packetPath(req.JobID), req); err != nil {
+		t.Fatal(err)
+	}
+	ws := s.workspace(req.JobID)
+	os.MkdirAll(ws, 0o700)
+	if _, err := request.Submit(ctx, ws, "reviewer", "review", "saved body", req.JobID); err != nil {
+		t.Fatal(err)
+	}
+	st.Save(Job{ID: req.JobID, ReviewID: req.ReviewID, Preset: "reviewer", PacketSHA: packet.Hash(req.Packet), PromptSHA: req.PromptSHA,
+		ExpiresAt: exp, State: "creating", Workspace: ws, Created: time.Now().UTC()})
+	if err := s.Janitor(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s.Wait()
+	j := waitTerminal(t, s, req.JobID)
+	if j.State != "done" || !strings.Contains(j.Result, "saved body") || countRuns(t, ws, req.JobID) != 1 {
+		t.Fatalf("job: %+v", j)
+	}
+}
+
+// Seven days after expiry a record is forgotten only once its workspace is
+// cleaned up, under the job lock, and the lock file stays (lock files are
+// never unlinked: that would allow split ownership).
+func TestJanitorForgetsOnlyCleanedRecords(t *testing.T) {
+	s := testService(t, "echo")
+	ctx := context.Background()
+	exp := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	req := jobRequest("rv-0000000000000000-f", "p", exp)
+	s.Create(ctx, req)
+	s.Wait()
+	done := waitTerminal(t, s, req.JobID)
+	st := s.store()
+	s.Now = func() time.Time { return exp.Add(TombstoneKeep + time.Hour) }
+	s.down = func(context.Context, string, string, time.Duration) error { return errors.New("host busy") }
+	s.Janitor(ctx)
+	if _, ok, _ := st.Get(req.JobID); !ok {
+		t.Fatal("record forgotten although its workspace could not be cleaned")
+	}
+	if _, err := os.Stat(done.Workspace); err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	s.down = nil
+	held, err := st.Lock(ctx, req.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Janitor(ctx)
+	if _, ok, _ := st.Get(req.JobID); !ok {
+		t.Fatal("record removed while another operation held the job lock")
+	}
+	held.Close()
+	s.Janitor(ctx)
+	if _, ok, _ := st.Get(req.JobID); ok {
+		t.Fatal("cleaned record kept")
+	}
+	if _, err := os.Stat(done.Workspace); !os.IsNotExist(err) {
+		t.Fatalf("workspace kept: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(st.jobsDir(), req.JobID+".lock")); err != nil {
+		t.Fatalf("lock file unlinked: %v", err)
+	}
 }
 
 // A cleanup that could not stop the listener is retried on the next pass,

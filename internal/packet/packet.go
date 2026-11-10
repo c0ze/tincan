@@ -73,6 +73,13 @@ func (p *Packet) Validate() error {
 	if data, _ := json.Marshal(p.Manifest); len(data) > MaxManifest {
 		return fmt.Errorf("manifest exceeds %d bytes", MaxManifest)
 	}
+	// Object IDs reach git as arguments: only full hex IDs, never revisions
+	// or options.
+	for name, id := range map[string]string{"base_commit": p.Manifest.BaseCommit, "included_tree": p.Manifest.IncludedTree} {
+		if id != "" && !fullObjectID(id) {
+			return fmt.Errorf("%s %q is not a full object ID", name, id)
+		}
+	}
 	var included []string
 	for _, c := range p.Manifest.Changes {
 		if !c.Included {
@@ -80,6 +87,11 @@ func (p *Packet) Validate() error {
 		}
 		if err := ValidPath(c.Path); err != nil {
 			return err
+		}
+		for _, mode := range []string{c.OldMode, c.NewMode} {
+			if mode == "120000" || mode == "160000" {
+				return fmt.Errorf("included change %s has mode %s (symlinks and submodules are never applied)", c.Path, mode)
+			}
 		}
 		included = append(included, c.Path)
 		if c.From != "" {
@@ -112,4 +124,17 @@ func (p *Packet) Validate() error {
 		return fmt.Errorf("packet files collide when case is ignored")
 	}
 	return nil
+}
+
+// fullObjectID reports a full lower-case SHA-1 or SHA-256 object ID.
+func fullObjectID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }

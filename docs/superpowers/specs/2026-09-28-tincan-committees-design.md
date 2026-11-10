@@ -279,6 +279,8 @@ forever.
    - 410 → `expired`.
    - 5xx, timeout, connection failure → stay `submitting`; retry every 15 s
      until the deadline, then `unreachable` ("peer not reachable").
+   - A member still `planned` after the deadline (no coordinator ran in
+     time) is never submitted: it becomes `expired` ("not submitted").
 2. **Collect** (`submitting`, `submitted`, `running`, `unreachable`): read the
    job every 5 s (and on notes); `unreachable` members are still polled,
    because a lost response may hide an accepted job. On a terminal job write
@@ -330,9 +332,10 @@ scope covers the whole repository even for a subdirectory room.
 **Working-tree snapshot.** Refused with a clear error when the index has
 unmerged entries or the repository uses sparse checkout. Otherwise, with a
 private temporary index file (`GIT_INDEX_FILE`):
-1. seed it from the base: `git read-tree <base>` (or `git read-tree --empty`),
-   so tracked files — including tracked files matching ignore rules — keep
-   their tracked status;
+1. seed it from `HEAD`: `git read-tree HEAD^{tree}` (or the empty tree when
+   HEAD is unborn), so tracked files — including tracked files matching
+   ignore rules — keep their tracked status (for `branch`, seeding from the
+   merge-base would drop files the branch force-added);
 2. `git add -A` from the repository root (adds untracked non-ignored files,
    records modifications and deletions);
 3. `git write-tree` → the target tree.
@@ -397,12 +400,19 @@ promisor remote) are skipped. With lazy fetching disabled
 
 **Checkout mode** (packet `complete` and a candidate qualifies):
 1. `git clone --no-checkout --shared <candidate root> <ws>`, then
-   `git -C <ws> repack -a -d -q` and remove `.git/objects/info/alternates`, so
+   `git -C <ws> config core.symlinks false` (persisted, so the reviewer's own
+   `git restore`/`reset --hard` never creates a real symlink either),
+   `git -C <ws> update-ref refs/tincan/base <base_commit>` (the clone copies
+   only heads and tags; the base may be reachable only from a remote-tracking
+   ref), `git -C <ws> repack -a -d -q` and remove `.git/objects/info/alternates`, so
    the clone owns its objects and survives maintenance in the candidate.
 2. Base: `git -C <ws> checkout --detach <base_commit>`, or for an empty base
    `git -C <ws> checkout --orphan tincan-review` with an empty index and tree.
 3. Validate the patch before applying (below), then
-   `git -C <ws> -c core.symlinks=false apply --index --binary packet/diff.patch`.
+   `git -C <ws> -c core.symlinks=false apply --index --binary packet/diff.patch`,
+   then check what was staged: `git diff-index --cached --no-renames <base>`
+   must list only paths the manifest includes (both rename endpoints) and no
+   mode 120000 or 160000 entry.
 4. Verify `git -C <ws> write-tree` equals `included_tree`.
 Any failure removes `<ws>` entirely before falling back to packet-only mode.
 The reviewer is told that `git diff --cached` (or `git diff HEAD`) shows the
@@ -417,7 +427,8 @@ every path in the patch header — is relative, clean, without empty, `.` or
 `..` components, without a component that case-folds to `.git` or `.tincan`,
 ≤ 1 024 bytes, each component valid under `envelope.ValidComponent`; no two
 included paths may case-fold to the same string; symlink and gitlink modes are
-never applied. Packet files are created with exclusive, no-follow opens as
+never applied (an included change with either mode makes the packet invalid);
+`base_commit` and `included_tree` are full hex object IDs. Packet files are created with exclusive, no-follow opens as
 regular 0600 files in directories the materializer created itself.
 
 **Executables are pinned outside reviewed content.** The member preset's
@@ -450,7 +461,11 @@ submitting, materialize it, submit through `dispatch.Send` with request ID
 launch failure) cancels that saved request, then records a permanent `error`.
 A replay of an identical create that finds `creating` with the job lock free
 (the creator died) first inspects the recorded workspace: a request record
-there is adopted (terminal → its result is imported; otherwise → `running`);
+there is adopted (terminal → its result is imported; otherwise → `running`,
+after resubmitting it under the same request ID to launch its listener when
+no host is running it — the creator may have died between saving and
+launching; a relaunch that times out on a lock another host owns adopts the
+request instead of cancelling it);
 only when none exists is creation restarted in a fresh workspace — the one
 place a member can run twice (§6.4).
 
@@ -464,7 +479,12 @@ one — a job that already finished stays `done` with its result, and the
 cancel is acknowledged. Otherwise record the tombstone (a launch is now
 refused), cancel the request (importing the result it returns if it had just
 finished), ask the host to stop it, and acknowledge once the request is
-terminal or the host has exited. If the host died, its
+terminal or the host has exited. A cancel that finds the job lock held
+(creation holds it through clone and checkout) does not wait: it records
+`<job_id>.cancel` beside the record and is not acknowledged yet; creation
+watches for it, aborts materializing, and right before launch refuses to
+launch, removes the workspace and records `cancelled`, so the requester's
+next cancel is acknowledged. If the host died, its
 agent process may outlive it until the exec timeout (phase 1 behaviour); the
 docs list this as residual risk.
 
@@ -473,7 +493,9 @@ docs list this as residual risk.
 cancelled — or 1 hour after `expires_at` for anything else — it imports any
 terminal request result not yet imported, stops the listener (`host.Down`,
 wait for exit) and removes the workspace; records and
-tombstones are removed 7 days after `expires_at`. Workspaces are never
+tombstones are removed 7 days after `expires_at`, under the job lock and only
+once that cleanup has succeeded (otherwise retried on the next pass). Job lock
+files are never removed (unlinking a lock file permits split ownership). Workspaces are never
 registered as rooms (phase 1 §15.3), so room passes never see them.
 
 ### 6.7 Machine-link API (added to phase 1's `tincan web`)

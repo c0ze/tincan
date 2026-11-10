@@ -212,15 +212,17 @@ func Build(ctx context.Context, dir, scope, question string) (*Packet, error) {
 	}
 	// Plumbing with every presentation knob pinned, so user configuration
 	// (noprefix, colour, external diff, textconv) cannot reshape the patch.
-	patch, err := g.Run(ctx, nil, "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "diff-tree", "-p", "-r",
+	// Read at most MaxPatch+1 bytes: deleting a huge tracked file makes a
+	// patch as large as the file.
+	patch, over, err := g.runLimited(ctx, nil, MaxPatch, "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "diff-tree", "-p", "-r",
 		"--binary", "--full-index", "--find-renames", "--no-color", "--no-ext-diff", "--no-textconv",
 		"--src-prefix=a/", "--dst-prefix=b/", r.BaseTree, p.Manifest.IncludedTree)
 	if err != nil {
 		return nil, err
 	}
-	if len(patch) > MaxPatch {
+	if over {
 		p.Manifest.Complete = false
-		p.Manifest.Notes = append(p.Manifest.Notes, fmt.Sprintf("patch of %d bytes exceeds %d; post-change file contents only", len(patch), MaxPatch))
+		p.Manifest.Notes = append(p.Manifest.Notes, fmt.Sprintf("patch exceeds %d bytes; post-change file contents only", MaxPatch))
 	} else if len(patch) > 0 {
 		p.Patch = patch
 	}
@@ -249,37 +251,45 @@ func collectFiles(ctx context.Context, g Git, p *Packet, judged []judgedChange) 
 	for _, w := range want {
 		in.WriteString(w.sha + "\n")
 	}
-	out, err := g.Run(ctx, in.Bytes(), "cat-file", "--batch")
-	if err != nil {
-		return err
-	}
-	br := bufio.NewReader(bytes.NewReader(out))
 	total := 0
 	p.Files = map[string][]byte{}
-	for _, w := range want {
-		header, err := br.ReadString('\n')
-		if err != nil {
-			return err
+	// Blobs are read one at a time from the stream into a scratch buffer:
+	// only kept contents (at most MaxFilesTotal) stay in memory.
+	var scratch []byte
+	err := g.stream(ctx, in.Bytes(), func(r io.Reader) error {
+		br := bufio.NewReader(r)
+		for _, w := range want {
+			header, err := br.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			f := strings.Fields(header)
+			if len(f) != 3 {
+				return fmt.Errorf("cat-file: unexpected header %q", header)
+			}
+			n, _ := strconv.Atoi(f[2])
+			if cap(scratch) < n {
+				scratch = make([]byte, n)
+			}
+			body := scratch[:n]
+			if _, err := io.ReadFull(br, body); err != nil {
+				return err
+			}
+			br.ReadByte() // trailing newline
+			if bytes.IndexByte(body, 0) >= 0 {
+				continue // binary: the patch carries it
+			}
+			if total+n > MaxFilesTotal {
+				p.Manifest.FilesOmitted = append(p.Manifest.FilesOmitted, w.path)
+				continue
+			}
+			total += n
+			p.Files[w.path] = append([]byte{}, body...)
 		}
-		f := strings.Fields(header)
-		if len(f) != 3 {
-			return fmt.Errorf("cat-file: unexpected header %q", header)
-		}
-		n, _ := strconv.Atoi(f[2])
-		body := make([]byte, n)
-		if _, err := io.ReadFull(br, body); err != nil {
-			return err
-		}
-		br.ReadByte() // trailing newline
-		if bytes.IndexByte(body, 0) >= 0 {
-			continue // binary: the patch carries it
-		}
-		if total+n > MaxFilesTotal {
-			p.Manifest.FilesOmitted = append(p.Manifest.FilesOmitted, w.path)
-			continue
-		}
-		total += n
-		p.Files[w.path] = body
+		return nil
+	}, "cat-file", "--batch")
+	if err != nil {
+		return err
 	}
 	if len(p.Files) == 0 {
 		p.Files = nil

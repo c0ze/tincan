@@ -188,6 +188,45 @@ func TestCancelRunningAndBeforeCreate(t *testing.T) {
 	}
 }
 
+// A cancel that arrives while creation holds the job lock does not wait for
+// it: it is recorded, creation stops materializing, refuses the launch and
+// removes the workspace, and the next cancel is acknowledged.
+func TestCancelDuringCreationRefusesLaunch(t *testing.T) {
+	s := testService(t, "echo")
+	ctx := context.Background()
+	entered := make(chan struct{})
+	s.materialized = func(ctx context.Context) {
+		close(entered)
+		select {
+		case <-ctx.Done():
+		case <-time.After(15 * time.Second):
+		}
+	}
+	req := jobRequest("rv-0000000000000000-h", "p", time.Now().Add(time.Hour).UTC().Truncate(time.Second))
+	if _, err := s.Create(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	start := time.Now()
+	if _, acked, err := s.Cancel(ctx, req.JobID, time.Time{}); err != nil || acked {
+		t.Fatalf("cancel during creation: acked=%v err=%v", acked, err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("cancel waited %v for creation", d)
+	}
+	s.Wait()
+	j, _ := s.Status(req.JobID)
+	if j.State != "cancelled" || !j.Tombstone {
+		t.Fatalf("job: %+v", j)
+	}
+	if _, err := os.Stat(j.Workspace); !os.IsNotExist(err) {
+		t.Fatalf("workspace kept: %v", err)
+	}
+	if _, acked, err := s.Cancel(ctx, req.JobID, time.Time{}); err != nil || !acked {
+		t.Fatalf("second cancel: acked=%v err=%v", acked, err)
+	}
+}
+
 func TestAck(t *testing.T) {
 	s := testService(t, "echo")
 	ctx := context.Background()

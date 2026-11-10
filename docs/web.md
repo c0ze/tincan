@@ -330,8 +330,9 @@ hand as above.
 
 Each thread has a **primary** agent (chosen when the thread is created) that
 receives a user message with no resolved `@mention`. Writing `@name` hands
-that turn to `name` instead — code spans (fenced or inline) are never
-scanned for mentions, and `@you` is reserved for the owner and never
+that turn to `name` instead — code (inline spans, and blocks fenced with
+backticks or tildes) and quoted lines (starting with `>`) are never scanned
+for mentions, and `@you` is reserved for the owner and never
 dispatches. You can `@mention`:
 
 - a preset available on this machine (built in, or from
@@ -379,6 +380,13 @@ can be retried again.
 When a listener fails to launch after its request was saved, the saved
 request is cancelled at once (and Stop/Archive cancel any such leftovers), so
 a later launch of that listener never runs the stale prompt.
+If a running turn's hosted listener disappears (a reboot, a killed process),
+tincan web relaunches it under the same request: a queued turn then runs,
+and one that was mid-run ends as interrupted (it is never replayed). A
+listener that is busy but not answering still owns its turn and is waited
+for. After three relaunches spaced 30 s apart fail with no host owning the
+listener, the turn ends with an error saying the listener could not be
+restarted. Interactive listeners are never relaunched.
 
 ## Rooms in the sidebar
 

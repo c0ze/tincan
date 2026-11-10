@@ -137,6 +137,32 @@ func partialClone(ctx context.Context, g packet.Git) bool {
 	return false
 }
 
+// checkStaged compares the index with base (renames as deletion plus
+// addition, so both endpoints are seen) and refuses any path the manifest
+// does not include and any symlink or gitlink entry (committees §6.6).
+func checkStaged(ctx context.Context, g packet.Git, base string, allowed map[string]bool) error {
+	out, err := g.Run(ctx, nil, "diff-index", "--cached", "-r", "-z", "--no-renames", base)
+	if err != nil {
+		return err
+	}
+	fields := strings.Split(string(out), "\x00")
+	for i := 0; i+1 < len(fields); i += 2 {
+		meta, path := strings.Fields(strings.TrimPrefix(fields[i], ":")), fields[i+1]
+		if len(meta) != 5 {
+			return fmt.Errorf("unexpected diff-index record %q", fields[i])
+		}
+		if err := packet.ValidPath(path); err != nil || !allowed[path] {
+			return fmt.Errorf("patch touches %q, which the manifest does not include", path)
+		}
+		for _, mode := range meta[:2] {
+			if mode == "120000" || mode == "160000" {
+				return fmt.Errorf("patch stages %s with mode %s", path, mode)
+			}
+		}
+	}
+	return nil
+}
+
 // materializeCheckout builds a checkout workspace: a dissociated clone of the
 // first qualifying candidate at the base, with the patch applied to the index
 // and verified against included_tree. Any failure removes ws and returns the
@@ -183,7 +209,17 @@ func materializeCheckout(ctx context.Context, ws string, p *packet.Packet, reg *
 		return fail("clone", err)
 	}
 	g := hermetic(ws)
-	steps := [][]string{{"repack", "-a", "-d", "-q"}, {"remote", "remove", "origin"}}
+	// core.symlinks=false is kept in the workspace, not just passed per
+	// command, so the reviewer's own git (status, restore, reset --hard)
+	// writes tracked links as plain files too (committees §6.6).
+	steps := [][]string{{"config", "core.symlinks", "false"}}
+	if m.BaseKind == "commit" {
+		// The clone copies only heads and tags; a base reachable only from
+		// the candidate's remote-tracking refs would be lost with the
+		// alternates. Pin it so repack copies it.
+		steps = append(steps, []string{"update-ref", "refs/tincan/base", m.BaseCommit})
+	}
+	steps = append(steps, []string{"repack", "-a", "-d", "-q"}, []string{"remote", "remove", "origin"})
 	for _, s := range steps {
 		if _, err := g.Run(ctx, nil, s...); err != nil {
 			return fail(s[0], err)
@@ -232,6 +268,17 @@ func materializeCheckout(ctx context.Context, ws string, p *packet.Packet, reg *
 		}
 		if _, err := g.Run(ctx, nil, "-c", "core.symlinks=false", "apply", "--index", "--binary", patchFile); err != nil {
 			return fail("apply", err)
+		}
+		// --numstat shows neither modes nor rename sources: check what was
+		// actually staged against the base, every path and both modes.
+		base := m.BaseCommit
+		if m.BaseKind != "commit" {
+			if base, err = packet.EmptyTree(ctx, g); err != nil {
+				return fail("patch check", err)
+			}
+		}
+		if err := checkStaged(ctx, g, base, allowed); err != nil {
+			return fail("patch check", err)
 		}
 	}
 	tree, err := g.Out(ctx, "write-tree")

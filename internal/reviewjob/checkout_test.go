@@ -110,6 +110,145 @@ func TestCheckoutFallsBack(t *testing.T) {
 	}
 }
 
+// The member fetched origin but its local branch is behind: the base is
+// reachable only from a remote-tracking ref, which clone --shared does not
+// copy. The workspace must still own the base after dissociating.
+func TestCheckoutBaseOnlyOnRemoteTrackingRef(t *testing.T) {
+	_, reg, member := checkoutFixture(t)
+	src := stateDir(t)
+	gitIn(t, src, "clone", "-q", member, "up")
+	up := filepath.Join(src, "up")
+	os.WriteFile(filepath.Join(up, "a.txt"), []byte("a\nupstream\n"), 0o644)
+	gitIn(t, up, "commit", "-qam", "upstream")
+	gitIn(t, member, "fetch", "-q", up, "main:refs/remotes/origin/main")
+	gitIn(t, up, "remote", "set-url", "origin", "https://github.com/c0ze/fixture")
+	os.WriteFile(filepath.Join(up, "new.txt"), []byte("n\n"), 0o644)
+	q, err := packet.Build(context.Background(), up, "uncommitted", "q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gitIn(t, member, "rev-parse", "main") == q.Manifest.BaseCommit {
+		t.Fatal("fixture: local main already has the base")
+	}
+	ws := filepath.Join(stateDir(t), "ws")
+	if _, reason, err := materializeCheckout(context.Background(), ws, q, reg); err != nil || reason != "" {
+		t.Fatalf("checkout: %q %v", reason, err)
+	}
+	gitIn(t, ws, "fsck", "--no-progress")
+}
+
+// hostilePacket turns the fixture's packet into one a compromised peer could
+// send: its manifest lists only the given paths, and its included_tree is
+// whatever the patch produces on the base, so the tree check alone cannot
+// catch it.
+func hostilePacket(t *testing.T, p *packet.Packet, member, patch string, listed ...packet.Change) *packet.Packet {
+	t.Helper()
+	q := *p
+	q.Patch = []byte(patch)
+	q.Files = nil
+	q.Manifest.Changes = listed
+	q.Manifest.IncludedTree = treeAfter(t, member, q.Manifest.BaseCommit, q.Patch)
+	return &q
+}
+
+// treeAfter is the tree patch yields on base, computed in a scratch index.
+func treeAfter(t *testing.T, repo, base string, patch []byte) string {
+	t.Helper()
+	idx := filepath.Join(stateDir(t), "index")
+	pf := filepath.Join(stateDir(t), "p.patch")
+	os.WriteFile(pf, patch, 0o600)
+	run := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = append(cmd.Environ(), "GIT_INDEX_FILE="+idx)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("read-tree", base)
+	run("apply", "--cached", pf)
+	return run("write-tree")
+}
+
+// A compromised peer cannot stage a symlink or touch a path the manifest
+// does not list (a rename source), even when included_tree matches
+// (committees §6.6: symlink and gitlink modes are never applied; both
+// rename endpoints obey the path policy).
+func TestCheckoutRejectsUnlistedPathsAndSymlinks(t *testing.T) {
+	p, reg, member := checkoutFixture(t)
+	symlink := "diff --git a/link b/link\nnew file mode 120000\n--- /dev/null\n+++ b/link\n@@ -0,0 +1 @@\n+/etc/hosts\n\\ No newline at end of file\n"
+	rename := "diff --git a/a.txt b/moved.txt\nsimilarity index 100%\nrename from a.txt\nrename to moved.txt\n"
+	add := func(path string) packet.Change { return packet.Change{Status: "A", Path: path, Included: true} }
+	cases := map[string]struct {
+		patch  string
+		listed []packet.Change
+	}{
+		"symlink":         {symlink, []packet.Change{add("link")}},
+		"rename source":   {rename, []packet.Change{add("moved.txt")}},
+		"rename and link": {rename + symlink, []packet.Change{add("moved.txt"), add("link")}},
+	}
+	for name, tc := range cases {
+		q := hostilePacket(t, p, member, tc.patch, tc.listed...)
+		ws := filepath.Join(stateDir(t), "ws")
+		_, reason, err := materializeCheckout(context.Background(), ws, q, reg)
+		if err != nil || reason == "" {
+			t.Errorf("%s: accepted (reason=%q err=%v)", name, reason, err)
+		}
+		if _, err := os.Stat(ws); err == nil {
+			t.Errorf("%s: workspace left behind", name)
+		}
+	}
+	// A rename whose both endpoints are listed is fine.
+	q := hostilePacket(t, p, member, rename, packet.Change{Status: "R", Path: "moved.txt", From: "a.txt", Included: true})
+	ws := filepath.Join(stateDir(t), "ws")
+	if _, reason, err := materializeCheckout(context.Background(), ws, q, reg); err != nil || reason != "" {
+		t.Fatalf("listed rename: %q %v", reason, err)
+	}
+}
+
+// Tracked symlinks in an honest base are checked out as plain files, and the
+// workspace remembers core.symlinks=false, so the reviewer's own git status
+// does not report them as type changes (and git restore cannot recreate a
+// real link).
+func TestCheckoutKeepsSymlinksOff(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	req := stateDir(t)
+	gitIn(t, req, "init", "-q", "-b", "main")
+	os.WriteFile(filepath.Join(req, "a.txt"), []byte("a\n"), 0o644)
+	os.Symlink("a.txt", filepath.Join(req, "link"))
+	gitIn(t, req, "add", ".")
+	gitIn(t, req, "commit", "-qm", "base")
+	gitIn(t, req, "remote", "add", "origin", "https://github.com/c0ze/fixture")
+	member := filepath.Join(stateDir(t), "member")
+	gitIn(t, filepath.Dir(member), "clone", "-q", req, member)
+	gitIn(t, member, "remote", "set-url", "origin", "https://github.com/c0ze/fixture")
+	os.WriteFile(filepath.Join(req, "a.txt"), []byte("a\nb\n"), 0o644)
+	p, err := packet.Build(context.Background(), req, "uncommitted", "q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := rooms.Open(filepath.Join(stateDir(t), "rooms.json"))
+	reg.Add(member)
+	ws := filepath.Join(stateDir(t), "ws")
+	if _, reason, err := materializeCheckout(context.Background(), ws, p, reg); err != nil || reason != "" {
+		t.Fatalf("checkout: %q %v", reason, err)
+	}
+	if st := gitIn(t, ws, "status", "--porcelain"); st != "M  a.txt" {
+		t.Fatalf("status:\n%s", st)
+	}
+	gitIn(t, ws, "checkout", "--", "link")
+	if info, err := os.Lstat(filepath.Join(ws, "link")); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("link: %v %v", info, err)
+	}
+}
+
 // Workspace git ignores the user's global and system configuration: global
 // hooks, attribute files and smudge filters (git-lfs installs one) never run.
 func TestCheckoutIgnoresGlobalGitConfig(t *testing.T) {

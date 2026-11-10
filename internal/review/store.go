@@ -92,7 +92,10 @@ func ReadState(room, id string) (State, error) {
 	if err := validID(id); err != nil {
 		return st, err
 	}
-	return st, readJSON(filepath.Join(Dir(room, id), "review.json"), 4<<20, &st)
+	if err := readJSON(filepath.Join(Dir(room, id), "review.json"), 4<<20, &st); err != nil {
+		return st, err
+	}
+	return st, st.check()
 }
 
 func WriteState(room, id string, st State) error {

@@ -2,6 +2,8 @@ package packet
 
 import (
 	"context"
+	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -110,6 +112,43 @@ func TestBuildIncompleteWhenPatchTooLarge(t *testing.T) {
 	}
 }
 
+// Build never holds git output much past the limits it applies: deleting a
+// large tracked file makes a huge --binary patch, and many ~1 MiB files a
+// huge cat-file stream, but only MaxPatch and MaxFilesTotal are kept.
+func TestBuildDoesNotBufferOversizedGitOutput(t *testing.T) {
+	dir, git := testRepo(t)
+	big := make([]byte, 32<<20)
+	rand.New(rand.NewSource(1)).Read(big)
+	if err := os.WriteFile(filepath.Join(dir, "big.bin"), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-qm", "base")
+	os.Remove(filepath.Join(dir, "big.bin"))
+	for i := 0; i < 12; i++ {
+		write(t, dir, fmt.Sprintf("gen/%02d.txt", i), strings.Repeat("line of text\n", 80000))
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	p, err := Build(context.Background(), dir, "uncommitted", "q")
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Manifest.Complete || p.Patch != nil || len(p.Files) == 0 || len(p.Manifest.FilesOmitted) == 0 {
+		t.Fatalf("outcome: complete=%v patch=%d files=%d omitted=%d", p.Manifest.Complete, len(p.Patch), len(p.Files), len(p.Manifest.FilesOmitted))
+	}
+	// Buffering git's output at all costs at least its size: the --binary
+	// deletion of 32 MiB of random bytes is over 40 MiB of base85, and the
+	// blobs 12 MiB more (unbounded reads allocated 172 MiB here, 332 under
+	// the race detector). Bounded reads allocate about 12 MiB (20 with
+	// -race), however large the deleted file.
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 40<<20 {
+		t.Fatalf("Build allocated %d MiB", alloc>>20)
+	}
+}
+
 func TestBuildEmptyChangeNoneScopeAndLimits(t *testing.T) {
 	dir, git := testRepo(t)
 	write(t, dir, "a.txt", "a\n")
@@ -135,6 +174,11 @@ func TestValidateRejectsHostilePackets(t *testing.T) {
 		"file path":  {Manifest: Manifest{Scope: "none"}, Files: map[string][]byte{"a/../../b": []byte("x")}},
 		"collision":  {Manifest: Manifest{Scope: "none", Changes: []Change{{Status: "A", Path: "A.txt", Included: true}, {Status: "A", Path: "a.txt", Included: true}}}},
 		"rename src": {Manifest: Manifest{Scope: "none", Changes: []Change{{Status: "R", Path: "ok.txt", From: ".tincan/x", Included: true}}}},
+		"symlink":    {Manifest: Manifest{Scope: "none", Changes: []Change{{Status: "A", Path: "link", NewMode: "120000", Included: true}}}},
+		"gitlink":    {Manifest: Manifest{Scope: "none", Changes: []Change{{Status: "D", Path: "sub", OldMode: "160000", Included: true}}}},
+		"base rev":   {Manifest: Manifest{Scope: "branch", BaseKind: "commit", BaseCommit: "HEAD~1"}},
+		"short base": {Manifest: Manifest{Scope: "branch", BaseKind: "commit", BaseCommit: "abc1234"}},
+		"tree opt":   {Manifest: Manifest{Scope: "branch", BaseKind: "empty", IncludedTree: "--output=/tmp/x"}},
 	} {
 		p := p
 		if err := p.Validate(); err == nil {
