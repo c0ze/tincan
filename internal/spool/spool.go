@@ -379,10 +379,12 @@ type Presence struct {
 }
 
 // presenceFile is the on-disk JSON shape of one token file under
-// <root>/present/<name>/.
+// <root>/present/<name>/. Start is the writer's process start identity
+// (processStart); tokens written before it existed omit it.
 type presenceFile struct {
 	PID   int       `json:"pid"`
 	Since time.Time `json:"since"`
+	Start string    `json:"start,omitempty"`
 }
 
 // presentNameDir returns <root>/present/<name>, the directory holding one
@@ -402,7 +404,7 @@ func (s *Spool) writePresence(name, token string) {
 			return
 		}
 	}
-	data, err := json.Marshal(presenceFile{PID: os.Getpid(), Since: time.Now().UTC()})
+	data, err := json.Marshal(presenceFile{PID: os.Getpid(), Since: time.Now().UTC(), Start: selfStart()})
 	if err != nil {
 		return
 	}
@@ -494,12 +496,12 @@ func (s *Spool) Present(name string) (Presence, bool, error) {
 
 // presenceFor builds the Presence for one name: queued count from its inbox,
 // plus an aggregate view of its present/<name>/ token files. A name is
-// present iff at least one token's stored pid is alive (processAlive); the
-// representative PID/Since come from the live token with the most-recent
+// present iff at least one token's writer is still running (ownerLiveness);
+// the representative PID/Since come from the live token with the most-recent
 // Since. A missing present/<name>/ dir means absent, not an error. Individual
 // token files that are missing (removed mid-scan by a racing Recv exit),
-// corrupt, or store a dead pid are skipped rather than failing the whole
-// listing — best-effort, same as writePresence/removePresence.
+// corrupt, or whose writer has exited are skipped rather than failing the
+// whole listing — best-effort, same as writePresence/removePresence.
 func (s *Spool) presenceFor(name string) (Presence, error) {
 	p := Presence{Name: name}
 	for _, dir := range []string{s.InboxDir(name), s.presentNameDir(name)} {
@@ -516,37 +518,9 @@ func (s *Spool) presenceFor(name string) (Presence, error) {
 			p.Queued++
 		}
 	}
-	tokenEntries, err := os.ReadDir(s.presentNameDir(name))
+	best, _, err := s.scanPresence(name)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return p, nil
-		}
 		return Presence{}, err
-	}
-	var best *presenceFile
-	for _, ent := range tokenEntries {
-		if ent.IsDir() {
-			continue
-		}
-		data, err := fsutil.ReadFile(filepath.Join(s.presentNameDir(name), ent.Name()), 4096)
-		if err != nil {
-			// Removed mid-scan by a racing Recv exit, or unreadable; skip
-			// rather than fail the whole listing.
-			continue
-		}
-		var pf presenceFile
-		if err := json.Unmarshal(data, &pf); err != nil {
-			// A malformed token file (e.g. torn write) is skipped, same as a
-			// missing one: it self-heals on the next Recv.
-			continue
-		}
-		if !processAlive(pf.PID) {
-			continue
-		}
-		if best == nil || pf.Since.After(best.Since) {
-			pfCopy := pf
-			best = &pfCopy
-		}
 	}
 	if best == nil {
 		return p, nil
@@ -555,4 +529,57 @@ func (s *Spool) presenceFor(name string) (Presence, error) {
 	p.Since = best.Since
 	p.Alive = true
 	return p, nil
+}
+
+// scanPresence returns the live token with the most recent Since for name, and
+// removes tokens whose writer provably exited without its deferred cleanup
+// (killed, crashed, rebooted). Token names are unique per receive, so no live
+// receiver can own a removed path; removal is best-effort. A missing
+// present/<name>/ dir yields no token and no error.
+func (s *Spool) scanPresence(name string) (best *presenceFile, reaped int, err error) {
+	dir := s.presentNameDir(name)
+	if err := fsutil.CheckDir(dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, nil
+		}
+		return nil, 0, err
+	}
+	tokenEntries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, nil
+		}
+		return nil, 0, err
+	}
+	for _, ent := range tokenEntries {
+		if ent.IsDir() {
+			continue
+		}
+		path := filepath.Join(dir, ent.Name())
+		data, err := fsutil.ReadFile(path, 4096)
+		if err != nil {
+			// Removed mid-scan by a racing Recv exit, or unreadable; skip
+			// rather than fail the whole listing.
+			continue
+		}
+		var pf presenceFile
+		if err := json.Unmarshal(data, &pf); err != nil {
+			// A malformed token file is skipped, same as a missing one.
+			continue
+		}
+		switch ownerLiveness(pf.PID, pf.Start, pf.Since) {
+		case ownerDead:
+			if os.Remove(path) == nil {
+				reaped++
+			}
+			continue
+		case ownerReplaced:
+			continue
+		}
+		if best == nil || pf.Since.After(best.Since) {
+			pfCopy := pf
+			best = &pfCopy
+		}
+	}
+	return best, reaped, nil
 }

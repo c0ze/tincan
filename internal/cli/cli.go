@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -309,15 +311,31 @@ func cmdRecv(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "tincan recv: %v\n", err)
 		return ExitError
 	}
-	d, err := sp.ClaimContext(context.Background(), *as, time.Duration(*timeout)*time.Second)
+	ctx, stop := receiveContext()
+	defer stop()
+	d, err := sp.ClaimContext(ctx, *as, time.Duration(*timeout)*time.Second)
 	if errors.Is(err, spool.ErrTimeout) {
 		return ExitTimeout
 	}
 	if err != nil {
+		if ctx.Err() != nil {
+			err = errors.New("interrupted")
+		}
 		fmt.Fprintf(stderr, "tincan recv: %v\n", err)
 		return ExitError
 	}
 	return deliver(d, *format, *logMsgs, stdout, stderr)
+}
+
+// receiveContext is canceled by SIGINT, SIGTERM or SIGHUP, so a parked
+// receive returns through its normal cleanup (removing its presence token)
+// instead of dying with it. It also ignores SIGPIPE: output to a closed pipe
+// then fails as an error and the claimed message is requeued instead of
+// stranded in flight. Once a message is claimed, these signals no longer
+// interrupt anything; delivery and Ack or Nack finish first.
+func receiveContext() (context.Context, context.CancelFunc) {
+	signal.Ignore(syscall.SIGPIPE)
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 }
 
 // A failed sink must not consume the message. Explicit Nack makes it available
@@ -385,16 +403,24 @@ func cmdAsk(args []string, stdout, stderr io.Writer) int {
 		ID: envelope.NewID(), CorrID: channel, From: *from, To: *to,
 		ReplyTo: channel, TS: time.Now().UTC(), Body: b, Artifacts: artifacts,
 	}
+	ctx, stop := receiveContext()
+	defer stop()
 	if err := sp.Send(e); err != nil {
 		fmt.Fprintf(stderr, "tincan ask: %v\n", err)
 		return ExitError
 	}
-	reply, err := sp.ClaimContext(context.Background(), channel, time.Duration(*timeout)*time.Second)
+	reply, err := sp.ClaimContext(ctx, channel, time.Duration(*timeout)*time.Second)
 	if errors.Is(err, spool.ErrTimeout) {
 		// Leave the channel in place: a late reply still lands there and is
 		// collected with `tincan recv --as <channel>`.
 		fmt.Fprintf(stdout, "pending channel=%s\n", channel)
 		return ExitTimeout
+	}
+	if err != nil && ctx.Err() != nil {
+		// The request was sent; its reply can still be collected.
+		fmt.Fprintf(stdout, "pending channel=%s\n", channel)
+		fmt.Fprintln(stderr, "tincan ask: interrupted")
+		return ExitError
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan ask: %v\n", err)

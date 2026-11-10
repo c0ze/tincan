@@ -134,13 +134,15 @@ agent CLI for you so no human terminal is needed per agent; see below.
 
 Before `status`/`ping`, checking "is a listener alive?" meant `ps` plus a
 round-trip `ask`/`reply` — a real message, a real agent wake. `status` and
-`ping` answer it for free: a `Recv` writes a small presence file (holding its
-pid and a since-timestamp) for the duration it is parked, under
-`<room>/.tincan/present/<name>/<token>` — one file per parked receive, keyed
-by a token unique to that `Recv` call, since more than one receiver can be
-parked as the same name at once. `status`/`ping` just read that directory
-(a name is "present" if any token's pid is still alive) plus a pid-liveness
-check per token. **No message is sent; nothing wakes an agent.**
+`ping` answer it for free: a `Recv` writes a small presence file for the
+duration it is parked, under `<room>/.tincan/present/<name>/<token>` — one file
+per parked receive, keyed by a token unique to that `Recv` call, since more
+than one receiver can be parked as the same name at once. The file is JSON:
+`pid`, `since` (when it parked) and `start`, an opaque per-OS identity of the
+writing process (its kernel start time) that a later process reusing the pid
+cannot share. `status`/`ping` just read that directory: a name is "present" if
+any token's writer is still running. **No message is sent; nothing wakes an
+agent.**
 
 ```
 tincan status [--room <path>] [--format table|json]
@@ -162,10 +164,20 @@ tincan ping   --to <name> [--room <path>]
   shows as not-parked. A listener that re-arms in a loop (see below) is
   "parked" during each wait and briefly "—" between messages; that's
   expected, not a bug.
-- A presence file surviving its process (e.g. the listener was killed rather
-  than exiting normally) is detected and reported as absent: `status`/`ping`
-  also check that the recorded pid is actually alive, so a crashed listener
-  doesn't linger as a false "parked" row.
+- `recv` and `ask` remove their presence file when interrupted by SIGINT,
+  SIGTERM or SIGHUP. A presence file surviving its process (the listener was
+  killed with SIGKILL, crashed, or the machine rebooted) is detected and
+  reported as absent: the recorded pid must be alive and its process must
+  still have the recorded `start` identity, so a crashed listener doesn't
+  linger as a false "parked" row even after the OS reuses its pid. Such files
+  are deleted when presence is read and by `tincan gc`.
+- Files written by older versions have no `start`. They count as present only
+  while their pid is alive and its current process did not start after the
+  file's `since` (allowing a few seconds of clock granularity). A file whose
+  pid is gone is deleted; one whose pid now belongs to a newer process is
+  ignored, but kept until that pid exits, because that proof relies on the
+  wall clock. Where the OS cannot report a process's start (other than Linux,
+  macOS and Windows), the pid check alone decides, as before.
 
 ## Control messages — `kind` / `stop`
 
