@@ -52,6 +52,40 @@ func Existing(ctx context.Context, room, name string) (State, bool) {
 	return State{}, false
 }
 
+// Owned reports whether a live process holds listener name's lifetime lock,
+// whatever its control endpoint answers: a busy host that stops answering
+// still owns its listener, which Existing cannot tell from no host at all.
+// Like Up and Down it probes under the launch lock, so it never races a
+// launch or a shutdown; it holds the lifetime lock only for the instant of
+// the probe and changes nothing else. ctx bounds the wait for the launch
+// lock; an error means the answer is unknown.
+func Owned(ctx context.Context, room, name string) (bool, error) {
+	if err := spool.ValidName(name); err != nil {
+		return false, err
+	}
+	room, err := canonicalRoom(room)
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Lstat(lifetimePath(room, name)); errors.Is(err, os.ErrNotExist) {
+		return false, nil // no host has ever run under this name here
+	}
+	launch, err := filelock.Acquire(ctx, launchPath(room, name))
+	if err != nil {
+		return false, err
+	}
+	defer launch.Close()
+	lifetime, err := filelock.Try(lifetimePath(room, name))
+	if errors.Is(err, filelock.ErrLocked) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	lifetime.Close()
+	return false, nil
+}
+
 // Up serializes starts and waits for the exact owner's control endpoint.
 // Receiving a queued job immediately does not prevent readiness.
 func Up(ctx context.Context, o UpOptions) (UpResult, error) {

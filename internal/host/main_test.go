@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/c0ze/tincan/v2/internal/filelock"
 )
 
 // TestMain doubles as the fake agent: when TINCAN_FAKE_AGENT=1 is in the
@@ -99,6 +101,19 @@ func fakeAgent(args []string) int {
 	case "serve":
 		// Stands in for the daemon Up starts, one that never becomes ready.
 		if err := os.WriteFile(os.Getenv("TINCAN_FAKE_SERVE_PIDFILE"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+			return 1
+		}
+		time.Sleep(30 * time.Second)
+	case "hold":
+		// Owns a lifetime lock (args[1]) the way Serve does, from another
+		// process, and writes its pid to args[2].
+		lock, err := filelock.Try(args[1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		defer lock.Close()
+		if err := os.WriteFile(args[2], []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 			return 1
 		}
 		time.Sleep(30 * time.Second)
