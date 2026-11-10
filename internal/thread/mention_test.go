@@ -41,6 +41,7 @@ func TestParseMentions(t *testing.T) {
 		"```` x ``` @codex ```` @claude":         {"claude"},
 		"`` unclosed @codex":                     nil,
 		"**@codex** please, cc:@claude, _@grok_": {"codex", "claude", "grok"},
+		// Quoted lines mention no one.
 		"> @codex wrote this earlier\n>@agy too\n@claude agree?": {"claude"},
 	}
 	for in, want := range cases {
