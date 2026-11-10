@@ -765,6 +765,15 @@ func (s *Service) Janitor(ctx context.Context) error {
 		if s.refresh(&cur) {
 			st.Save(cur)
 		}
+		// A running job with cancel intent or a pending failure was left
+		// running because a host owned its listener; if that host died
+		// without finishing the request, nothing else would settle it.
+		if intent := cur.Tombstone || st.cancelRequested(cur.ID); cur.State == "running" && (intent || cur.PendingError != "") {
+			s.settle(cur, intent)
+			if got, ok, err := st.Get(cur.ID); err == nil && ok {
+				cur = got
+			}
+		}
 		due := cur.Acked || cur.State == "cancelled" || now.After(cur.ExpiresAt.Add(time.Hour))
 		if due && !cur.Cleaned && s.cleanup(ctx, cur) {
 			cur.Cleaned = true

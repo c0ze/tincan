@@ -510,7 +510,11 @@ terminal request result not yet imported, stops the listener (`host.Down`,
 wait for exit) and removes the workspace; records and
 tombstones are removed 7 days after `expires_at`, under the job lock and only
 once that cleanup has succeeded (otherwise retried on the next pass). Job lock
-files are never removed (unlinking a lock file permits split ownership). Workspaces are never
+files are never removed (unlinking a lock file permits split ownership). Each
+pass also retries settling a `running` job that carries cancel intent or a
+pending error (left running because a host owned its listener): once no
+host owns it, the request is finished as cancelled and the job records its
+outcome. Workspaces are never
 registered as rooms (phase 1 §15.3), so room passes never see them.
 
 ### 6.7 Machine-link API (added to phase 1's `tincan web`)
