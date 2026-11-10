@@ -193,10 +193,10 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 			if r.InteractivePublished {
 				return r, nil
 			}
-			return resolveInteractivePublication(room, r)
+			return resolveInteractivePublication(ctx, room, r, true)
 		}
 		if r.Publication != publicationPending {
-			return resolveNativePublication(room, r)
+			return resolveNativePublication(ctx, room, r)
 		}
 		e = r.Envelope
 		// Mark the attempt before Send: once the envelope may be in the spool,
@@ -225,13 +225,13 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 	}
 	if err := sp.Send(e); err != nil {
 		if r.Interactive {
-			resolved, resolveErr := resolveInteractivePublication(room, r)
+			resolved, resolveErr := resolveInteractivePublication(ctx, room, r, true)
 			if resolveErr != nil {
 				return r, fmt.Errorf("interactive request %s dispatch was not confirmed: %w (publication inspection: %v)", id, err, resolveErr)
 			}
 			return resolved, fmt.Errorf("interactive request %s dispatch returned an error and will not be resent automatically: %w", id, err)
 		}
-		return reopenEnqueue(room, r, err)
+		return reopenEnqueue(ctx, room, r, err)
 	}
 	if r.Interactive {
 		r.InteractivePublished = true
@@ -249,8 +249,8 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 // and a consumer outside the journal (an interactive recv) took the envelope
 // before this inspection, the retry sends it a second time. That double
 // fault is accepted to keep the repair for ordinary enqueue failures.
-func reopenEnqueue(room string, r Record, sendErr error) (Record, error) {
-	found, err := findPublication(room, r)
+func reopenEnqueue(ctx context.Context, room string, r Record, sendErr error) (Record, error) {
+	found, err := findPublication(ctx, room, r, true)
 	if err != nil {
 		return r, fmt.Errorf("request %s enqueue failed and its publication cannot be checked, so it will not be resent; retry the same request_id to check again: %w (inspection: %v)", r.ID, sendErr, err)
 	}
@@ -271,8 +271,8 @@ func reopenEnqueue(room string, r Record, sendErr error) (Record, error) {
 // interactive recv, for example) and may already have run. It is never
 // resent. A legacy record cannot tell a failed enqueue from a consumed one,
 // so its absence is treated the same way.
-func resolveNativePublication(room string, r Record) (Record, error) {
-	found, err := findPublication(room, r)
+func resolveNativePublication(ctx context.Context, room string, r Record) (Record, error) {
+	found, err := findPublication(ctx, room, r, true)
 	if err != nil || found {
 		return r, err
 	}
@@ -284,7 +284,8 @@ func resolveNativePublication(room string, r Record) (Record, error) {
 // findPublication reports whether r's exact envelope is queued or in flight.
 // The spool inspects both locations under its transport lock (taken after the
 // journal lock, as Send does), so a claim or Nack cannot hide it in between.
-func findPublication(room string, r Record) (bool, error) {
+// Without wait, a busy transport returns filelock.ErrLocked at once.
+func findPublication(ctx context.Context, room string, r Record, wait bool) (bool, error) {
 	if err := envelope.Validate(r.Envelope); err != nil {
 		return false, err
 	}
@@ -292,7 +293,12 @@ func findPublication(room string, r Record) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	found, err := sp.Published(r.Envelope)
+	var found bool
+	if wait {
+		found, err = sp.Published(ctx, r.Envelope)
+	} else {
+		found, err = sp.TryPublished(r.Envelope)
+	}
 	if err != nil {
 		return false, fmt.Errorf("cannot inspect request publication: %w", err)
 	}
@@ -304,8 +310,8 @@ func findPublication(room string, r Record) (bool, error) {
 // not permission to resend: a legacy receiver may already have consumed and
 // acted on the envelope without writing anything to the request journal.
 // Native requests resend only an enqueue this version never confirmed.
-func resolveInteractivePublication(room string, r Record) (Record, error) {
-	found, err := findPublication(room, r)
+func resolveInteractivePublication(ctx context.Context, room string, r Record, wait bool) (Record, error) {
+	found, err := findPublication(ctx, room, r, wait)
 	if err != nil {
 		return r, err
 	}

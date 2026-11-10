@@ -245,6 +245,55 @@ func TestNativeSendErrorKeepsSameIDRepair(t *testing.T) {
 	}
 }
 
+// Idle reconciliation of an unconfirmed interactive publication must not wait
+// for a busy transport: Wait keeps its own deadline and the record stays queued.
+func TestWaitDoesNotBlockOnBusyTransport(t *testing.T) {
+	room, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	r, err := SubmitInteractive(ctx, room, "interactive", "test", "task", "busy-transport")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.InteractivePublished = false
+	if err := save(room, r); err != nil {
+		t.Fatal(err)
+	}
+	transport, err := filelock.Acquire(ctx, filepath.Join(room, ".tincan", "transport.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		r   Record
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		waitCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+		got, err := Wait(waitCtx, room, r.ID, 10*time.Millisecond)
+		done <- result{got, err}
+	}()
+	select {
+	case got := <-done:
+		transport.Close()
+		if got.err != nil || got.r.Status != "queued" || got.r.InteractivePublished {
+			t.Fatalf("wait during busy transport: %+v, %v", got.r, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		transport.Close()
+		<-done
+		t.Fatal("Wait blocked on the transport lock past its deadline")
+	}
+	// Once the transport is free, the next poll confirms the publication.
+	got, err := Wait(ctx, room, r.ID, 10*time.Millisecond)
+	if err != nil || got.Status != "queued" || !got.InteractivePublished {
+		t.Fatalf("after transport release: %+v, %v", got, err)
+	}
+}
+
 // A recv whose output fails Nacks its claim back to the inbox under the
 // transport lock, briefly holding the envelope in neither location. A retry
 // inspecting publication then must wait for the lock, not report it absent.

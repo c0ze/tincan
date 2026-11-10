@@ -27,8 +27,19 @@ func (s *Spool) lockTransport(ctx context.Context) (*filelock.Lock, error) {
 // Published reports whether e is queued or in flight, checked under the
 // transport lock so a concurrent claim or Nack cannot hide it between the two
 // locations. Different content at e's filename is ErrEnvelopeConflict.
-func (s *Spool) Published(e *envelope.Envelope) (bool, error) {
-	lock, err := s.lockTransport(context.Background())
+func (s *Spool) Published(ctx context.Context, e *envelope.Envelope) (bool, error) {
+	lock, err := s.lockTransport(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer lock.Close()
+	return s.published(e)
+}
+
+// TryPublished is Published without waiting: it returns filelock.ErrLocked
+// while another transition holds the transport lock.
+func (s *Spool) TryPublished(e *envelope.Envelope) (bool, error) {
+	lock, err := filelock.Try(filepath.Join(s.root, "transport.lock"))
 	if err != nil {
 		return false, err
 	}
