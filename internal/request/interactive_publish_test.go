@@ -5,11 +5,13 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/envelope"
+	"github.com/c0ze/tincan/v2/internal/filelock"
 	"github.com/c0ze/tincan/v2/internal/spool"
 )
 
@@ -171,6 +173,79 @@ func TestNativeRetryDoesNotRepublishConsumedRequest(t *testing.T) {
 	}
 	if _, err := sp.Recv(r.Agent, 20*time.Millisecond, false); !errors.Is(err, spool.ErrTimeout) {
 		t.Fatalf("native work was republished: %v", err)
+	}
+}
+
+// A recv whose output fails Nacks its claim back to the inbox under the
+// transport lock, briefly holding the envelope in neither location. A retry
+// inspecting publication then must wait for the lock, not report it absent.
+func TestRetryInspectsPublicationUnderTransportLock(t *testing.T) {
+	for _, interactive := range []bool{false, true} {
+		t.Run(map[bool]string{false: "native", true: "interactive"}[interactive], func(t *testing.T) {
+			room, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			submit := Submit
+			if interactive {
+				submit = SubmitInteractive
+			}
+			r, err := submit(ctx, room, "worker", "test", "task", "nack-race")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if interactive {
+				r.InteractivePublished = false // retries must inspect the spool
+				if err := save(room, r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sp, err := spool.Open(room)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := sp.ClaimContext(ctx, r.Agent, time.Second); err != nil {
+				t.Fatal(err)
+			}
+			transport, err := filelock.Acquire(ctx, filepath.Join(room, ".tincan", "transport.lock"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			filename := envelope.Filename(r.Envelope)
+			claim := filepath.Join(room, ".tincan", "inflight", r.Agent, filename)
+			limbo := filepath.Join(t.TempDir(), "message.json")
+			if err := os.Rename(filepath.Join(claim, "message.json"), limbo); err != nil {
+				t.Fatal(err)
+			}
+			type result struct {
+				r   Record
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				retry, err := submit(ctx, room, r.Agent, "test", "task", r.ID)
+				done <- result{retry, err}
+			}()
+			time.Sleep(200 * time.Millisecond) // an unlocked scan sees neither location here
+			if err := os.Rename(limbo, filepath.Join(room, ".tincan", "inbox", r.Agent, filename)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(claim); err != nil {
+				t.Fatal(err)
+			}
+			transport.Close()
+			got := <-done
+			if got.err != nil || got.r.Status != "queued" {
+				t.Fatalf("requeued request misreported: %+v, %v", got.r, got.err)
+			}
+			if _, err := sp.Recv(r.Agent, time.Second, false); err != nil {
+				t.Fatalf("requeued envelope lost: %v", err)
+			}
+			if _, err := sp.Recv(r.Agent, 20*time.Millisecond, false); !errors.Is(err, spool.ErrTimeout) {
+				t.Fatalf("request was resent: %v", err)
+			}
+		})
 	}
 }
 

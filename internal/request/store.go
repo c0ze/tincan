@@ -254,36 +254,21 @@ func resolveNativePublication(room string, r Record) (Record, error) {
 }
 
 // findPublication reports whether r's exact envelope is queued or in flight.
-// A claim moves inbox -> inflight, so scanning the inbox first cannot miss it.
+// The spool inspects both locations under its transport lock (taken after the
+// journal lock, as Send does), so a claim or Nack cannot hide it in between.
 func findPublication(room string, r Record) (bool, error) {
 	if err := envelope.Validate(r.Envelope); err != nil {
 		return false, err
 	}
-	root := filepath.Join(canonicalRoom(room), ".tincan")
-	filename := envelope.Filename(r.Envelope)
-	paths := []string{
-		filepath.Join(root, "inbox", r.Agent, filename),
-		filepath.Join(root, "inflight", r.Agent, filename, "message.json"),
+	sp, err := spool.Open(canonicalRoom(room))
+	if err != nil {
+		return false, err
 	}
-	for _, path := range paths {
-		data, err := fsutil.ReadFile(path, spool.MaxMessageBytes)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return false, fmt.Errorf("cannot inspect request publication: %w", err)
-		}
-		existing, err := envelope.Unmarshal(data)
-		if err != nil {
-			return false, fmt.Errorf("cannot inspect request publication: %w", err)
-		}
-		if existing.ID != r.ID || !sameRequest(r, existing) || !existing.TS.Equal(r.Envelope.TS) ||
-			existing.ReplyTo != r.Envelope.ReplyTo || existing.CorrID != r.Envelope.CorrID {
-			return false, fmt.Errorf("%w: request %s", spool.ErrEnvelopeConflict, r.ID)
-		}
-		return true, nil
+	found, err := sp.Published(r.Envelope)
+	if err != nil {
+		return false, fmt.Errorf("cannot inspect request publication: %w", err)
 	}
-	return false, nil
+	return found, nil
 }
 
 // resolveInteractivePublication handles a durable dispatch intent left by a

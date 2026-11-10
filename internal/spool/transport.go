@@ -24,6 +24,18 @@ func (s *Spool) lockTransport(ctx context.Context) (*filelock.Lock, error) {
 	return filelock.Acquire(ctx, filepath.Join(s.root, "transport.lock"))
 }
 
+// Published reports whether e is queued or in flight, checked under the
+// transport lock so a concurrent claim or Nack cannot hide it between the two
+// locations. Different content at e's filename is ErrEnvelopeConflict.
+func (s *Spool) Published(e *envelope.Envelope) (bool, error) {
+	lock, err := s.lockTransport(context.Background())
+	if err != nil {
+		return false, err
+	}
+	defer lock.Close()
+	return s.published(e)
+}
+
 // published checks both possible locations under the transport lock. That
 // excludes rename/Ack races while comparing content, so a conflicting envelope
 // cannot disappear halfway through comparison and be mistaken for a retry.
