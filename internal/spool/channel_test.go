@@ -183,6 +183,52 @@ func TestReceiveTimesOutWhileTransportLockIsHeld(t *testing.T) {
 	}
 }
 
+// The receive timeout bounds waiting (for the lock, for a message), never the
+// receiver's own work: once it holds the lock and has registered, it makes
+// one claim attempt whatever the deadline, so an already queued message is
+// delivered even with a timeout too small to cover registration and the
+// quarantine of an unsafe file ahead of it.
+func TestQueuedMessageIsDeliveredWhateverTheTimeout(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	if err := sp.Send(msg("a", "b", "healthy", 2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sp.InboxDir("b"), "00000000000000000001-bad.json"), []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, claim := range []func() (*envelope.Envelope, error){
+		func() (*envelope.Envelope, error) { return sp.Recv("b", time.Nanosecond, false) },
+		func() (*envelope.Envelope, error) {
+			if err := sp.Send(msg("a", "b", "healthy", 3)); err != nil {
+				return nil, err
+			}
+			d, err := sp.ClaimContext(context.Background(), "b", time.Nanosecond)
+			if err != nil {
+				return nil, err
+			}
+			return d.Envelope, d.Ack(false)
+		},
+		func() (*envelope.Envelope, error) {
+			if err := sp.Send(msg("a", "b", "healthy", 4)); err != nil {
+				return nil, err
+			}
+			d, err := sp.ClaimInteractive(context.Background(), "b", time.Nanosecond)
+			if err != nil {
+				return nil, err
+			}
+			return d.Envelope, d.Ack(false)
+		},
+	} {
+		got, err := claim()
+		if err != nil || got.Body != "healthy" {
+			t.Fatalf("queued message with a 1ns timeout: %+v, %v", got, err)
+		}
+	}
+	if _, err := sp.Recv("b", time.Nanosecond, false); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("empty queue with a 1ns timeout: %v, want ErrTimeout", err)
+	}
+}
+
 // If a parked receiver's inbox disappears between polls anyway, the receiver
 // recreates it under the lock and keeps waiting.
 func TestParkedReceiverSurvivesItsInboxBeingRemoved(t *testing.T) {

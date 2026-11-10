@@ -224,8 +224,9 @@ func (s *Spool) claim(ctx context.Context, name string, timeout time.Duration, o
 	if err := s.ensurePrivateRoot(); err != nil {
 		return nil, err
 	}
-	// The timeout starts before registration, which waits for the transport
-	// lock: a sender or gc holding it must not stretch the receive.
+	// The timeout starts before registration, which may wait for the
+	// transport lock: a sender or gc holding it must not stretch the receive.
+	// It bounds only waiting; register still makes one claim attempt.
 	var deadlineC <-chan time.Time
 	claimCtx := ctx
 	if timeout > 0 {
@@ -238,13 +239,17 @@ func (s *Spool) claim(ctx context.Context, name string, timeout time.Duration, o
 	}
 	inbox := s.InboxDir(name)
 	token := envelope.NewID()
-	if err := s.register(claimCtx, name, token); err != nil {
+	defer s.removePresence(name, token) // a no-op if it was never published
+	first, err := s.register(claimCtx, ctx, name, token, owned)
+	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			return nil, ErrTimeout
 		}
 		return nil, err
 	}
-	defer s.removePresence(name, token)
+	if first != nil {
+		return first, nil
+	}
 	watcher, watchErr := fsnotify.NewWatcher()
 	var events <-chan fsnotify.Event
 	var watchErrors <-chan error
@@ -341,20 +346,27 @@ func (s *Spool) sameInbox(a, b string) bool {
 // while holding the transport lock. gc sweeps abandoned reply channels under
 // the same lock, so it never removes a channel between a receiver creating
 // (or finding) its inbox and announcing itself in it.
-func (s *Spool) register(ctx context.Context, name, token string) error {
-	lock, err := s.lockTransport(ctx)
+//
+// waitCtx (the receive's deadline) bounds only the wait for a contended lock.
+// Once the lock is held, register makes the receive's first claim attempt
+// under it, bounded by ctx (cancellation) alone: the deadline limits waiting,
+// not the receiver's own work, so a message that is already queued is
+// delivered however small the timeout or slow the disk.
+func (s *Spool) register(waitCtx, ctx context.Context, name, token string, owned bool) (*Delivery, error) {
+	lock, err := s.lockTransportWithin(waitCtx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer lock.Close()
 	if err := fsutil.MkdirPrivate(s.InboxDir(name)); err != nil {
-		return err
+		return nil, err
 	}
 	if err := s.checkCaseAlias(name); err != nil {
-		return err
+		return nil, err
 	}
 	s.writePresence(name, token)
-	return nil
+	d, _, err := s.claimOldestLocked(ctx, name, owned)
+	return d, err
 }
 
 // retryClaimOp runs op, retrying briefly while it fails with a Windows

@@ -24,6 +24,16 @@ func (s *Spool) lockTransport(ctx context.Context) (*filelock.Lock, error) {
 	return filelock.Acquire(ctx, filepath.Join(s.root, "transport.lock"))
 }
 
+// lockTransportWithin takes a free lock at once even if ctx has already
+// expired; ctx bounds only the wait for a lock someone else holds.
+func (s *Spool) lockTransportWithin(ctx context.Context) (*filelock.Lock, error) {
+	lock, err := filelock.Try(filepath.Join(s.root, "transport.lock"))
+	if !errors.Is(err, filelock.ErrLocked) {
+		return lock, err
+	}
+	return s.lockTransport(ctx)
+}
+
 // Published reports whether e is queued or in flight, checked under the
 // transport lock so a concurrent claim or Nack cannot hide it between the two
 // locations. Different content at e's filename is ErrEnvelopeConflict.
