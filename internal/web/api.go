@@ -465,6 +465,12 @@ type requestView struct {
 	Result  string    `json:"result,omitempty"`
 }
 
+// activityRequests is how many recent requests the Activity page lists.
+const activityRequests = 50
+
+// getRequest reads a request record; a variable so tests can count reads.
+var getRequest = request.Get
+
 func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 	room, ok := s.room(w, r)
 	if !ok {
@@ -487,14 +493,31 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sort.Slice(listeners, func(i, j int) bool { return listeners[i].Name < listeners[j].Name })
+	// A record is rewritten on every update, so its file time tracks its
+	// Updated time: sort by that and parse only the newest records, not
+	// every record the room has ever had.
 	entries, _ := os.ReadDir(request.Dir(room.Path))
-	var reqs []requestView
+	type recordFile struct {
+		id  string
+		mod time.Time
+	}
+	var files []recordFile
 	for _, e := range entries {
 		id, ok := strings.CutSuffix(e.Name(), ".json")
 		if !ok {
 			continue
 		}
-		rec, err := request.Get(room.Path, id)
+		if info, err := e.Info(); err == nil {
+			files = append(files, recordFile{id, info.ModTime()})
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
+	var reqs []requestView
+	for _, f := range files {
+		if len(reqs) == activityRequests {
+			break
+		}
+		rec, err := getRequest(room.Path, f.id)
 		if err != nil {
 			continue
 		}
@@ -508,9 +531,6 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 		reqs = append(reqs, v)
 	}
 	sort.Slice(reqs, func(i, j int) bool { return reqs[i].Updated.After(reqs[j].Updated) })
-	if len(reqs) > 50 {
-		reqs = reqs[:50]
-	}
 	if reqs == nil {
 		reqs = []requestView{}
 	}
