@@ -41,19 +41,17 @@ type Dispatcher struct {
 	mu   sync.Mutex
 	lock *filelock.Lock
 	// redrives tracks relaunches of running turns whose host is gone, by
-	// request ID (guarded by mu); redriveEvery spaces them (0 = 30 s).
+	// request ID (guarded by mu); redriveEvery spaces them (0 = 30 s) and
+	// redriveMax failed relaunches end the turn (0 = 3).
 	redrives     map[string]*redriveState
 	redriveEvery time.Duration
+	redriveMax   int
 }
 
 type redriveState struct {
 	next     time.Time // no host probe before then
-	attempts int
-	err      error // the last relaunch error
+	attempts int       // relaunches that failed with no host owning the listener
 }
-
-// redriveMax relaunches are tried for one turn before it fails.
-const redriveMax = 3
 
 func New(o dispatch.Options) *Dispatcher { return &Dispatcher{Opts: o, From: "web"} }
 
@@ -438,16 +436,22 @@ func (d *Dispatcher) collect(ctx context.Context, t *Thread, m Message) error {
 // through a live host, whose start-up recovery also settles a run the dead
 // host left uncertain. It resubmits under the same request ID, which only
 // launches the host (dispatch.Send serializes with a host that is just
-// starting). Probes and relaunches are spaced; after redriveMax relaunches
-// the request is finished as interrupted. Interactive receivers answer
-// through Poll and are never relaunched.
+// starting). Probes and relaunches are spaced. host.Existing also reports
+// false for a busy host that stops answering, which still owns the
+// listener's lifetime lock: only a relaunch that fails past host.Up's lock
+// checks counts, and after redriveMax of those the request is finished as
+// interrupted. Interactive receivers answer through Poll and are never
+// relaunched.
 func (d *Dispatcher) redrive(ctx context.Context, r request.Record, preset string) (request.Record, error) {
 	if r.Interactive {
 		return r, nil
 	}
-	every := d.redriveEvery
+	every, limit := d.redriveEvery, d.redriveMax
 	if every == 0 {
 		every = 30 * time.Second
+	}
+	if limit == 0 {
+		limit = 3
 	}
 	now := time.Now()
 	d.mu.Lock()
@@ -463,26 +467,34 @@ func (d *Dispatcher) redrive(ctx context.Context, r request.Record, preset strin
 	if due {
 		rs.next = now.Add(every)
 	}
-	attempts, lastErr := rs.attempts, rs.err
 	d.mu.Unlock()
 	if !due {
 		return r, nil
 	}
-	if _, alive := host.Existing(ctx, d.Opts.Room, r.Agent); alive {
+	if _, alive := host.Existing(ctx, d.Opts.Room, r.Agent); alive || ctx.Err() != nil {
 		return r, nil
 	}
-	if attempts >= redriveMax {
-		text := "ERROR interrupted: hosted listener " + r.Agent + " is not running and could not be restarted"
-		if lastErr != nil {
-			text += ": " + lastErr.Error()
-		}
-		return request.Finish(d.Opts.Room, r.Envelope, text)
+	// Bounded: a hung host can hold the request's or the listener's locks.
+	sctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	_, err := dispatch.Send(sctx, d.Opts, dispatch.SendSpec{Agent: r.Agent, Preset: preset, From: r.Envelope.From, Body: r.Envelope.Body, RequestID: r.ID})
+	cancel()
+	if err == nil || ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+		// Launched; or the launch timed out waiting on a lock another
+		// process owns (a host that is busy but not answering, or one just
+		// starting). That host still owns the request: keep waiting, and
+		// never count this as a failed relaunch.
+		return r, nil
 	}
-	_, err := dispatch.Send(ctx, d.Opts, dispatch.SendSpec{Agent: r.Agent, Preset: preset, From: r.Envelope.From, Body: r.Envelope.Body, RequestID: r.ID})
+	// The launch failed past host.Up's lock checks: no host owns the
+	// listener, so after the last attempt nothing can finish the request.
 	d.mu.Lock()
-	rs.attempts, rs.err = rs.attempts+1, err
+	rs.attempts++
+	attempts := rs.attempts
 	d.mu.Unlock()
-	return r, nil
+	if attempts < limit {
+		return r, nil
+	}
+	return request.Finish(d.Opts.Room, r.Envelope, "ERROR interrupted: hosted listener "+r.Agent+" is not running and could not be restarted: "+err.Error())
 }
 
 func (d *Dispatcher) handoffs(ctx context.Context, t *Thread, m Message) error {

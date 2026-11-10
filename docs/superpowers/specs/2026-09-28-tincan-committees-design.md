@@ -464,7 +464,8 @@ A replay of an identical create that finds `creating` with the job lock free
 there is adopted (terminal → its result is imported; otherwise → `running`,
 after resubmitting it under the same request ID to launch its listener when
 no host is running it — the creator may have died between saving and
-launching);
+launching; a relaunch that times out on a lock another host owns adopts the
+request instead of cancelling it);
 only when none exists is creation restarted in a fresh workspace — the one
 place a member can run twice (§6.4).
 

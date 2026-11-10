@@ -46,6 +46,8 @@ type Service struct {
 	// materialized, when set, runs after the workspace is built and before
 	// the launch (tests hold creation there).
 	materialized func(ctx context.Context)
+	// relaunchWait bounds a relaunch of a resumed job's listener (0 = 15 s).
+	relaunchWait time.Duration
 
 	mu       sync.Mutex
 	inflight map[string]bool
@@ -225,7 +227,10 @@ func (s *Service) create(id string) {
 			// the saved request.
 			if !r.Terminal() && !r.Interactive && !st.cancelRequested(id) {
 				if _, alive := host.Existing(ctx, j.Workspace, j.Preset); !alive {
-					if err := s.relaunch(ctx, j, r); err != nil {
+					// A timeout means a lock the launch needs is owned: a host
+					// that is busy but not answering still owns the request,
+					// so it is adopted as running, never cancelled.
+					if err := s.relaunch(ctx, j, r); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 						cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
 						request.Cancel(cctx, j.Workspace, j.ID)
 						ccancel()
@@ -340,6 +345,13 @@ func (s *Service) relaunch(ctx context.Context, j Job, r request.Record) error {
 	if pinned.ExecTimeoutSec, err = s.launchTimeout(j); err != nil {
 		return err
 	}
+	// Bounded: a hung host can hold the request's or the listener's locks.
+	wait := s.relaunchWait
+	if wait == 0 {
+		wait = 15 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
 	o := dispatch.Options{Room: j.Workspace, Executable: s.Executable, Presets: map[string]host.Preset{j.Preset: pinned}}
 	_, err = dispatch.Send(ctx, o, dispatch.SendSpec{Agent: j.Preset, Preset: j.Preset, From: r.Envelope.From, Body: r.Envelope.Body, RequestID: j.ID})
 	return err
