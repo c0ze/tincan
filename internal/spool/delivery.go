@@ -211,10 +211,22 @@ func (s *Spool) claimOldestLocked(ctx context.Context, name string, owned bool) 
 			continue
 		}
 		dir := filepath.Join(flight, ent.Name())
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			if os.IsExist(err) {
-				continue
+		err := os.Mkdir(dir, 0o700)
+		if os.IsExist(err) {
+			// Under the transport lock no transition is mid-flight, so an
+			// empty gate is crash debris (after the mkdir but before the
+			// message moved in, or in Nack after the message went back to
+			// the inbox), as published() also assumes. Clear it and claim.
+			cleared, clearErr := s.clearEmptyGate(name, ent.Name())
+			if clearErr != nil {
+				return nil, false, clearErr
 			}
+			if !cleared {
+				continue // a real claim, or unexpected contents for recovery
+			}
+			err = os.Mkdir(dir, 0o700)
+		}
+		if err != nil {
 			return nil, false, err
 		}
 		// Record the owner while the gate is still empty: a crash before the
@@ -326,6 +338,20 @@ func (s *Spool) quarantineQueuedDuplicate(name, filename string) error {
 		return err
 	}
 	return s.quarantine(queued)
+}
+
+// clearEmptyGate removes name's gate for filename and its owner record if the
+// gate is empty. The caller holds the transport lock.
+func (s *Spool) clearEmptyGate(name, filename string) (bool, error) {
+	gate := filepath.Join(s.inFlightDir(name), filename)
+	entries, err := os.ReadDir(gate)
+	if err != nil || len(entries) > 0 {
+		return false, nil
+	}
+	if err := os.Remove(gate); err != nil {
+		return false, nil
+	}
+	return true, s.clearOwner(name, filename)
 }
 
 // discardGate clears a gate that holds no valid claim (readErr is malformed):

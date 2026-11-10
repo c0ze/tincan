@@ -397,7 +397,10 @@ live owners, and claims with no owner record (hosted listeners, MCP request
 collection, older tincan versions), are never requeued this way. Hosted and
 MCP recovery of in-flight work leaves a live interactive owner's claim alone,
 and takes a dead owner's claim over (removing its record) instead of letting
-it be requeued as well. `status`
+it be requeued as well. An empty claim directory that a crash left behind
+(after creating it, or in a requeue after the message went back to the
+inbox) is cleared by the next receive instead of hiding its queued message.
+`status`
 counts claimed but unacknowledged messages per name (`INFLIGHT`, JSON
 `in_flight`).
 

@@ -113,6 +113,52 @@ func TestRecoveryLeavesLiveInteractiveClaim(t *testing.T) {
 	}
 }
 
+// A crash can leave an empty, ownerless gate while its message is queued:
+// after the gate was created but before its owner record or the message
+// moved in, or in Nack after the message went back to the inbox but before
+// the gate was removed. The message must stay claimable.
+func TestEmptyOwnerlessGateDoesNotBlockItsMessage(t *testing.T) {
+	for _, crash := range []string{"before-record", "nack-after-record-cleared"} {
+		t.Run(crash, func(t *testing.T) {
+			sp, _ := Open(t.TempDir())
+			e := msg("orch", "worker", "still deliverable", 1)
+			if err := sp.Send(e); err != nil {
+				t.Fatal(err)
+			}
+			gate := filepath.Join(sp.inFlightDir("worker"), envelope.Filename(e))
+			switch crash {
+			case "before-record":
+				if err := os.MkdirAll(gate, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "nack-after-record-cleared":
+				d, err := sp.ClaimInteractive(context.Background(), "worker", time.Second)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Nack's steps up to the crash: publish, drop the claim and
+				// its record, but never remove the gate.
+				if err := os.Link(d.path(), filepath.Join(sp.InboxDir("worker"), d.filename)); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(d.path()); err != nil {
+					t.Fatal(err)
+				}
+				if err := sp.clearOwner("worker", d.filename); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := sp.Recv("worker", time.Second, false)
+			if err != nil || got.ID != e.ID {
+				t.Fatalf("queued message blocked by an empty gate: %+v, %v", got, err)
+			}
+			if _, err := os.Lstat(gate); !os.IsNotExist(err) {
+				t.Fatalf("gate kept after delivery: %v", err)
+			}
+		})
+	}
+}
+
 // A live owner's claim is never requeued, and Ack and Nack clear the record.
 func TestLiveInteractiveClaimIsNotRequeued(t *testing.T) {
 	sp, _ := Open(t.TempDir())
