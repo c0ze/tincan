@@ -279,7 +279,10 @@ func (s *Server) hostsOK(r *http.Request) bool {
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'self'")
+		// Identity comes from tailscale serve, not cookies, so any page could
+		// frame a working UI: forbid framing (X-Frame-Options for old browsers).
+		h.Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")
+		h.Set("X-Frame-Options", "DENY")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		refuse := func(msg string) { s.fail(w, http.StatusForbidden, errors.New(msg)) }
