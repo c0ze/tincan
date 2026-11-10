@@ -251,7 +251,10 @@ described below):
 Placeholders: `{body}` (the message body, passed as **one argv element** —
 never through a shell), `{out}` (a per-message temp file whose contents become
 the reply when `reply = file`), `{room}`, `{name}`, `{id}`. `stdin = body` pipes
-the body to the process' stdin instead. Templates given with `--exec` are
+the body to the process' stdin instead. A body that begins with `-` is passed
+with one leading space wherever a token starts with `{body}`, so the agent CLI
+reads it as the prompt rather than as its own options (`--resume=…`,
+`--- a/file`). Templates given with `--exec` are
 split on unquoted whitespace (single/double quotes group a token) *before*
 substitution, so a body can never be re-tokenized.
 

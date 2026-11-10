@@ -1,8 +1,11 @@
 package host
 
 import (
+	"flag"
+	"io"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -57,6 +60,34 @@ func TestRenderDoesNotRescanSubstitutedText(t *testing.T) {
 	got := Render([]string{"{body}"}, Vars{Body: "{out}", Out: "X"})
 	if got[0] != "{out}" {
 		t.Fatalf("body containing a placeholder was re-substituted: %q", got[0])
+	}
+}
+
+// A body that begins with "-" must reach the agent as the prompt, whether the
+// CLI takes it as an option's value (gemini/grok/kimi -p <prompt>) or as a
+// positional argument after a boolean -p (claude, cursor-agent, agy).
+func TestRenderBodyStartingWithDashIsNotAnOption(t *testing.T) {
+	for _, body := range []string{"- fix X", "--- a/file", "--settings={}", "--resume=abc", "-"} {
+		valued := flag.NewFlagSet("valued", flag.ContinueOnError)
+		valued.SetOutput(io.Discard)
+		prompt := valued.String("p", "", "")
+		approve := valued.Bool("always-approve", false, "")
+		if err := valued.Parse(Render([]string{"-p", "{body}", "--always-approve"}, Vars{Body: body})); err != nil ||
+			strings.TrimSpace(*prompt) != body || !*approve || valued.NArg() != 0 {
+			t.Errorf("-p value for %q = %q (%v)", body, *prompt, err)
+		}
+		positional := flag.NewFlagSet("positional", flag.ContinueOnError)
+		positional.SetOutput(io.Discard)
+		positional.Bool("p", false, "")
+		resume := positional.String("resume", "", "")
+		settings := positional.String("settings", "", "")
+		if err := positional.Parse(Render([]string{"-p", "{body}"}, Vars{Body: body})); err != nil || *resume != "" || *settings != "" ||
+			positional.NArg() != 1 || strings.TrimSpace(positional.Arg(0)) != body {
+			t.Errorf("positional prompt for %q = %q (%v)", body, positional.Args(), err)
+		}
+	}
+	if got := Render([]string{"--prompt={body}", "{body}"}, Vars{Body: "plain -x"}); !reflect.DeepEqual(got, []string{"--prompt=plain -x", "plain -x"}) {
+		t.Fatalf("Render changed a body that does not start with a dash: %q", got)
 	}
 }
 
