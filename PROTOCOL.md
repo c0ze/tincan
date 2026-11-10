@@ -444,7 +444,10 @@ empty, unowned and unchanged for that long (a timed-out `ask` leaves one;
 `status` already hides them), and the spool's own temporary files of writes
 interrupted that long ago (`tmp/send-<n>`, `tmp/present-<id>`, `.tincan/.write-<n>`,
 `owners/<name>/.owner-<n>`; nothing under `requests/`, `hosts/` or other
-state directories). It retains
+state directories) once their writer provably stopped: send and owner
+temporaries only exist while their writer holds `transport.lock`, which gc
+takes; presence temporaries name their writer; a `.write-<n>` (or an
+unreadable presence temporary) must also be at least a day old. It retains
 active work, queued messages, claims, session pointers and host logs. After a
 request record is collected, its result and idempotency protection are gone; do
 not reuse old request IDs for new work.

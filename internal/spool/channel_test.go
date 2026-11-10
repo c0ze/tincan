@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -179,5 +180,77 @@ func TestGCSweepsOldTemporaryFiles(t *testing.T) {
 	}
 	if _, err := sp.Recv("b", time.Second, false); err != nil {
 		t.Fatalf("queued message lost: %v", err)
+	}
+}
+
+// Age alone does not prove a temporary file abandoned: its writer may be
+// paused (SIGSTOP, a debugger, a sleeping machine) and --older-than may be
+// short. Send and claim-record temporaries exist only while their writer holds
+// the transport lock, so gc removes them only while holding it; a presence
+// temporary names its writer; a .gitignore temporary, which carries no proof,
+// is left for a day whatever the retention.
+func TestGCRemovesOnlyProvablyAbandonedTemporaryFiles(t *testing.T) {
+	sp, _ := Open(t.TempDir())
+	if err := sp.Send(msg("a", "b", "x", 1)); err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Now().Add(-time.Minute)
+	write := func(path, content string, age time.Duration) string {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Now().Add(-age)
+		if err := os.Chtimes(path, when, when); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	live := `{"pid":` + strconv.Itoa(os.Getpid()) + `,"since":"2026-01-01T00:00:00Z","start":"` + selfStart() + `"}`
+	if selfStart() == "" {
+		live = `{"pid":` + strconv.Itoa(os.Getpid()) + `,"since":"2099-01-01T00:00:00Z"}`
+	}
+	kept := []string{
+		write(filepath.Join(sp.tmpDir(), "present-"+envelope.NewID()), live, 2*time.Hour),
+		write(filepath.Join(sp.tmpDir(), "present-"+envelope.NewID()), `{"pid":`, 2*time.Hour),
+		write(filepath.Join(sp.root, ".write-1"), "partial", 2*time.Hour),
+	}
+	gone := []string{
+		write(filepath.Join(sp.tmpDir(), "present-"+envelope.NewID()), `{"pid":`, 48*time.Hour),
+		write(filepath.Join(sp.root, ".write-2"), "partial", 48*time.Hour),
+		write(filepath.Join(sp.tmpDir(), "send-1"), "partial", 2*time.Hour),
+		write(filepath.Join(sp.ownerDir("b"), ".owner-1"), "partial", 2*time.Hour),
+	}
+	// A writer holding the transport lock keeps its temporaries.
+	lock, err := sp.lockTransport(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := sp.GC(cutoff)
+		done <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+	for _, path := range gone[2:] {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("%s removed while its writer may hold the transport lock: %v", path, err)
+		}
+	}
+	lock.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range gone {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("%s kept (%v)", path, err)
+		}
+	}
+	for _, path := range kept {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("%s removed: %v", path, err)
+		}
 	}
 }

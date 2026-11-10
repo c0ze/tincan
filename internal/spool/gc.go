@@ -2,6 +2,7 @@ package spool
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -213,6 +214,13 @@ func replyChannel(name string) bool {
 //
 // Other directories (requests/, hosts/, sessions/, their locks) belong to
 // other packages and are never searched, whatever their files are called.
+//
+// Age alone does not prove a temporary abandoned (its writer may be paused),
+// so each class also needs a proof. Send and setOwner create and remove theirs
+// while holding the transport lock, so under that lock any of them is
+// orphaned. A presence temporary holds its writer's pid and start identity,
+// so it goes once that writer is provably dead. A .gitignore temporary
+// carries no proof; it goes only after tempFloor, whatever the retention.
 func (s *Spool) gcTemp(before time.Time, stats *GCStats) error {
 	if err := fsutil.CheckDir(s.root); err != nil {
 		if os.IsNotExist(err) {
@@ -220,12 +228,34 @@ func (s *Spool) gcTemp(before time.Time, stats *GCStats) error {
 		}
 		return err
 	}
-	isSend := func(n string) bool { return generated(n, "send-", isDigit) }
-	isPresent := func(n string) bool { return generated(n, "present-", isHex) && len(n) == len("present-")+32 }
-	if err := s.sweepTemp(s.tmpDir(), before, stats, func(n string) bool { return isSend(n) || isPresent(n) }); err != nil {
+	lock, err := s.lockTransport(context.Background())
+	if err != nil {
 		return err
 	}
-	if err := s.sweepTemp(s.root, before, stats, func(n string) bool { return generated(n, ".write-", isDigit) }); err != nil {
+	defer lock.Close()
+	floor := time.Now().Add(-tempFloor)
+	if before.Before(floor) {
+		floor = before
+	}
+	orphaned := func(string, time.Time) bool { return true } // the lock is held
+	isSend := func(n string) bool { return generated(n, "send-", isDigit) }
+	isPresent := func(n string) bool { return generated(n, "present-", isHex) && len(n) == len("present-")+32 }
+	if err := s.sweepTemp(s.tmpDir(), before, stats, isSend, orphaned); err != nil {
+		return err
+	}
+	if err := s.sweepTemp(s.tmpDir(), before, stats, isPresent, func(path string, mtime time.Time) bool {
+		data, err := fsutil.ReadFile(path, 4096)
+		var pf presenceFile
+		if err != nil || json.Unmarshal(data, &pf) != nil {
+			return mtime.Before(floor) // torn write: no writer to check
+		}
+		return ownerLiveness(pf.PID, pf.Start, pf.Since) == ownerDead
+	}); err != nil {
+		return err
+	}
+	if err := s.sweepTemp(s.root, before, stats, func(n string) bool { return generated(n, ".write-", isDigit) }, func(_ string, mtime time.Time) bool {
+		return mtime.Before(floor)
+	}); err != nil {
 		return err
 	}
 	owners := filepath.Join(s.root, "owners")
@@ -237,16 +267,20 @@ func (s *Spool) gcTemp(before time.Time, stats *GCStats) error {
 		if !ent.IsDir() || validName(ent.Name()) != nil {
 			continue
 		}
-		if err := s.sweepTemp(filepath.Join(owners, ent.Name()), before, stats, func(n string) bool { return generated(n, ".owner-", isDigit) }); err != nil {
+		if err := s.sweepTemp(filepath.Join(owners, ent.Name()), before, stats, func(n string) bool { return generated(n, ".owner-", isDigit) }, orphaned); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// sweepTemp removes the regular files in dir that match and are older than
-// the cutoff. It does not descend into subdirectories.
-func (s *Spool) sweepTemp(dir string, before time.Time, stats *GCStats, match func(string) bool) error {
+// tempFloor is the minimum age of a temporary file whose writer cannot be
+// checked: no interrupted write of a few hundred bytes is resumed a day later.
+const tempFloor = 24 * time.Hour
+
+// sweepTemp removes the regular files in dir that match, are older than the
+// cutoff and are proven abandoned. It does not descend into subdirectories.
+func (s *Spool) sweepTemp(dir string, before time.Time, stats *GCStats, match func(string) bool, abandoned func(path string, mtime time.Time) bool) error {
 	if err := fsutil.CheckDir(dir); err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -268,10 +302,11 @@ func (s *Spool) sweepTemp(dir string, before time.Time, stats *GCStats, match fu
 			}
 			return err
 		}
-		if !info.ModTime().Before(before) {
+		path := filepath.Join(dir, ent.Name())
+		if !info.ModTime().Before(before) || !abandoned(path, info.ModTime()) {
 			continue
 		}
-		if err := os.Remove(filepath.Join(dir, ent.Name())); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		stats.Temp++
