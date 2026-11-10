@@ -330,9 +330,10 @@ scope covers the whole repository even for a subdirectory room.
 **Working-tree snapshot.** Refused with a clear error when the index has
 unmerged entries or the repository uses sparse checkout. Otherwise, with a
 private temporary index file (`GIT_INDEX_FILE`):
-1. seed it from the base: `git read-tree <base>` (or `git read-tree --empty`),
-   so tracked files — including tracked files matching ignore rules — keep
-   their tracked status;
+1. seed it from `HEAD`: `git read-tree HEAD^{tree}` (or the empty tree when
+   HEAD is unborn), so tracked files — including tracked files matching
+   ignore rules — keep their tracked status (for `branch`, seeding from the
+   merge-base would drop files the branch force-added);
 2. `git add -A` from the repository root (adds untracked non-ignored files,
    records modifications and deletions);
 3. `git write-tree` → the target tree.

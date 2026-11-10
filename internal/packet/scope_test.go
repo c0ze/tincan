@@ -107,6 +107,34 @@ func TestResolveCommitRangeBranchAndNone(t *testing.T) {
 	}
 }
 
+// A branch that force-added a file matching an ignore rule still carries it:
+// the snapshot is seeded from HEAD, not from the merge-base.
+func TestResolveBranchKeepsForceAddedIgnoredFiles(t *testing.T) {
+	dir, git := testRepo(t)
+	ctx := context.Background()
+	write(t, dir, ".gitignore", "*.gen.go\n")
+	git("add", ".")
+	git("commit", "-qm", "base")
+	git("checkout", "-qb", "feature")
+	write(t, dir, "api.gen.go", "package api\n")
+	git("add", "-f", "api.gen.go")
+	git("commit", "-qm", "generated")
+	r, err := Resolve(ctx, dir, "branch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files := lsTree(t, git, r.TargetTree); !strings.Contains(files, "api.gen.go") {
+		t.Fatalf("branch snapshot lost the committed file:\n%s", files)
+	}
+	p, err := Build(ctx, dir, "branch", "q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Manifest.Changes) != 1 || p.Manifest.Changes[0].Path != "api.gen.go" || !p.Manifest.Complete {
+		t.Fatalf("packet: %+v", p.Manifest)
+	}
+}
+
 func TestResolveRefusesUnmergedAndSparse(t *testing.T) {
 	dir, git := testRepo(t)
 	ctx := context.Background()

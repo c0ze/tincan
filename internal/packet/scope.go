@@ -94,7 +94,11 @@ func Resolve(ctx context.Context, dir, scope string) (Resolved, error) {
 		if err := setBase(mb); err != nil {
 			return r, err
 		}
-		r.TargetTree, err = snapshot(ctx, g, r.BaseTree)
+		headTree, err := g.Out(ctx, "rev-parse", head+"^{tree}")
+		if err != nil {
+			return r, err
+		}
+		r.TargetTree, err = snapshot(ctx, g, headTree)
 		return r, err
 	case strings.HasPrefix(scope, "commit:"):
 		c, err := commit(strings.TrimPrefix(scope, "commit:"))
@@ -141,9 +145,10 @@ func Resolve(ctx context.Context, dir, scope string) (Resolved, error) {
 }
 
 // snapshot captures the working tree as a tree object through a private
-// index seeded from base, so tracked files keep their tracked status even
-// when they match ignore rules. It never touches the real index.
-func snapshot(ctx context.Context, g Git, baseTree string) (string, error) {
+// index seeded from HEAD's tree (headTree; the empty tree when HEAD is
+// unborn), so files tracked at HEAD keep their tracked status even when they
+// match ignore rules. It never touches the real index.
+func snapshot(ctx context.Context, g Git, headTree string) (string, error) {
 	if u, err := g.Out(ctx, "ls-files", "-u"); err != nil || u != "" {
 		return "", errors.New("the index has unmerged entries; resolve the merge first")
 	}
@@ -156,7 +161,7 @@ func snapshot(ctx context.Context, g Git, baseTree string) (string, error) {
 	}
 	defer os.RemoveAll(tmp)
 	ig := Git{Dir: g.Dir, Env: append(append([]string(nil), g.Env...), "GIT_INDEX_FILE="+filepath.Join(tmp, "index"))}
-	if _, err := ig.Run(ctx, nil, "read-tree", baseTree); err != nil {
+	if _, err := ig.Run(ctx, nil, "read-tree", headTree); err != nil {
 		return "", err
 	}
 	if _, err := ig.Run(ctx, nil, "add", "-A"); err != nil {
