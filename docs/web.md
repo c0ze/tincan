@@ -330,8 +330,9 @@ hand as above.
 
 Each thread has a **primary** agent (chosen when the thread is created) that
 receives a user message with no resolved `@mention`. Writing `@name` hands
-that turn to `name` instead — code spans (fenced or inline) are never
-scanned for mentions, and `@you` is reserved for the owner and never
+that turn to `name` instead — code (inline spans, and blocks fenced with
+backticks or tildes) and quoted lines (starting with `>`) are never scanned
+for mentions, and `@you` is reserved for the owner and never
 dispatches. You can `@mention`:
 
 - a preset available on this machine (built in, or from

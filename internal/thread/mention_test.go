@@ -23,6 +23,18 @@ func TestParseMentions(t *testing.T) {
 		"@codex @codex twice":                   {"codex"},
 		"@codex-audit: status?":                 {"codex-audit"},
 		"@" + strings.Repeat("a", 70) + " long": {strings.Repeat("a", 64)},
+		// A line starting with ``` is a fence only when nothing but an info
+		// string follows; a span closed on the same line is inline code.
+		"```go test``` passes\n@codex please review":             {"codex"},
+		"```go test```\n```python\n@dataclass\n```\n@codex":      {"codex"},
+		"```\n```go\n@inner\n```\n@claude":                       {"claude"},
+		"````\n```\n@inner\n````\n@claude":                       {"claude"},
+		"~~~\n@inner\n~~~\n@claude":                              {"claude"},
+		"~~~ sh\n```\n@inner\n~~~\n@claude":                      {"claude"},
+		"  ```\n  @inner\n  ```\n@claude":                        {"claude"},
+		"```\n@unclosed":                                         nil,
+		"**@codex** please, cc:@claude, _@grok_":                 {"codex", "claude", "grok"},
+		"> @codex wrote this earlier\n>@agy too\n@claude agree?": {"claude"},
 	}
 	for in, want := range cases {
 		if got := ParseMentions(in); !reflect.DeepEqual(got, want) {

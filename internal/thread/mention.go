@@ -8,22 +8,59 @@ func isNameStart(c byte) bool {
 
 func isNameByte(c byte) bool { return isNameStart(c) || c == '.' || c == '_' || c == '-' }
 
+// mentionBoundary reports bytes a mention may follow: whitespace, opening
+// brackets, a comma, emphasis markers (**@codex**, _@codex_) and a colon
+// (cc:@codex). A letter or digit never does (mail addresses).
 func mentionBoundary(prev byte) bool {
-	return prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r' || prev == '(' || prev == '[' || prev == ','
+	switch prev {
+	case ' ', '\t', '\n', '\r', '(', '[', ',', '*', '_', ':':
+		return true
+	}
+	return false
 }
 
-// stripCode blanks fenced blocks and inline code spans so mentions inside
-// them are ignored; newlines are kept so boundaries stay intact.
+// fence reports a line that opens or closes a fenced code block: optional
+// indentation, then three or more backticks or tildes (ch, n), then the
+// info string. As in CommonMark, a backtick fence's info string may not
+// contain a backtick, so "```go test```" is inline code, not a fence.
+func fence(line string) (ch byte, n int, info string) {
+	s := strings.TrimLeft(line, " \t")
+	if s == "" || (s[0] != '`' && s[0] != '~') {
+		return 0, 0, ""
+	}
+	for n < len(s) && s[n] == s[0] {
+		n++
+	}
+	info = strings.TrimSpace(s[n:])
+	if n < 3 || (s[0] == '`' && strings.IndexByte(info, '`') >= 0) {
+		return 0, 0, ""
+	}
+	return s[0], n, info
+}
+
+// stripCode blanks fenced blocks, inline code spans and quoted lines so
+// mentions inside them are ignored: quoting someone's "@codex" is not a
+// request to it. Newlines are kept so boundaries stay intact.
 func stripCode(text string) string {
 	var b strings.Builder
-	inFence := false
+	var fenceCh byte
+	fenceLen := 0 // > 0 inside a fenced block
 	for _, line := range strings.SplitAfter(text, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "```") {
-			inFence = !inFence
+		if fenceLen > 0 {
+			// Only a bare run of the same character, at least as long as
+			// the opening one, closes the block.
+			if ch, n, info := fence(line); ch == fenceCh && n >= fenceLen && info == "" {
+				fenceLen = 0
+			}
 			b.WriteString("\n")
 			continue
 		}
-		if inFence {
+		if ch, n, _ := fence(line); n > 0 {
+			fenceCh, fenceLen = ch, n
+			b.WriteString("\n")
+			continue
+		}
+		if strings.HasPrefix(strings.TrimLeft(line, " \t"), ">") {
 			b.WriteString("\n")
 			continue
 		}
