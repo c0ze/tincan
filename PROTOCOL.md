@@ -358,7 +358,9 @@ permissions and existing child file modes are left alone. On Windows, protect
 the room with the appropriate user ACLs.
 Spool paths reject symlinks. Inbox input must be a regular file containing a
 valid envelope no larger than 8 MiB; malformed, mismatched or unsafe input is
-quarantined so later valid work can continue.
+quarantined so later valid work can continue. A read error that says nothing
+about the message (permissions, too many open files, I/O) fails the receive
+instead and leaves the claim in flight.
 
 Unacknowledged claims live under `.tincan/inflight/<name>/`. A host restart treats
 leftover work as interrupted/uncertain. A process may have changed the workspace

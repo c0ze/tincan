@@ -216,6 +216,10 @@ func (s *Spool) claimOldestLocked(ctx context.Context, name string) (*Delivery, 
 		}
 		delivery, err := s.readDelivery(name, ent.Name())
 		if err != nil {
+			if !isMalformed(err) {
+				// A transient read failure keeps the claim for recovery.
+				return nil, false, err
+			}
 			if err := s.quarantine(dir); err != nil {
 				return nil, false, err
 			}
@@ -226,18 +230,35 @@ func (s *Spool) claimOldestLocked(ctx context.Context, name string) (*Delivery, 
 	return nil, false, nil
 }
 
+// malformedError marks claimed input that can never become a valid delivery:
+// a missing, unsafe or oversized file, invalid JSON or envelope, or a routing
+// mismatch. Only these are quarantined; other read errors (EMFILE, EIO,
+// EACCES, ...) say nothing about the message and leave the claim in place.
+type malformedError struct{ err error }
+
+func (e malformedError) Error() string { return e.err.Error() }
+func (e malformedError) Unwrap() error { return e.err }
+
+func isMalformed(err error) bool {
+	var m malformedError
+	return errors.As(err, &m)
+}
+
 func (s *Spool) readDelivery(name, filename string) (*Delivery, error) {
 	dir := filepath.Join(s.inFlightDir(name), filename)
 	data, err := fsutil.ReadFile(filepath.Join(dir, "message.json"), MaxMessageBytes)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, fsutil.ErrUnsafeFile) || errors.Is(err, fsutil.ErrTooLarge) {
+			return nil, malformedError{err}
+		}
 		return nil, err
 	}
 	e, err := envelope.Unmarshal(data)
 	if err != nil {
-		return nil, err
+		return nil, malformedError{err}
 	}
 	if e.To != name || envelope.Filename(e) != filename {
-		return nil, fmt.Errorf("tincan: envelope routing or filename mismatch")
+		return nil, malformedError{fmt.Errorf("tincan: envelope routing or filename mismatch")}
 	}
 	return &Delivery{Envelope: e, spool: s, name: name, filename: filename, dir: dir}, nil
 }
@@ -336,6 +357,9 @@ func (s *Spool) listInFlight(name string, recoverEmpty bool) ([]*Delivery, error
 		if err != nil {
 			if !recoverEmpty {
 				continue
+			}
+			if !isMalformed(err) {
+				return nil, err
 			}
 			path := filepath.Join(dir, ent.Name())
 			if errors.Is(err, os.ErrNotExist) {
