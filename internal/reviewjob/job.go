@@ -39,11 +39,15 @@ type Job struct {
 	Mode      string    `json:"mode,omitempty"`
 	Note      string    `json:"note,omitempty"`
 	Result    string    `json:"result,omitempty"`
-	Tombstone bool      `json:"tombstone,omitempty"`
-	Acked     bool      `json:"acked,omitempty"`
-	Cleaned   bool      `json:"cleaned,omitempty"`
-	Created   time.Time `json:"created"`
-	Updated   time.Time `json:"updated"`
+	// PendingError is a launch failure (or expiry) whose saved request could
+	// not be cancelled yet (its journal was busy): the job is never launched
+	// again, and records this error once the cancellation is recorded.
+	PendingError string    `json:"pending_error,omitempty"`
+	Tombstone    bool      `json:"tombstone,omitempty"`
+	Acked        bool      `json:"acked,omitempty"`
+	Cleaned      bool      `json:"cleaned,omitempty"`
+	Created      time.Time `json:"created"`
+	Updated      time.Time `json:"updated"`
 }
 
 func (j Job) Terminal() bool {

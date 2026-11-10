@@ -210,6 +210,147 @@ func TestCancelWithoutHostWaitsForTheRecordedCancel(t *testing.T) {
 	}
 }
 
+// savedCreatingJob records job id as creating with a saved, queued request
+// in its workspace and no host: a creator that died after saving.
+func savedCreatingJob(t *testing.T, s *Service, id string, exp time.Time) (CreateRequest, string) {
+	t.Helper()
+	req := jobRequest(id, "p", exp)
+	if err := writeInput(s.packetPath(id), req); err != nil {
+		t.Fatal(err)
+	}
+	ws := s.workspace(id)
+	os.MkdirAll(ws, 0o700)
+	if _, err := request.Submit(context.Background(), ws, "reviewer", "review", "saved body", id); err != nil {
+		t.Fatal(err)
+	}
+	s.store().Save(Job{ID: id, ReviewID: req.ReviewID, Preset: "reviewer", PacketSHA: packet.Hash(req.Packet), PromptSHA: req.PromptSHA,
+		ExpiresAt: exp, State: "creating", Workspace: ws, Created: time.Now().UTC()})
+	return req, ws
+}
+
+// countLaunches counts the service's dispatch.Send calls.
+func countLaunches(s *Service) *int {
+	n := new(int)
+	s.hook = func(point string) {
+		if point == "launch" {
+			*n++
+		}
+	}
+	return n
+}
+
+// A cancel that could not be recorded (busy journal) still leaves cancel
+// intent: the resumed creation only retries the cancel, never a launch.
+func TestCancelIntentIsNeverLaunched(t *testing.T) {
+	s := testService(t, "echo")
+	ctx := context.Background()
+	exp := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	_, ws := savedCreatingJob(t, s, "rv-0000000000000000-o", exp)
+	launches := countLaunches(s)
+	held := holdJournal(t, ws, "rv-0000000000000000-o")
+	short, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	if _, acked, _ := s.Cancel(short, "rv-0000000000000000-o", exp); acked {
+		t.Fatal("acknowledged without a recorded cancel")
+	}
+	cancel()
+	held.Close()
+	s.Janitor(ctx)
+	s.Wait()
+	if j, _, _ := s.store().Get("rv-0000000000000000-o"); j.State != "cancelled" || *launches != 0 {
+		t.Fatalf("job: %+v (launches %d)", j, *launches)
+	}
+	if r, _ := request.Get(ws, "rv-0000000000000000-o"); r.Status != "canceled" {
+		t.Fatalf("request: %+v", r)
+	}
+}
+
+// A relaunch that failed while the journal was busy keeps its failure
+// pending: once the cause is gone, the next pass cancels and records that
+// error, and never launches again.
+func TestPendingRelaunchFailureIsNeverRelaunched(t *testing.T) {
+	s := testService(t, "echo")
+	s.cancelWait = 200 * time.Millisecond
+	ctx := context.Background()
+	exp := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	_, ws := savedCreatingJob(t, s, "rv-0000000000000000-p", exp)
+	launches := countLaunches(s)
+	good := s.Presets
+	s.Presets = func() (map[string]host.Preset, error) {
+		return map[string]host.Preset{"reviewer": {Exec: []string{filepath.Join(ws, "not-installed")}, Stdin: "none", Reply: "stdout"}}, nil
+	}
+	held := holdJournal(t, ws, "rv-0000000000000000-p")
+	s.Janitor(ctx)
+	s.Wait()
+	j, _, _ := s.store().Get("rv-0000000000000000-p")
+	if j.State != "creating" || j.PendingError == "" {
+		t.Fatalf("job: %+v", j)
+	}
+	pending := j.PendingError
+	s.Presets = good
+	held.Close()
+	s.Janitor(ctx)
+	s.Wait()
+	if j, _, _ = s.store().Get("rv-0000000000000000-p"); j.State != "error" || j.Result != "ERROR "+pending || *launches != 0 {
+		t.Fatalf("job: %+v (launches %d)", j, *launches)
+	}
+	if r, _ := request.Get(ws, "rv-0000000000000000-p"); r.Status != "canceled" {
+		t.Fatalf("request: %+v", r)
+	}
+}
+
+// The same for the first launch: Send saved the request and failed, and
+// the journal was busy when its cancel was attempted.
+func TestPendingSendFailureIsNeverRelaunched(t *testing.T) {
+	s := testService(t, "echo")
+	s.cancelWait = 200 * time.Millisecond
+	ctx := context.Background()
+	exe, _ := os.Executable()
+	data, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := filepath.Join(stateDir(t), "reviewer-bin")
+	if err := os.WriteFile(pinned, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.Presets = func() (map[string]host.Preset, error) {
+		return map[string]host.Preset{"reviewer": {Exec: []string{pinned, "fake-review", "echo", "{body}"}, Stdin: "none", Reply: "stdout", ExecTimeoutSec: 60}}, nil
+	}
+	req := jobRequest("rv-0000000000000000-q", "p", time.Now().Add(time.Hour).UTC().Truncate(time.Second))
+	s.materialized = func(context.Context) { os.Remove(pinned) } // the pinned binary vanishes: the launch fails
+	launches := 0
+	var held *filelock.Lock
+	s.hook = func(point string) {
+		switch point {
+		case "launch":
+			launches++
+		case "cancel":
+			if held == nil {
+				held = holdJournal(t, s.workspace(req.JobID), req.JobID)
+			}
+		}
+	}
+	if _, err := s.Create(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	s.Wait()
+	j, _, _ := s.store().Get(req.JobID)
+	if j.State != "creating" || !strings.HasPrefix(j.PendingError, "launch: ") || launches != 1 {
+		t.Fatalf("job: %+v (launches %d)", j, launches)
+	}
+	pending := j.PendingError
+	os.WriteFile(pinned, data, 0o755) // the cause is gone
+	held.Close()
+	s.Janitor(ctx)
+	s.Wait()
+	if j, _, _ = s.store().Get(req.JobID); j.State != "error" || j.Result != "ERROR "+pending || launches != 1 {
+		t.Fatalf("job: %+v (launches %d)", j, launches)
+	}
+	if r, _ := request.Get(j.Workspace, req.JobID); r.Status != "canceled" {
+		t.Fatalf("request: %+v", r)
+	}
+}
+
 // A relaunch that times out before launching anything (here on the route
 // lock another submitter holds) proves nothing about a host: the job stays
 // creating, the request untouched, and the next janitor pass runs it.

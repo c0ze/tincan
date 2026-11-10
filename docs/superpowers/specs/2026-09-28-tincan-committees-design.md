@@ -470,7 +470,10 @@ relaunch. A relaunch that times out, or an ownership probe that cannot
 answer, leaves the job `creating` for the next janitor pass; any other
 relaunch failure, or the job having expired, cancels the request and
 records `error` — once that cancellation is recorded; while the request's
-journal is busy the job stays `creating` and the next pass retries);
+journal is busy the job stays `creating` with the error kept as
+`pending_error`. A job with a pending error or with cancel intent (its
+tombstone or `<job_id>.cancel`) is never launched again: later passes only
+retry the cancellation, then record the error or `cancelled`);
 only when none exists is creation restarted in a fresh workspace — the one
 place a member can run twice (§6.4).
 

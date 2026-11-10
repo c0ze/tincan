@@ -50,6 +50,10 @@ type Service struct {
 	relaunchWait time.Duration
 	// cancelWait bounds cancelling a saved request (0 = 10 s).
 	cancelWait time.Duration
+	// hook, when set, is called at "launch" (before every dispatch.Send) and
+	// "cancel" (before cancelling a saved request); tests count and
+	// interleave there.
+	hook func(point string)
 
 	mu       sync.Mutex
 	inflight map[string]bool
@@ -222,21 +226,37 @@ func (s *Service) create(id string) {
 		st.Save(j)
 		return true
 	}
+	// failAfterCancel records msg once the saved request can no longer run;
+	// while its journal is busy it persists msg as pending instead, so the
+	// next pass retries only the cancellation, never a launch.
+	failAfterCancel := func(msg string) {
+		if s.cancelSaved(j) {
+			fail(msg)
+			return
+		}
+		j.PendingError = msg
+		st.Save(j)
+	}
+	// A job with cancel intent or a pending launch failure is never launched
+	// again: only the cancellation of a saved request is retried, and the
+	// job is recorded terminal once that request can no longer run.
+	if cancelIntent := j.Tombstone || st.cancelRequested(id); cancelIntent || j.PendingError != "" {
+		s.settle(j, cancelIntent)
+		return
+	}
 	if j.Workspace != "" {
 		if r, err := request.Get(j.Workspace, j.ID); err == nil {
 			// The creator may have died between saving the request and
 			// launching its listener: launch it now, or nothing ever runs
 			// the saved request.
-			if !r.Terminal() && !r.Interactive && !st.cancelRequested(id) && ctx.Err() != nil {
+			if !r.Terminal() && !r.Interactive && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				// The job expired (its context with it): nothing may launch
 				// any more, and every probe would fail. Settle it as the
 				// launch-time expiry check does, with a fresh bounded context.
-				if s.cancelSaved(j) {
-					fail("expired before launch")
-				} // else the journal is busy: still creating, retried next pass
+				failAfterCancel("expired before launch")
 				return
 			}
-			if !r.Terminal() && !r.Interactive && !st.cancelRequested(id) {
+			if !r.Terminal() && !r.Interactive {
 				if _, alive := host.Existing(ctx, j.Workspace, j.Preset); !alive {
 					octx, ocancel := context.WithTimeout(ctx, 10*time.Second)
 					owned, oerr := host.Owned(octx, j.Workspace, j.Preset)
@@ -249,6 +269,10 @@ func (s *Service) create(id string) {
 						// request: adopt it, never relaunch or cancel.
 					default:
 						err := s.relaunch(ctx, j, r)
+						if err != nil && st.cancelRequested(id) {
+							s.settle(j, true) // a cancel arrived meanwhile
+							return
+						}
 						if err != nil && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 							// Timed out with nothing owning the listener (a
 							// lock another submitter holds, or a host Up gave
@@ -257,9 +281,7 @@ func (s *Service) create(id string) {
 							return
 						}
 						if err != nil {
-							if s.cancelSaved(j) {
-								fail("launch: " + err.Error())
-							} // else still creating: retried next pass
+							failAfterCancel("launch: " + err.Error())
 							return
 						}
 					}
@@ -330,12 +352,16 @@ func (s *Service) create(id string) {
 	pinned.ExecTimeoutSec = timeout
 	body := note + "\n\n" + req.Prompt
 	o := dispatch.Options{Room: j.Workspace, Executable: s.Executable, Presets: map[string]host.Preset{j.Preset: pinned}}
+	s.at("launch")
 	r, err := dispatch.Send(ctx, o, dispatch.SendSpec{Agent: j.Preset, Preset: j.Preset, From: "review", Body: body, RequestID: j.ID})
 	if err != nil {
-		// A launch failure after the request was saved must never run later;
-		// until its cancellation is recorded the job stays creating, and the
-		// next pass resumes it from the saved request.
+		// A launch failure after the request was saved must never run later:
+		// the job settles once its cancellation is recorded, and until then
+		// the failure stays pending (see failAfterCancel).
+		msg := "launch: " + err.Error()
 		if !s.cancelSaved(j) {
+			j.PendingError = msg
+			st.Save(j)
 			return
 		}
 		if st.cancelRequested(id) {
@@ -343,11 +369,58 @@ func (s *Service) create(id string) {
 			st.Save(j)
 			return
 		}
-		fail("launch: " + err.Error())
+		fail(msg)
 		return
 	}
 	j.State = "running"
 	importRequest(&j, r)
+	st.Save(j)
+}
+
+func (s *Service) at(point string) {
+	if s.hook != nil {
+		s.hook(point)
+	}
+}
+
+// settle ends a creation that has cancel intent or a pending launch
+// failure. It never launches: it cancels the saved request (retried on a
+// later pass while the journal is busy), then records the job cancelled or
+// with its pending error. A request that already completed keeps its
+// result; one a live host still runs is left to finish as cancelled, the
+// job adopted as running as Cancel leaves it.
+func (s *Service) settle(j Job, cancelIntent bool) {
+	st := s.store()
+	if !s.cancelSaved(j) {
+		return
+	}
+	if j.Workspace != "" {
+		r, err := request.Get(j.Workspace, j.ID)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			os.RemoveAll(j.Workspace) // nothing was launched in it
+		case err != nil:
+			return // unreadable: retried next pass
+		case r.Status == "completed":
+			importRequest(&j, r) // it ran before the cancel: keep its result
+			st.Save(j)
+			return
+		case !r.Terminal():
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			host.Cancel(ctx, j.Workspace, j.Preset, j.ID)
+			if _, alive := host.Existing(ctx, j.Workspace, j.Preset); alive {
+				j.State = "running"
+				st.Save(j)
+				return
+			}
+		}
+	}
+	if cancelIntent {
+		j.State, j.Result, j.Tombstone = "cancelled", "ERROR canceled before launch", true
+	} else {
+		j.State, j.Result = "error", "ERROR "+j.PendingError
+	}
 	st.Save(j)
 }
 
@@ -356,6 +429,10 @@ func (s *Service) create(id string) {
 // run: the cancellation is recorded, or the request is terminal or absent.
 // A busy journal (a writer stopped while holding it) reports false.
 func (s *Service) cancelSaved(j Job) bool {
+	if j.Workspace == "" {
+		return true // nothing was saved
+	}
+	s.at("cancel")
 	wait := s.cancelWait
 	if wait == 0 {
 		wait = 10 * time.Second
@@ -392,7 +469,11 @@ func (s *Service) relaunch(ctx context.Context, j Job, r request.Record) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
+	if s.store().cancelRequested(j.ID) {
+		return errors.New("cancelled before the relaunch")
+	}
 	o := dispatch.Options{Room: j.Workspace, Executable: s.Executable, Presets: map[string]host.Preset{j.Preset: pinned}}
+	s.at("launch")
 	_, err = dispatch.Send(ctx, o, dispatch.SendSpec{Agent: j.Preset, Preset: j.Preset, From: r.Envelope.From, Body: r.Envelope.Body, RequestID: j.ID})
 	return err
 }
