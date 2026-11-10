@@ -298,15 +298,18 @@ func TestServeJournalRejectionFailsOnlyThatDelivery(t *testing.T) {
 			if r := askVia(t, sp, "next"); r.Body != "echo: next" {
 				t.Fatalf("next reply = %q", r.Body)
 			}
+			// The listener replies before it acknowledges, so "next" may still
+			// be in flight here. Once Serve has returned after stop, every
+			// delivery it took has been settled or was left behind.
+			stopServe(t, sp, done)
 			if d, _ := sp.ListInFlight("agent"); len(d) != 0 {
-				t.Fatalf("rejected delivery still in flight: %d", len(d))
+				t.Fatalf("delivery still in flight after stop: %d (%s)", len(d), d[0].Envelope.Body)
 			}
 			if name == "collision" {
 				if r, err := request.Get(room, e.ID); err != nil || r.Result != "done" {
 					t.Fatalf("original journal entry changed: %+v %v", r, err)
 				}
 			}
-			stopServe(t, sp, done)
 		})
 	}
 }
