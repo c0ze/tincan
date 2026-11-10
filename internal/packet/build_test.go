@@ -2,6 +2,8 @@ package packet
 
 import (
 	"context"
+	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,6 +109,39 @@ func TestBuildIncompleteWhenPatchTooLarge(t *testing.T) {
 	}
 	if total > MaxFilesTotal || len(p.Manifest.FilesOmitted) == 0 {
 		t.Fatalf("file budget: total=%d omitted=%v", total, p.Manifest.FilesOmitted)
+	}
+}
+
+// Build never holds git output much past the limits it applies: deleting a
+// large tracked file makes a huge --binary patch, and many ~1 MiB files a
+// huge cat-file stream, but only MaxPatch and MaxFilesTotal are kept.
+func TestBuildDoesNotBufferOversizedGitOutput(t *testing.T) {
+	dir, git := testRepo(t)
+	big := make([]byte, 24<<20)
+	rand.New(rand.NewSource(1)).Read(big)
+	if err := os.WriteFile(filepath.Join(dir, "big.bin"), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-qm", "base")
+	os.Remove(filepath.Join(dir, "big.bin"))
+	for i := 0; i < 12; i++ {
+		write(t, dir, fmt.Sprintf("gen/%02d.txt", i), strings.Repeat("line of text\n", 80000))
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	p, err := Build(context.Background(), dir, "uncommitted", "q")
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Manifest.Complete || p.Patch != nil || len(p.Files) == 0 || len(p.Manifest.FilesOmitted) == 0 {
+		t.Fatalf("outcome: complete=%v patch=%d files=%d omitted=%d", p.Manifest.Complete, len(p.Patch), len(p.Files), len(p.Manifest.FilesOmitted))
+	}
+	// Unbounded reads allocated over 170 MiB here; bounded ones about 12.
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 20<<20 {
+		t.Fatalf("Build allocated %d MiB", alloc>>20)
 	}
 }
 
