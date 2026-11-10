@@ -26,6 +26,10 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          # Release only commits that are already on main.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD origin/main ||
+            { echo "::error::$RELEASE_TAG is not on main"; exit 1; }
           test -s "docs/releases/$RELEASE_TAG.md"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
@@ -36,3 +40,5 @@ jobs:
           args: release --clean --release-notes docs/releases/${{ github.ref_name }}.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Another tag on the same commit must not name the release or version.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
