@@ -89,6 +89,16 @@ func TestRenderBodyStartingWithDashIsNotAnOption(t *testing.T) {
 	if got := Render([]string{"--prompt={body}", "{body}"}, Vars{Body: "plain -x"}); !reflect.DeepEqual(got, []string{"--prompt=plain -x", "plain -x"}) {
 		t.Fatalf("Render changed a body that does not start with a dash: %q", got)
 	}
+	// The body supplies the first character whenever everything before it
+	// in the token renders empty, as {out} does for a stdout preset.
+	got := Render([]string{"{out}{body}", "--prompt={body}", "x{body}", "{body}-tail", "{out}-fixed"}, Vars{Body: "--resume=abc"})
+	want := []string{" --resume=abc", "--prompt=--resume=abc", "x--resume=abc", " --resume=abc-tail", "-fixed"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Render = %q, want %q", got, want)
+	}
+	if got := Render([]string{"{out}{body}-x"}, Vars{}); got[0] != "-x" {
+		t.Fatalf("Render padded fixed template text: %q", got[0])
+	}
 }
 
 func TestPaths(t *testing.T) {
