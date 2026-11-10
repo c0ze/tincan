@@ -42,6 +42,7 @@ func canonicalTempDir(t *testing.T) string {
 //	fail <text…>            stderr "boom: <text>\n", stdout "partial", exit 3
 //	sleep <sec> [pidfile]   write own pid to pidfile, then sleep <sec>
 //	outfile <path> <text…>  write "file: <text>" to path, stdout "noise on stdout"
+//	serve …                 write own pid to $TINCAN_FAKE_SERVE_PIDFILE, sleep 30s
 //	cwd                     stdout os.Getwd()
 //	env <name…>             stdout "<name>=<value>\n" for each set variable
 func fakeAgent(args []string) int {
@@ -95,6 +96,12 @@ func fakeAgent(args []string) int {
 			return 1
 		}
 		fmt.Print("noise on stdout")
+	case "serve":
+		// Stands in for the daemon Up starts, one that never becomes ready.
+		if err := os.WriteFile(os.Getenv("TINCAN_FAKE_SERVE_PIDFILE"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+			return 1
+		}
+		time.Sleep(30 * time.Second)
 	case "cwd":
 		wd, _ := os.Getwd()
 		fmt.Print(wd)

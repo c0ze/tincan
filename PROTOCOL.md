@@ -223,7 +223,9 @@ tincan down codex --room "$ROOM"        # down name=codex
   harness's session variables (Claude Code's `CLAUDECODE`, session ID and
   messaging socket, `GROK_SESSION_ID`, …), so each hosted agent starts its own
   session; credentials and provider configuration are passed through.
-  Failure reports the host log path.
+  Failure reports the host log path; a daemon that is not ready within
+  `--wait` is stopped (SIGTERM, then SIGKILL after 5 s), so a failed `up`
+  never leaves a listener running.
 - `serve` is the loop itself, in the foreground — handy for debugging a
   preset (`Ctrl-C` stops it). `--daemon` is what `up` passes.
 - `down` sends an authenticated shutdown request to a hosted listener,
