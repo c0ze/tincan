@@ -59,6 +59,9 @@ func (s *SessionRun) Reply(spec RunSpec, res Result) (string, error) {
 		return "", errors.New("provider returned no session ID; initialization remains pending and requires explicit reset")
 	}
 	if !s.parser.final || len(bytes.TrimSpace(s.parser.body)) == 0 {
+		if s.parser.skipped {
+			return "", errors.New("provider returned no parseable final answer; an event over the output limit was skipped")
+		}
 		return "", errors.New("provider returned no parseable final answer")
 	}
 	return strings.TrimSpace(string(s.parser.body)), nil
@@ -72,6 +75,9 @@ type sessionParser struct {
 	failure   string
 	final     bool
 	err       error
+	// discarding drops the rest of an event over the in-memory limit up to its
+	// newline; skipped records that one was dropped.
+	discarding, skipped bool
 }
 
 func (p *sessionParser) write(data []byte) ([]byte, error) {
@@ -85,9 +91,17 @@ func (p *sessionParser) write(data []byte) ([]byte, error) {
 		if i >= 0 {
 			n = i
 		}
-		if len(p.pending)+n > MaxCapturedOutput {
-			p.err = errors.New("provider JSON event exceeds output limit")
-			return nil, p.err
+		if p.discarding || len(p.pending)+n > MaxCapturedOutput {
+			// An event too large to hold (a huge tool result, say) is not the
+			// answer's concern: skip it and keep parsing. Reply still fails
+			// when no final result arrives.
+			p.discarding, p.skipped = i < 0, true
+			p.pending = p.pending[:0]
+			if i < 0 {
+				break
+			}
+			data = data[n+1:]
+			continue
 		}
 		p.pending = append(p.pending, data[:n]...)
 		if i < 0 {

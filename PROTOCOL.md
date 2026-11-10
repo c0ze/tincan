@@ -369,7 +369,9 @@ alive or busy. Add `.tincan/` to your project's `.gitignore`
 An OS lock gives each hosted name one owner for its lifetime. Readiness and
 shutdown authenticate to that owner through a private loopback control endpoint;
 the stored PID alone never authorizes shutdown. Output streams to the log and
-bounded request progress, with at most a 1 MiB in-memory tail per stream.
+bounded request progress, with at most a 1 MiB in-memory tail per stream. A
+persistent session's structured event larger than 1 MiB is skipped (it stays in
+the log); the run fails only if no final result event can be parsed.
 
 ### Error handling and interrupted work
 

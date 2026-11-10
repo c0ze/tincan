@@ -72,6 +72,40 @@ func TestSessionClaudeMCPDiagnosticFraming(t *testing.T) {
 	}
 }
 
+// One stdout event over the in-memory limit (a huge tool result, say) is
+// skipped up to its newline; the run fails only without a final result.
+func TestSessionOversizedEventIsSkipped(t *testing.T) {
+	huge := "{\"type\":\"user\",\"tool_result\":\"" + strings.Repeat("x", 3*MaxCapturedOutput) + "\"}\n"
+	for _, final := range []bool{true, false} {
+		s, err := PrepareSession(t.TempDir(), "worker", "claude", Builtin()["claude"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.SplitAfter(sessionFixture("claude", s.record.ID), "\n")
+		fixture := lines[0] + lines[1] + huge
+		if final {
+			fixture += lines[2]
+		}
+		for len(fixture) > 0 {
+			n := min(64<<10, len(fixture))
+			if _, err := s.Output("stdout", []byte(fixture[:n])); err != nil {
+				t.Fatalf("oversized event failed the stream: %v", err)
+			}
+			if cap(s.parser.pending) > 2*MaxCapturedOutput {
+				t.Fatalf("parser buffered %d bytes", cap(s.parser.pending))
+			}
+			fixture = fixture[n:]
+		}
+		body, err := s.Reply(RunSpec{}, Result{ExitCode: 0})
+		if final && (err != nil || body != "ANSWER") {
+			t.Fatalf("final reply = %q, %v", body, err)
+		}
+		if !final && (err == nil || !strings.Contains(err.Error(), "output limit")) {
+			t.Fatalf("missing final result after a skipped event: %q, %v", body, err)
+		}
+	}
+}
+
 func TestSessionClaudeDiagnosticDoesNotHideFailures(t *testing.T) {
 	for _, trailing := range []string{"not-json\n", "{\"type\":", "null\n", claudeMCPDiagnosticFixture + " unexpected suffix\n"} {
 		s, err := PrepareSession(t.TempDir(), "worker", "claude", Builtin()["claude"])
