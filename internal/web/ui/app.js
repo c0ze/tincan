@@ -869,8 +869,7 @@ function connect(key) {
     };
     if (key === "local") {
       loadMachines().then((fresh) => {
-        if (!fresh) return;
-        reconcilePeerSources();
+        if (fresh) reconcilePeerSources();
         preserve();
       }).catch(() => {});
       return;
