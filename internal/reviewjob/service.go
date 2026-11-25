@@ -278,6 +278,11 @@ func (s *Service) create(id string) {
 						// request: adopt it, never relaunch or cancel.
 					default:
 						err := s.relaunch(ctx, j, r)
+						if err != nil && shuttingDown() {
+							// Graceful shutdown interrupted relaunch; leave the
+							// durable request and creating job intact for next boot.
+							return
+						}
 						if err != nil && st.cancelRequested(id) {
 							s.settle(j, true) // a cancel arrived meanwhile
 							return

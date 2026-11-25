@@ -104,10 +104,7 @@ func List(room string) ([]Meta, error) {
 	return out, nil
 }
 
-const (
-	maxMetaBytes      = 1 << 20
-	maxEventLineBytes = 4 << 20
-)
+const maxMetaBytes = 1 << 20
 
 func (t *Thread) readMeta() (Meta, error) {
 	var m Meta
@@ -128,9 +125,10 @@ func (t *Thread) writeMeta(m Meta) error {
 
 // readEvents reads complete journal lines incrementally. Each line is one
 // committed transaction (a JSON array of events), so a torn final line drops
-// that whole transaction and nothing else. Reading line-by-line bounds each
-// transaction without making long-lived threads unreadable. It returns the
-// byte length of the complete prefix.
+// that whole transaction and nothing else. Reading line-by-line avoids loading
+// the whole file into a single contiguous buffer while keeping long-lived
+// threads and valid large replies readable. It returns the byte length of the
+// complete prefix.
 func (t *Thread) readEvents() ([]Event, int64, error) {
 	f, err := fsutil.OpenFile(t.eventsPath(), os.O_RDONLY, 0)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -144,30 +142,14 @@ func (t *Thread) readEvents() ([]Event, int64, error) {
 	var out []Event
 	var valid int64
 	for {
-		var line []byte
-		var eof bool
-		for {
-			frag, err := r.ReadSlice('\n')
-			if len(line)+len(frag) > maxEventLineBytes {
-				return nil, 0, fmt.Errorf("%s: journal line exceeds %d bytes", t.eventsPath(), maxEventLineBytes)
-			}
-			line = append(line, frag...)
-			if err == nil {
-				break
-			}
-			if errors.Is(err, bufio.ErrBufferFull) {
-				continue
-			}
+		line, err := r.ReadBytes('\n')
+		if err != nil {
 			if errors.Is(err, io.EOF) {
-				eof = true
+				// A trailing fragment without '\n' is a torn transaction; stop
+				// at valid so the next append truncates it cleanly.
 				break
 			}
 			return nil, 0, err
-		}
-		if eof {
-			// A trailing fragment without '\n' is a torn transaction; stop
-			// at valid so the next append truncates it cleanly.
-			break
 		}
 		valid += int64(len(line))
 		trimmed := bytes.TrimSuffix(line, []byte{'\n'})

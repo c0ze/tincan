@@ -478,9 +478,10 @@ type Presence struct {
 // <root>/present/<name>/. Start is the writer's process start identity
 // (processStart); tokens written before it existed omit it.
 type presenceFile struct {
-	PID   int       `json:"pid"`
-	Since time.Time `json:"since"`
-	Start string    `json:"start,omitempty"`
+	PID     int       `json:"pid"`
+	Since   time.Time `json:"since"`
+	Start   string    `json:"start,omitempty"`
+	ClaimID string    `json:"claim_id,omitempty"`
 }
 
 // presentNameDir returns <root>/present/<name>, the directory holding one

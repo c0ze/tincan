@@ -96,6 +96,36 @@ if [ -n "${TINCAN_VERSION:-}" ] && ! [[ "$TINCAN_VERSION" =~ $tag_pattern ]]; th
   exit 2
 fi
 
+# GNU Wget's --https-only only applies to recursive traversal; enforce HTTPS
+# across single-file redirects manually when falling back to wget.
+fetch_wget_https() { # fetch_wget_https <https-url> <dest>
+  local url="$1" dest="$2" hdr loc hop status
+  hdr="$(mktemp "${TMPDIR:-/tmp}/tincan-wget.XXXXXX")"
+  CLEANUP_PATHS+=("$hdr")
+  for hop in 1 2 3 4 5 6 7 8 9 10; do
+    if [[ "$url" != https://* ]]; then
+      echo "!! refusing non-HTTPS download URL: $url" >&2
+      rm -f "$hdr"
+      return 1
+    fi
+    if wget --max-redirect=0 -S -qO "$dest" "$url" 2>"$hdr"; then
+      rm -f "$hdr"
+      return 0
+    fi
+    status=$?
+    loc="$(awk 'BEGIN{IGNORECASE=1} /^[[:space:]]*Location:[[:space:]]*/ { sub(/^[[:space:]]*Location:[[:space:]]*/, ""); sub(/\r$/, ""); loc=$0 } END{ print loc }' "$hdr")"
+    if [ -n "$loc" ]; then
+      url="$loc"
+      continue
+    fi
+    rm -f "$hdr"
+    return "$status"
+  done
+  rm -f "$hdr"
+  echo "!! too many HTTPS redirects fetching $1" >&2
+  return 1
+}
+
 fetch() { # fetch <url> <dest>
   if command -v curl >/dev/null 2>&1; then
     if [[ "$1" == https://* ]]; then
@@ -105,7 +135,7 @@ fetch() { # fetch <url> <dest>
     fi
   elif command -v wget >/dev/null 2>&1; then
     if [[ "$1" == https://* ]]; then
-      wget --https-only -qO "$2" "$1"
+      fetch_wget_https "$1" "$2"
     else
       wget -qO "$2" "$1"
     fi

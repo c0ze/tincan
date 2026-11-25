@@ -125,13 +125,44 @@ func (s *Server) proxyPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rest == "events" {
-		// A proxied event stream ends with ours when Run shuts down.
+		// A proxied event stream ends with ours when Run shuts down, and each
+		// downstream write/flush is bounded so a stalled browser cannot hold
+		// proxy resources or peer SSE slots indefinitely.
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 		defer context.AfterFunc(s.streams, cancel)()
 		r = r.WithContext(ctx)
+		w = &sseDeadlineWriter{ResponseWriter: w, rc: http.NewResponseController(w), cancel: cancel}
 	}
 	p.proxy.ServeHTTP(w, r)
+}
+
+type sseDeadlineWriter struct {
+	http.ResponseWriter
+	rc     *http.ResponseController
+	cancel context.CancelFunc
+}
+
+func (w *sseDeadlineWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *sseDeadlineWriter) Write(p []byte) (int, error) {
+	_ = w.rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	n, err := w.ResponseWriter.Write(p)
+	if err != nil {
+		w.cancel()
+		return n, err
+	}
+	_ = w.rc.SetWriteDeadline(time.Time{})
+	return n, nil
+}
+
+func (w *sseDeadlineWriter) Flush() {
+	_ = w.rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if err := w.rc.Flush(); err != nil {
+		w.cancel()
+		return
+	}
+	_ = w.rc.SetWriteDeadline(time.Time{})
 }
 
 func (s *Server) checkPeers(ctx context.Context) {

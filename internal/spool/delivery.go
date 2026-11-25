@@ -24,7 +24,8 @@ type Delivery struct {
 	name         string
 	filename     string
 	dir          string
-	gateInfo     os.FileInfo
+	owned        bool
+	claimID      string
 	mu           sync.Mutex
 	committed    bool
 	ownerCleared bool
@@ -62,11 +63,17 @@ func (d *Delivery) AckContext(ctx context.Context, logConsumed bool) error {
 			} else {
 				return err
 			}
-		} else if d.committed && !d.sameGate() {
-			// Another receiver already reclaimed this filename; never remove its
-			// gate or owner metadata.
-			d.finished = true
-			return nil
+		} else if d.committed {
+			ours, err := d.claimStillOurs()
+			if err != nil {
+				return err
+			}
+			if !ours {
+				// Another receiver already reclaimed this filename; never remove its
+				// gate or owner metadata.
+				d.finished = true
+				return nil
+			}
 		}
 	}
 	if !d.committed {
@@ -115,14 +122,35 @@ func (d *Delivery) AckContext(ctx context.Context, logConsumed bool) error {
 	return nil
 }
 
-// sameGate reports whether d.dir still refers to the same gate directory that
-// this Delivery claimed. Caller must hold transport.lock.
-func (d *Delivery) sameGate() bool {
-	if d.gateInfo == nil {
-		return true
+// claimStillOurs verifies under transport.lock that a post-commit retry is
+// still looking at its own empty retired gate rather than a replacement claim.
+// It uses the gate contents and owner record ClaimID instead of OS-dependent
+// directory SameFile checks.
+func (d *Delivery) claimStillOurs() (bool, error) {
+	entries, err := os.ReadDir(d.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
 	}
-	info, err := os.Lstat(d.dir)
-	return err == nil && os.SameFile(d.gateInfo, info)
+	if len(entries) != 0 {
+		// Another receiver already moved message.json into a replacement gate.
+		return false, nil
+	}
+	rec, found, err := d.spool.readOwner(d.name, d.filename)
+	if err != nil {
+		return false, err
+	}
+	if d.owned {
+		if d.ownerCleared {
+			return !found, nil
+		}
+		return found && rec.ClaimID == d.claimID, nil
+	}
+	// An unowned claim has no owner record; if one now exists, a new
+	// interactive claimant owns this filename.
+	return !found, nil
 }
 
 // Nack explicitly requeues an envelope. Callers must use it only when retry is
@@ -153,11 +181,17 @@ func (d *Delivery) nackLocked() error {
 			} else {
 				return err
 			}
-		} else if d.committed && !d.sameGate() {
-			// Another receiver already reclaimed this filename after we requeued
-			// it; do not disturb the new claimant's gate or owner record.
-			d.finished = true
-			return nil
+		} else if d.committed {
+			ours, err := d.claimStillOurs()
+			if err != nil {
+				return err
+			}
+			if !ours {
+				// Another receiver already reclaimed this filename after we requeued
+				// it; do not disturb the new claimant's gate or owner record.
+				d.finished = true
+				return nil
+			}
 		}
 	}
 	if !d.committed {
@@ -372,8 +406,11 @@ func (s *Spool) readDelivery(name, filename string) (*Delivery, error) {
 	if !sameInbox || envelope.Filename(e) != filename {
 		return nil, malformedError{fmt.Errorf("tincan: envelope routing or filename mismatch")}
 	}
-	gateInfo, _ := os.Lstat(dir)
-	return &Delivery{Envelope: e, spool: s, name: name, filename: filename, dir: dir, gateInfo: gateInfo}, nil
+	rec, found, err := s.readOwner(name, filename)
+	if err != nil {
+		return nil, err
+	}
+	return &Delivery{Envelope: e, spool: s, name: name, filename: filename, dir: dir, owned: found, claimID: rec.ClaimID}, nil
 }
 
 func (s *Spool) quarantine(path string) error {

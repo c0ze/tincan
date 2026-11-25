@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"net/url"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -195,6 +196,10 @@ func presetsEqual(a, b Preset) bool {
 		}
 		if len(p.EnvUnset) == 0 {
 			p.EnvUnset = nil
+		} else {
+			unset := append([]string(nil), p.EnvUnset...)
+			sort.Strings(unset)
+			p.EnvUnset = unset
 		}
 		return p
 	}

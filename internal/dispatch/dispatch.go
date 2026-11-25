@@ -52,7 +52,10 @@ func Up(ctx context.Context, o host.UpOptions) (host.UpResult, error) {
 }
 
 func ensureNoInteractivePending(ctx context.Context, room, name string) error {
-	if _, alive := host.Existing(ctx, room, name); alive {
+	// Only a live hosted owner (st.Owner != "") or held lifetime lock can skip
+	// the interactive-pending check; Existing() also reports parked interactive
+	// receivers (Owner == ""), which must not bypass this guard.
+	if st, alive := host.Existing(ctx, room, name); alive && st.Owner != "" {
 		return nil
 	}
 	owned, err := host.Owned(ctx, room, name)

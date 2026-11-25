@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/c0ze/tincan/v2/internal/envelope"
 	"github.com/c0ze/tincan/v2/internal/fsutil"
 )
 
@@ -92,7 +93,7 @@ func (s *Spool) setOwner(name, filename string, owned bool) error {
 	if !owned {
 		return s.clearOwner(name, filename)
 	}
-	data, err := json.Marshal(presenceFile{PID: os.Getpid(), Since: time.Now().UTC(), Start: selfStart()})
+	data, err := json.Marshal(presenceFile{PID: os.Getpid(), Since: time.Now().UTC(), Start: selfStart(), ClaimID: envelope.NewID()})
 	if err != nil {
 		return err
 	}

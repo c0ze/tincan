@@ -808,7 +808,6 @@ function connect(key) {
   const src = new EventSource(BASE + prefix(key) + "events");
   state.sources[key] = src;
   src.onopen = () => {
-    const reconnect = !!state.opened[key];
     state.opened[key] = true;
     state.retries[key] = 0;
     delete state.down[key];
@@ -818,18 +817,23 @@ function connect(key) {
         if (key === "local" || state.reviewOpen.key === key) showReview(state.reviewOpen.key, state.reviewOpen.rid, state.reviewOpen.id).catch(() => {});
         return;
       }
-      if (key === "local" || (state.current && state.current.key === key)) openCurrent().catch(() => {});
+      const cur = state.current;
+      if (!cur) return;
+      if (key !== "local" && cur.key !== key) return;
+      if (cur.view === "committees") { showCommittees().catch(() => {}); return; }
+      if (cur.tid === "activity") {
+        if (!activityBusy()) showActivity().catch(() => {});
+        return;
+      }
+      if (state.meta) refreshMessages().catch(() => {});
+      else openCurrent().catch(() => {});
     };
     if (key === "local") {
-      const wasOnline = {};
-      for (const m of state.machines) wasOnline[m.key] = m.online;
       loadMachines().then(() => {
-        if (reconnect) {
-          for (const m of state.machines) {
-            if (m.key === "local") continue;
-            if (m.online && !wasOnline[m.key]) connect(m.key);
-            else if (!m.online && wasOnline[m.key] && state.sources[m.key]) { state.sources[m.key].close(); delete state.sources[m.key]; }
-          }
+        for (const m of state.machines) {
+          if (m.key === "local") continue;
+          if (m.online && !state.sources[m.key]) connect(m.key);
+          else if (!m.online && state.sources[m.key]) { state.sources[m.key].close(); delete state.sources[m.key]; }
         }
         preserve();
       }).catch(() => {});

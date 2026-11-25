@@ -555,6 +555,9 @@ func Wait(ctx context.Context, room, id string, timeout time.Duration) (Record, 
 		case <-ctx.Done():
 			return r, ctx.Err()
 		case <-deadline.C:
+			if latest, err := Get(room, id); err == nil {
+				return latest, nil
+			}
 			return r, nil
 		case <-tick.C:
 		}
