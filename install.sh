@@ -96,6 +96,35 @@ if [ -n "${TINCAN_VERSION:-}" ] && ! [[ "$TINCAN_VERSION" =~ $tag_pattern ]]; th
   exit 2
 fi
 
+# Resolve a redirect Location against the current https:// URL (RFC 9110).
+resolve_redirect_url() { # resolve_redirect_url <base-url> <location>
+  local base="$1" loc="$2" origin rest path_no_q dir
+  case "$loc" in
+    http://*|https://*)
+      printf '%s\n' "$loc"
+      ;;
+    //*)
+      printf 'https:%s\n' "$loc"
+      ;;
+    /*)
+      rest="${base#https://}"
+      origin="https://${rest%%/*}"
+      printf '%s%s\n' "$origin" "$loc"
+      ;;
+    *)
+      path_no_q="${base%%\?*}"
+      path_no_q="${path_no_q%%#*}"
+      rest="${path_no_q#https://}"
+      if [[ "$rest" == */* ]]; then
+        dir="${path_no_q%/*}/"
+      else
+        dir="${path_no_q}/"
+      fi
+      printf '%s%s\n' "$dir" "$loc"
+      ;;
+  esac
+}
+
 # GNU Wget's --https-only only applies to recursive traversal; enforce HTTPS
 # across single-file redirects manually when falling back to wget.
 fetch_wget_https() { # fetch_wget_https <https-url> <dest>
@@ -108,20 +137,21 @@ fetch_wget_https() { # fetch_wget_https <https-url> <dest>
       rm -f "$hdr"
       return 1
     fi
-    if wget --max-redirect=0 -S -qO "$dest" "$url" 2>"$hdr"; then
+    status=0
+    wget --max-redirect=0 -S -qO "$dest" "$url" 2>"$hdr" || status=$?
+    if [ "$status" -eq 0 ]; then
       rm -f "$hdr"
       return 0
     fi
-    status=$?
     loc="$(awk 'BEGIN{IGNORECASE=1} /^[[:space:]]*Location:[[:space:]]*/ { sub(/^[[:space:]]*Location:[[:space:]]*/, ""); sub(/\r$/, ""); loc=$0 } END{ print loc }' "$hdr")"
     if [ -n "$loc" ]; then
-      url="$loc"
+      url="$(resolve_redirect_url "$url" "$loc")"
       continue
     fi
-    rm -f "$hdr"
+    rm -f "$hdr" "$dest"
     return "$status"
   done
-  rm -f "$hdr"
+  rm -f "$hdr" "$dest"
   echo "!! too many HTTPS redirects fetching $1" >&2
   return 1
 }

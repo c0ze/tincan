@@ -457,13 +457,24 @@ async function openLog(name) {
 }
 
 // ---------- activity ----------
-async function showActivity() {
-  state.reviewOpen = null;
+async function showActivity(background = false) {
+  if (background && (state.reviewOpen || state.reviewPending || activityBusy())) return;
+  if (!background) {
+    state.reviewOpen = null;
+    state.reviewPending = 0;
+  }
   const cur = state.current;
   if (!cur) return;
   const gen = ++state.activityGen;
-  const room = (state.rooms[cur.key] || []).find((r) => r.id === cur.rid);
-  $("title").textContent = (room ? room.name : "") + " · Activity";
+  const stale = () => {
+    const now = state.current;
+    return gen !== state.activityGen || !now || now.key !== cur.key || now.rid !== cur.rid || now.tid !== "activity" ||
+      !!state.reviewOpen || !!state.reviewPending || (background && activityBusy());
+  };
+  if (!background) {
+    const room = (state.rooms[cur.key] || []).find((r) => r.id === cur.rid);
+    $("title").textContent = (room ? room.name : "") + " · Activity";
+  }
   let data, reviews;
   try {
     [data, reviews] = await Promise.all([
@@ -471,11 +482,10 @@ async function showActivity() {
       api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/reviews`).catch(() => []),
     ]);
   } catch (e) {
-    if (gen === state.activityGen && state.current === cur) $("view").replaceChildren(el("p", "muted", "Error: " + e.message));
+    if (!stale()) $("view").replaceChildren(el("p", "muted", "Error: " + e.message));
     return;
   }
-  const now = state.current;
-  if (gen !== state.activityGen || !now || now.key !== cur.key || now.rid !== cur.rid || now.tid !== "activity" || state.reviewOpen) return;
+  if (stale()) return;
   const view = $("view");
   const lt = el("table", "activity");
   lt.append(row("th", ["Listener", "Mode", "State", ""]));
@@ -562,7 +572,14 @@ async function showReview(key, rid, id, from) {
   const refresh = !!(state.reviewOpen && state.reviewOpen.id === id);
   from = from || (refresh ? state.reviewOpen.from : "activity");
   const cur = state.current, gen = ++state.reviewGen;
-  const d = await api(key, `rooms/${encodeURIComponent(rid)}/reviews/${encodeURIComponent(id)}`);
+  state.activityGen++;
+  state.reviewPending = gen;
+  let d;
+  try {
+    d = await api(key, `rooms/${encodeURIComponent(rid)}/reviews/${encodeURIComponent(id)}`);
+  } finally {
+    if (state.reviewPending === gen) state.reviewPending = 0;
+  }
   // Drop a response that a newer showReview, navigation or (for a refresh
   // of the open review) Back has overtaken.
   if (gen !== state.reviewGen || state.current !== cur || (refresh && !state.reviewOpen)) return;
@@ -802,6 +819,19 @@ function wireComposer() {
   $("show-hidden").onchange = renderSidebar;
 }
 
+function reconcilePeerSources() {
+  const onlineKeys = new Set(state.machines.filter((m) => m.key !== "local" && m.online).map((m) => m.key));
+  for (const k of Object.keys(state.sources)) {
+    if (k !== "local" && !onlineKeys.has(k)) {
+      state.sources[k].close();
+      delete state.sources[k];
+    }
+  }
+  for (const k of onlineKeys) {
+    if (!state.sources[k]) connect(k);
+  }
+}
+
 // ---------- live updates ----------
 function connect(key) {
   if (state.sources[key]) state.sources[key].close();
@@ -812,7 +842,7 @@ function connect(key) {
     state.retries[key] = 0;
     delete state.down[key];
     const preserve = () => {
-      if (state.editingCommittee) return;
+      if (state.editingCommittee || state.reviewPending) return;
       if (state.reviewOpen) {
         if (key === "local" || state.reviewOpen.key === key) showReview(state.reviewOpen.key, state.reviewOpen.rid, state.reviewOpen.id).catch(() => {});
         return;
@@ -822,7 +852,7 @@ function connect(key) {
       if (key !== "local" && cur.key !== key) return;
       if (cur.view === "committees") { showCommittees().catch(() => {}); return; }
       if (cur.tid === "activity") {
-        if (!activityBusy()) showActivity().catch(() => {});
+        showActivity(true).catch(() => {});
         return;
       }
       if (state.meta) refreshMessages().catch(() => {});
@@ -830,11 +860,7 @@ function connect(key) {
     };
     if (key === "local") {
       loadMachines().then(() => {
-        for (const m of state.machines) {
-          if (m.key === "local") continue;
-          if (m.online && !state.sources[m.key]) connect(m.key);
-          else if (!m.online && state.sources[m.key]) { state.sources[m.key].close(); delete state.sources[m.key]; }
-        }
+        reconcilePeerSources();
         preserve();
       }).catch(() => {});
       return;
@@ -866,18 +892,8 @@ function connect(key) {
       // note relayed through a peer's proxied stream describes that peer's
       // own peers, not ours, and must be ignored here.
       if (key !== "local") return;
-      const wasOnline = {};
-      for (const m of state.machines) wasOnline[m.key] = m.online;
       await loadMachines();
-      for (const m of state.machines) {
-        if (m.key === "local") continue;
-        if (m.online && !wasOnline[m.key]) {
-          connect(m.key);
-        } else if (!m.online && wasOnline[m.key] && state.sources[m.key]) {
-          state.sources[m.key].close();
-          delete state.sources[m.key];
-        }
-      }
+      reconcilePeerSources();
       return;
     }
     if (n.kind === "quota") {
@@ -890,7 +906,7 @@ function connect(key) {
     if (n.kind === "reviews") {
       const cur = state.current;
       if (state.reviewOpen && state.reviewOpen.key === key && state.reviewOpen.rid === n.room) showReview(key, n.room, state.reviewOpen.id).catch(() => {});
-      else if (cur && cur.key === key && cur.rid === n.room && cur.tid === "activity" && !activityBusy()) showActivity().catch(() => {});
+      else if (cur && cur.key === key && cur.rid === n.room && cur.tid === "activity") showActivity(true).catch(() => {});
       return;
     }
     if (n.kind === "committees") {
@@ -904,8 +920,8 @@ function connect(key) {
     }
     renderSidebar();
     if (!cur || cur.key !== key || cur.rid !== n.room) return;
-    if (cur.tid === "activity" && n.kind === "activity" && !activityBusy()) showActivity().catch(() => {});
-    if (n.thread === cur.tid && !state.reviewOpen) refreshMessages().catch(() => {});
+    if (cur.tid === "activity" && n.kind === "activity") showActivity(true).catch(() => {});
+    if (n.thread === cur.tid && !state.reviewOpen && !state.reviewPending) refreshMessages().catch(() => {});
   };
 }
 

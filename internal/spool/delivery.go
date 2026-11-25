@@ -574,6 +574,9 @@ func (s *Spool) listInFlight(ctx context.Context, name string, recoverEmpty, wai
 			if err := s.clearOwner(name, ent.Name()); err != nil {
 				return nil, err
 			}
+			d.owned = false
+			d.claimID = ""
+			d.ownerCleared = true
 			// An interrupted explicit Nack may have published an inbox link
 			// before removing its durable claim. Preserve that duplicate as
 			// evidence rather than executing uncertain work after recovery.
