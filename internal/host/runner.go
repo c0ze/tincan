@@ -40,12 +40,16 @@ type capture struct {
 	stream    string
 	emit      func(string, []byte) error
 	mu        *sync.Mutex
+	closed    *bool
 	truncated bool
 }
 
 func (w *capture) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.closed != nil && *w.closed {
+		return 0, errors.New("output capture closed")
+	}
 	if w.emit != nil {
 		if err := w.emit(w.stream, p); err != nil {
 			return 0, err
@@ -75,6 +79,7 @@ type Result struct {
 	Started         bool  // the agent process was created
 	TimedOut        bool  // Timeout elapsed; the process group was killed
 	Killed          bool  // the parent ctx was cancelled (serve shutting down)
+	Canceled        bool  // the request itself was canceled via /cancel
 	Duration        time.Duration
 	StdoutTruncated bool
 	StderrTruncated bool
@@ -125,6 +130,7 @@ func Run(ctx context.Context, spec RunSpec) Result {
 	}
 	var outputMu sync.Mutex
 	var outputErr error
+	var outputClosed bool
 	emit := func(stream string, data []byte) error {
 		if outputErr != nil {
 			return outputErr
@@ -137,8 +143,8 @@ func Run(ctx context.Context, spec RunSpec) Result {
 		}
 		return outputErr
 	}
-	stdout := capture{limit: limit, stream: "stdout", emit: emit, mu: &outputMu}
-	stderr := capture{limit: limit, stream: "stderr", emit: emit, mu: &outputMu}
+	stdout := capture{limit: limit, stream: "stdout", emit: emit, mu: &outputMu, closed: &outputClosed}
+	stderr := capture{limit: limit, stream: "stderr", emit: emit, mu: &outputMu, closed: &outputClosed}
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	cmd.WaitDelay = 2 * time.Second
 
@@ -154,14 +160,22 @@ func Run(ctx context.Context, spec RunSpec) Result {
 			err = &exec.ExitError{ProcessState: cmd.ProcessState}
 		}
 	}
-	res.Stdout, res.Stderr = stdout.data, stderr.data
+	// Close capture under outputMu before snapshotting so a lingering io.Copy
+	// goroutine after ErrWaitDelay cannot race with Result or session.Reply.
+	outputMu.Lock()
+	outputClosed = true
+	res.Stdout = append([]byte(nil), stdout.data...)
+	res.Stderr = append([]byte(nil), stderr.data...)
 	res.StdoutTruncated, res.StderrTruncated = stdout.truncated, stderr.truncated
+	sinkErr := outputErr
+	outputMu.Unlock()
 	res.Duration = time.Since(start)
 	switch {
-	case outputErr != nil:
-		res.Err = fmt.Errorf("output sink: %w", outputErr)
+	case sinkErr != nil:
+		res.Err = fmt.Errorf("output sink: %w", sinkErr)
 	case ctx.Err() != nil:
 		res.Killed = true
+		res.Canceled = errors.Is(context.Cause(ctx), errRequestCanceled)
 		res.Err = ctx.Err()
 	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
 		res.TimedOut = true
@@ -183,6 +197,8 @@ func Run(ctx context.Context, spec RunSpec) Result {
 // §7): the asker always gets a reply, and every failure starts with "ERROR".
 func ReplyBody(spec RunSpec, res Result) string {
 	switch {
+	case res.Canceled:
+		return "ERROR interrupted: request was canceled while running"
 	case res.Killed:
 		return "ERROR interrupted: hosted listener was stopped while running"
 	case res.TimedOut:

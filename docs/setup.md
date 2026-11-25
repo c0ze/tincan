@@ -163,7 +163,7 @@ For a first worker check, ask:
 > its final result. Then ask the same claude listener what it just replied, and
 > report whether it remembered. Keep the listener running.
 
-Replace `claude` with `grok`, `agy` or `kimi` to check those persistent adapters.
+Replace `claude` with `grok`, `agy`, `kimi` or `cursor` to check those persistent adapters.
 For `codex` or `gemini`, test a self-contained task; their default mode does not
 promise memory of a previous request. A connection may close while work is
 running: reconnect to the same room and collect the saved request ID.

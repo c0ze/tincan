@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -17,13 +18,15 @@ import (
 	"github.com/c0ze/tincan/v2/internal/envelope"
 )
 
+var errRequestCanceled = errors.New("request canceled")
+
 // control is kept responsive while the listener is executing a job. Its
 // random owner credential identifies one lifetime, without ever signalling
 // a process selected from an on-disk PID.
 type control struct {
 	mu       sync.Mutex
 	current  string
-	cancel   context.CancelFunc
+	cancel   context.CancelCauseFunc
 	stop     context.CancelFunc
 	server   *http.Server
 	listener net.Listener
@@ -54,7 +57,7 @@ func newControl(owner string, stop context.CancelFunc) (*control, error) {
 		case "/cancel":
 			c.mu.Lock()
 			if c.current == r.URL.Query().Get("id") && c.cancel != nil {
-				c.cancel()
+				c.cancel(errRequestCanceled)
 			}
 			c.mu.Unlock()
 		default:
@@ -68,32 +71,42 @@ func newControl(owner string, stop context.CancelFunc) (*control, error) {
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
-			c.stop()
+			// Trigger shutdown after returning so Serve's cleanup does not
+			// reset the HTTP connection before the client reads the reply.
+			go c.stop()
 		}
 	})
 	go c.server.Serve(l)
 	return c, nil
 }
 
+func (c *control) close() {
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	if err := c.server.Shutdown(ctx); err != nil {
+		_ = c.server.Close()
+	}
+}
+
 func (c *control) begin(ctx context.Context, id string) (context.Context, func()) {
 	c.mu.Lock()
-	jobCtx, cancel := context.WithCancel(ctx)
+	jobCtx, cancel := context.WithCancelCause(ctx)
 	c.current, c.cancel = id, cancel
 	c.mu.Unlock()
-	return jobCtx, func() { c.mu.Lock(); c.current, c.cancel = "", nil; cancel(); c.mu.Unlock() }
+	return jobCtx, func() { c.mu.Lock(); c.current, c.cancel = "", nil; cancel(nil); c.mu.Unlock() }
 }
 
 func (st State) controlCall(ctx context.Context, action string) error {
 	if st.Owner == "" || st.ControlToken == "" {
 		return errors.New("host has no authenticated control identity")
 	}
-	host, _, err := net.SplitHostPort(st.ControlAddress)
-	if err != nil || host != "127.0.0.1" {
+	ap, err := netip.ParseAddrPort(st.ControlAddress)
+	if err != nil || ap.Addr() != netip.AddrFrom4([4]byte{127, 0, 0, 1}) || ap.Port() == 0 {
 		return errors.New("invalid host control address")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+st.ControlAddress+action, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", ap.Port(), action), nil)
 	if err != nil {
 		return err
 	}

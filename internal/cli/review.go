@@ -2,11 +2,17 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
 	"time"
 
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 	"github.com/c0ze/tincan/v2/internal/review"
 	"github.com/c0ze/tincan/v2/internal/rooms"
 )
@@ -25,19 +31,38 @@ func cmdReview(args []string, stdout, stderr io.Writer) int {
 		cancel    = fs.Bool("cancel", false, "cancel the review named by the argument")
 		timeout   = fs.Int("timeout", 3600, "seconds to wait with --wait")
 	)
-	// Accept flags after the review id too (tincan review --wait <id> --timeout 60).
+	// Accept flags after the review id too (tincan review --wait <id> --timeout 60),
+	// stopping flag parsing once "--" appears.
 	var positional []string
-	for {
+	for len(args) > 0 {
 		if err := fs.Parse(args); err != nil {
 			return ExitUsage
 		}
 		if fs.NArg() == 0 {
 			break
 		}
+		// If fs.Parse stopped at "--", remaining args are all positional.
+		parsed := len(args) - fs.NArg()
+		if parsed > 0 && args[parsed-1] == "--" {
+			positional = append(positional, fs.Args()...)
+			break
+		}
 		positional = append(positional, fs.Arg(0))
 		args = fs.Args()[1:]
 	}
-	ctx := context.Background()
+	if *timeout < 0 {
+		fmt.Fprintln(stderr, "tincan review: --timeout must be >= 0")
+		return ExitUsage
+	}
+	if err := requireRoom(*room); err != nil {
+		fmt.Fprintf(stderr, "tincan review: %v\n", err)
+		return ExitError
+	}
+	if w := roomRootWarning(*room); w != "" {
+		fmt.Fprintln(stderr, w)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	// The review store refuses symlinked paths (macOS /tmp, /var, a
 	// symlinked $PWD); Publish canonicalizes, so wait and cancel must too.
 	canonical, err := rooms.Canonical(*room)
@@ -65,7 +90,7 @@ func cmdReview(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "tincan review: --committee and --question (or --question-file) are required")
 			return ExitUsage
 		}
-		q, ec, err := bodyFrom(*question, *qfile)
+		q, ec, err := bodyFromFlags(*question, *qfile, "--question", "--question-file")
 		if err != nil {
 			fmt.Fprintf(stderr, "tincan review: %v\n", err)
 			return ec
@@ -99,11 +124,17 @@ func waitReview(ctx context.Context, room, id string, timeout time.Duration, std
 				fmt.Fprintf(stderr, "%s: %s%s\n", m.Member, m.State, map[bool]string{true: " (late)"}[m.Late])
 				degraded = degraded || m.Late || m.State == "unreachable"
 			}
-			if b, ok, _ := review.ReadBundle(room, id); ok {
+			b, ok, err := review.ReadBundle(room, id)
+			if errors.Is(err, fsutil.ErrTooLarge) {
+				fmt.Fprintf(stdout, "bundle_path=%s\n", filepath.Join(review.Dir(room, id), "bundle.md"))
+			} else if err != nil {
+				fmt.Fprintf(stderr, "tincan review: read bundle: %v\n", err)
+				return ExitError
+			} else if ok {
 				fmt.Fprint(stdout, b)
 			}
 			if degraded {
-				return 4 // closed with late or unreachable members
+				return ExitReviewDegraded
 			}
 			return ExitOK
 		}
@@ -111,6 +142,11 @@ func waitReview(ctx context.Context, room, id string, timeout time.Duration, std
 			fmt.Fprintf(stderr, "tincan review: %s still %s; reattach with tincan review --wait %s\n", id, st.Status, id)
 			return ExitTimeout
 		}
-		time.Sleep(time.Second)
+		select {
+		case <-ctx.Done():
+			fmt.Fprintln(stderr, "tincan review: interrupted")
+			return ExitError
+		case <-time.After(time.Second):
+		}
 	}
 }

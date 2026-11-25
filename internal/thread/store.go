@@ -103,9 +103,14 @@ func List(room string) ([]Meta, error) {
 	return out, nil
 }
 
+const (
+	maxMetaBytes   = 1 << 20
+	maxEventsBytes = 64 << 20
+)
+
 func (t *Thread) readMeta() (Meta, error) {
 	var m Meta
-	data, err := os.ReadFile(t.metaPath())
+	data, err := fsutil.ReadFile(t.metaPath(), maxMetaBytes)
 	if err != nil {
 		return m, err
 	}
@@ -125,7 +130,7 @@ func (t *Thread) writeMeta(m Meta) error {
 // transaction and nothing else. It returns the byte length of the complete
 // prefix.
 func (t *Thread) readEvents() ([]Event, int64, error) {
-	data, err := os.ReadFile(t.eventsPath())
+	data, err := fsutil.ReadFile(t.eventsPath(), maxEventsBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, 0, nil
 	}
@@ -165,7 +170,7 @@ func (t *Thread) load() (s *Snapshot, cached Meta, valid int64, err error) {
 	if err != nil {
 		return nil, Meta{}, 0, err
 	}
-	s = newSnapshot(cached)
+	s = newSnapshot(deepCopyMeta(cached))
 	for _, e := range evs {
 		s.apply(e)
 	}
@@ -266,7 +271,7 @@ func (t *Thread) Update(ctx context.Context, fn func(*Tx) error) error {
 	if err != nil {
 		return err
 	}
-	tx := &Tx{Meta: s.Meta, Snap: s, nextSeq: s.MaxSeq + 1}
+	tx := &Tx{Meta: deepCopyMeta(s.Meta), Snap: s, nextSeq: s.MaxSeq + 1}
 	if err := fn(tx); err != nil {
 		return err
 	}

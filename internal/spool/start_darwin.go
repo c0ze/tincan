@@ -18,6 +18,10 @@ func processStart(pid int) (id string, at time.Time, ok bool) {
 	if err != nil {
 		return "", time.Time{}, false
 	}
+	const darwinSZOMB = 5
+	if k.Proc.P_stat == darwinSZOMB {
+		return zombieStart, time.Time{}, true
+	}
 	tv := k.Proc.P_starttime
 	if tv.Sec == 0 && tv.Usec == 0 {
 		return "", time.Time{}, false

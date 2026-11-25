@@ -196,7 +196,7 @@ func Up(ctx context.Context, o UpOptions) (UpResult, error) {
 	// serve removes the file once it has read it; this covers a daemon that
 	// never got that far.
 	defer os.Remove(presetFile)
-	args := []string{"serve", o.Name, "--room", room, "--daemon", "--owner", owner, "--resolved-label", o.Label, "--resolved-preset-file", presetFile}
+	args := []string{"serve", "--room", room, "--daemon", "--owner", owner, "--resolved-label", o.Label, "--resolved-preset-file", presetFile, "--", o.Name}
 	daemon, exited, err := StartDetached(exe, args, room, LogPath(room, o.Name))
 	if err != nil {
 		return UpResult{}, err
@@ -311,8 +311,16 @@ func removeStalePresetFiles(room, name string) error {
 
 func existingResult(st State, o UpOptions) (UpResult, error) {
 	result := UpResult{State: st, Already: true}
-	if len(o.Preset.Exec) > 0 && (st.Config == nil || st.Preset != o.Label || !reflect.DeepEqual(*st.Config, o.Preset)) {
-		return result, fmt.Errorf("listener %s is already running with a different configuration (preset=%s session=%s); stop it before relaunching with new settings", o.Name, st.Preset, st.Session)
+	if len(o.Preset.Exec) > 0 {
+		match := st.Preset == o.Label
+		if st.ConfigHash != "" {
+			match = match && st.ConfigHash == presetHash(o.Preset)
+		} else {
+			match = match && st.Config != nil && reflect.DeepEqual(*st.Config, o.Preset)
+		}
+		if !match {
+			return result, fmt.Errorf("listener %s is already running with a different configuration (preset=%s session=%s); stop it before relaunching with new settings", o.Name, st.Preset, st.Session)
+		}
 	}
 	return result, nil
 }
@@ -350,28 +358,38 @@ func Down(ctx context.Context, room, name string, wait time.Duration) error {
 		return err
 	}
 	defer launch.Close()
-	st, ok, readErr := ReadState(room, name)
-	lock, lockErr := filelock.Try(lifetimePath(room, name))
-	if lockErr == nil {
-		if ok {
-			err = RemoveOwnedState(room, name, st.Owner)
-		} else if readErr != nil {
-			err = RemoveState(room, name)
+	var st State
+	for {
+		lock, lockErr := filelock.Try(lifetimePath(room, name))
+		if lockErr == nil {
+			prev, ok, readErr := ReadState(room, name)
+			var rmErr error
+			if ok {
+				rmErr = RemoveOwnedState(room, name, prev.Owner)
+			} else if readErr != nil {
+				rmErr = RemoveState(room, name)
+			}
+			lock.Close()
+			if rmErr != nil {
+				return rmErr
+			}
+			return stopInteractive(ctx, room, name)
 		}
-		lock.Close()
-		if err != nil {
-			return err
+		if !errors.Is(lockErr, filelock.ErrLocked) {
+			return lockErr
 		}
-		return stopInteractive(ctx, room, name)
-	}
-	if !errors.Is(lockErr, filelock.ErrLocked) {
-		return lockErr
-	}
-	if readErr != nil {
-		return readErr
-	}
-	if !ok || !st.Ready(ctx) {
-		return errors.New("listener owns its lock but its authenticated control endpoint is unavailable")
+		var ok bool
+		var readErr error
+		st, ok, readErr = ReadState(room, name)
+		if readErr == nil && ok && st.Ready(ctx) {
+			break
+		}
+		if err := pause(ctx); err != nil {
+			if readErr != nil {
+				return readErr
+			}
+			return errors.New("listener owns its lock but its authenticated control endpoint is unavailable")
+		}
 	}
 	if err := st.controlCall(ctx, "/stop"); err != nil {
 		return err

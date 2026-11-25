@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -43,15 +44,15 @@ func cmdMCP(args []string, stdout, stderr io.Writer) int {
 		}
 		*room = inferred
 	}
-	rooms.TouchQuiet(*room, stderr)
 	server, err := mcpserver.New(mcpserver.Options{Room: *room})
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan mcp: %v\n", err)
 		return ExitError
 	}
+	rooms.TouchQuiet(*room, stderr)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := server.Run(ctx, &mcp.IOTransport{Reader: os.Stdin, Writer: writeCloser{stdout}}); err != nil && ctx.Err() == nil {
+	if err := server.Run(ctx, &mcp.IOTransport{Reader: os.Stdin, Writer: writeCloser{stdout}}); err != nil && ctx.Err() == nil && !errors.Is(err, io.EOF) {
 		fmt.Fprintf(stderr, "tincan mcp: %v\n", err)
 		return ExitError
 	}
@@ -117,9 +118,20 @@ func cmdGC(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
-	if fs.NArg() != 0 || *age < time.Hour {
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "tincan gc: unexpected argument %q\n", fs.Arg(0))
+		return ExitUsage
+	}
+	if *age < time.Hour {
 		fmt.Fprintln(stderr, "tincan gc: --older-than must be at least 1h")
 		return ExitUsage
+	}
+	if err := requireRoom(*room); err != nil {
+		fmt.Fprintf(stderr, "tincan gc: %v\n", err)
+		return ExitError
+	}
+	if w := roomRootWarning(*room); w != "" {
+		fmt.Fprintln(stderr, w)
 	}
 	before := time.Now().Add(-*age)
 	// The spool sweep does not depend on request records: run it even when

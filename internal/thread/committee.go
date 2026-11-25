@@ -125,8 +125,13 @@ func (d *Dispatcher) buildReview(ctx context.Context, t *Thread, m Message) erro
 	cancelIt := false
 	if err := t.Update(ctx, func(tx *Tx) error {
 		cur, _ := tx.Snap.Message(m.ID)
-		if cur.State != StatePending {
+		c := tx.Snap.Chains[cur.Chain]
+		stopped := tx.Meta.Status != StatusOpen || (c != nil && c.Stopped)
+		if cur.State != StatePending || stopped {
 			cancelIt = buildErr == nil
+			if cur.State == StatePending && stopped {
+				tx.Append(Event{Kind: KindState, Message: m.ID, State: StateCancelled, Text: "Cancelled: the thread was stopped."})
+			}
 			return nil
 		}
 		if buildErr != nil {
@@ -242,7 +247,9 @@ func committeeOutcome(in review.Input, st review.State) (string, string) {
 			finished++
 		}
 	}
-	fmt.Fprintf(&b, "\nBundle: .tincan/reviews/%s/bundle.md\n", in.ReviewID)
+	if st.Status == "closed" {
+		fmt.Fprintf(&b, "\nBundle: .tincan/reviews/%s/bundle.md\n", in.ReviewID)
+	}
 	switch {
 	case st.Status == "cancelled":
 		return StateCancelled, b.String()

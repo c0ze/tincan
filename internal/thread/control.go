@@ -108,18 +108,17 @@ func (d *Dispatcher) finishStop(ctx context.Context, t *Thread, snap Snapshot) e
 			return err
 		}
 		if !r.Terminal() {
-			if _, alive := host.Existing(ctx, room, m.Listener); !alive {
-				// The hosted listener is gone (crashed or its process was
-				// killed): host.Cancel can never reach it and the request
-				// would never become terminal on its own, stranding the
-				// thread in stopping/archiving forever. Settle it directly,
-				// after a best-effort host.Cancel in case the probe is wrong.
-				host.Cancel(ctx, room, m.Listener, m.RequestID)
-				r, err = request.Finish(room, r.Envelope, "ERROR interrupted: hosted listener is not running; stopped by the owner")
-				if err != nil {
-					return err
-				}
-			} else {
+			ran, werr := host.WithoutHost(ctx, room, m.Listener, func() error {
+				var ferr error
+				r, ferr = request.FinishContext(ctx, room, r.Envelope, "ERROR interrupted: hosted listener is not running; stopped by the owner")
+				return ferr
+			})
+			if werr != nil {
+				return werr
+			}
+			if !ran {
+				// A host owns this listener (possibly busy and slow to answer
+				// probes): ask it to cancel and wait for it to settle.
 				host.Cancel(ctx, room, m.Listener, m.RequestID) // best effort; polling decides
 				pending = true
 				continue

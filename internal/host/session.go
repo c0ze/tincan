@@ -39,8 +39,15 @@ func SessionProvider(p Preset, label string) (provider string, implicit bool) {
 		return p.Provider, true
 	}
 	if len(p.Exec) > 0 {
-		base := strings.TrimSuffix(filepath.Base(p.Exec[0]), ".exe")
-		if base == "cursor-agent" {
+		base := filepath.Base(p.Exec[0])
+		lower := strings.ToLower(base)
+		for _, ext := range []string{".exe", ".cmd", ".bat"} {
+			if strings.HasSuffix(lower, ext) {
+				base = base[:len(base)-len(ext)]
+				break
+			}
+		}
+		if strings.EqualFold(base, "cursor-agent") {
 			// Cursor's CLI executable is named after the product's agent.
 			base = "cursor"
 		}
@@ -140,7 +147,8 @@ func PrepareSession(room, name, label string, p Preset) (*SessionRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &SessionRun{Preset: p}
+	provider, _ := SessionProvider(p, label)
+	s := &SessionRun{Preset: p, record: sessionRecord{Provider: provider}}
 	if p.Session == "stateless" {
 		return s, nil
 	}
@@ -151,7 +159,6 @@ func PrepareSession(room, name, label string, p Preset) (*SessionRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	provider, _ := SessionProvider(p, label)
 	argv, err := sessionArgs(p.Exec, provider)
 	if err != nil {
 		return nil, err

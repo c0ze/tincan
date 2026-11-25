@@ -32,7 +32,7 @@ func (s *Server) initJobs() {
 	if s.cfg.StateDir == "" {
 		return
 	}
-	s.jobs = &reviewjob.Service{StateDir: s.cfg.StateDir, Registry: s.cfg.Registry, Presets: s.cfg.Dispatch.PresetMap, Executable: s.cfg.Dispatch.Executable}
+	s.jobs = &reviewjob.Service{StateDir: s.cfg.StateDir, Registry: s.cfg.Registry, Presets: s.cfg.Dispatch.PresetMap, Executable: s.cfg.Dispatch.Executable, BaseCtx: s.streams}
 	s.coord = &review.Coordinator{Transport: transport{s}}
 }
 
@@ -168,6 +168,8 @@ func (s *Server) runJobJanitor(ctx context.Context) {
 	for {
 		if err := s.jobs.Janitor(ctx); err != nil {
 			s.logOnce("jobs.janitor", "tincan web: review jobs: "+err.Error())
+		} else {
+			s.clearLog("jobs.janitor")
 		}
 		select {
 		case <-ctx.Done():

@@ -163,3 +163,22 @@ func TestGCReportsCorruptRecordAndStillSweepsSpool(t *testing.T) {
 		t.Fatalf("spool GC skipped: %v", err)
 	}
 }
+
+func TestMCPCleanEOFExitsZero(t *testing.T) {
+	room := evalDir(t, t.TempDir())
+	origStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = origStdin
+		r.Close()
+	}()
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"mcp", "--room", room}, &stdout, &stderr); code != ExitOK {
+		t.Fatalf("mcp clean EOF exit = %d, want %d; stderr=%q", code, ExitOK, stderr.String())
+	}
+}

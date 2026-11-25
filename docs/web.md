@@ -56,17 +56,20 @@ the socket over `tailscale serve`. Concretely:
 
 ```
 tincan web [--listen unix:<path>|127.0.0.1:<port>] [--public-path /tincan]
-           [--owner <login>] [--origin <url>] [--peer name=<url>]...
+           [--owner <login>] [--origin <url>] [--machine <name>]
+           [--peer name=<url>]... [--committees-from <peer>]
            [--scan <dir>]... [--chain-budget 6] [--idle-stop 30m]
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--listen` | `unix:$XDG_RUNTIME_DIR/tincan/web.sock` (falls back to `<state dir>/web.sock`; `127.0.0.1:7788` on Windows) | `unix:<absolute path>` or a loopback `host:port`. See [Listener rules](#listener-rules). |
-| `--public-path` | `/` | URL prefix the browser uses (e.g. `/tincan`); only `[A-Za-z0-9/_.-]` is accepted. |
+| `--public-path` | `/` | URL prefix the browser uses (e.g. `/tincan`); only `[A-Za-z0-9/_.-]` without `..` segments is accepted. |
 | `--owner` | this node's Tailscale owner login | The `Tailscale-User-Login` every request must carry. |
 | `--origin` | *(unset)* | Pin the browser origin mutations must match; see [CSRF and `--origin`](#csrf-and---origin). |
+| `--machine` | first label of this node's Tailscale DNS name | Machine name advertised for committee members (`preset@machine`). |
 | `--peer` | *(none)* | `name=https://peer-host.tailnet.ts.net/tincan/`, repeatable; see [Two machines](#two-machines). |
+| `--committees-from` | *(none)* | Peer name of the hub that owns committee definitions; omit on the hub itself. |
 | `--scan` | `~/projects` | Directory to import existing `.tincan/` rooms from at startup (depth ≤ 3), repeatable. |
 | `--chain-budget` | `6` | Automatic agent executions per user message across a whole handoff chain; per-thread override in `thread.json`. |
 | `--idle-stop` | `30m` | Stop a thread listener with no pending or running work anywhere in the room after this long idle. |
@@ -135,13 +138,13 @@ different name, pass `--origin https://<host>`.
 
 ### CSRF and `--origin`
 
-Mutating requests (`POST`/`PATCH`) must carry `X-Tincan-Request: 1`; when they
-also carry an `Origin` header, it is checked against the host the browser is
-actually using. Without `--origin`, only the *host* of `Origin` is compared
-(case-insensitively) — against `X-Forwarded-Host` as `tailscale serve` sets
-it, falling back to `Host`; the scheme is not checked. Behind a plain
-`tailscale serve --set-path` this works without any flag. If some other proxy
-rewrites `Host` without adding `X-Forwarded-Host`, pass
+Mutating requests (`POST`/`PUT`/`PATCH`/`DELETE`) must carry `X-Tincan-Request: 1`; when they
+also carry an `Origin` header, it is checked against the host and scheme the
+browser is actually using. Without `--origin`, the host of `Origin` is compared
+(case-insensitively) against `X-Forwarded-Host` (falling back to `Host`), and
+its scheme must match `X-Forwarded-Proto` (or default to `https` for non-loopback
+hosts). Behind a plain `tailscale serve --set-path` this works without any flag.
+If some other proxy rewrites `Host` without adding `X-Forwarded-Host`, pass
 `--origin https://<host>`: with `--origin` set, the whole `Origin` value
 (scheme and host together) must match it exactly instead, and its host joins
 the [Host allowlist](#host-allowlist). Refused requests get a JSON `403`
@@ -198,7 +201,8 @@ and the default labels/mapping are used instead — it never breaks the panel.
 
 A committee is a named group of reviewers, each a `preset@machine`, such as
 `codex-gmail@cachyos` or `claude-personal@macmini`. Define committees on the
-**Committees** page. Reviews that use them arrive in a later release.
+**Committees** page, then invoke them from the Activity page, `tincan review`,
+MCP, or `@committee` mentions in threads.
 
 - **One hub.** Definitions live on the hub: the machine started *without*
   `--committees-from`, in `<state>/committees.json`. Its peer runs
@@ -239,7 +243,7 @@ creates a job through `api/review-jobs`. For each job:
 - **Execution.** The member preset runs once, without a session. Its
   executable is resolved *before* the workspace exists and run by absolute
   path, so a reviewed change cannot substitute its own binary. The run is
-  bounded by the review's deadline.
+  bounded by the review's deadline plus a 30-minute late-result grace window.
 - **Results and cleanup.** A result is kept until the requester acknowledges
   it. A janitor runs every minute: it resumes jobs interrupted by a restart
   (adopting a run that already happened), removes workspaces after
@@ -262,7 +266,7 @@ Ask a committee to review a room's change, in any of three ways:
 
 - **Web UI:** the room's **Activity** page ("Start a review").
 - **Terminal:** `tincan review --committee reviewers --question "…" --wait`.
-- **An agent:** the MCP tool `tincan_review`, then `tincan_review_wait`.
+- **An agent:** the MCP tool `tincan_review`, then `tincan_review_wait` (or `tincan_review_cancel`).
 
 `tincan web` on the requesting machine coordinates the review:
 
@@ -338,7 +342,7 @@ dispatches. You can `@mention`:
 - a preset available on this machine (built in, or from
   `~/.config/tincan/agents.json`) — this starts (or reuses) that thread's own
   listener, named `<preset>.<tid>`;
-- this thread's own listener by its existing name (e.g. `codex.t7f2a9c1`);
+- this thread's own listener by its existing name (e.g. `codex.7f2a9c10`);
 - a hosted listener already running elsewhere in the room (e.g.
   `codex-audit`), addressed directly.
 

@@ -26,10 +26,11 @@ import (
 
 // Exit codes (CLI contract; skills branch on these).
 const (
-	ExitOK      = 0
-	ExitError   = 1
-	ExitUsage   = 2
-	ExitTimeout = 3
+	ExitOK             = 0
+	ExitError          = 1
+	ExitUsage          = 2
+	ExitTimeout        = 3
+	ExitReviewDegraded = 4
 )
 
 const usageText = `tincan — local message passing between AI coding agents
@@ -128,9 +129,13 @@ func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 // second return value is the exit code: ExitUsage for flag mistakes,
 // ExitError for I/O failures reading --body-file.
 func bodyFrom(body, bodyFile string) (string, int, error) {
+	return bodyFromFlags(body, bodyFile, "--body", "--body-file")
+}
+
+func bodyFromFlags(body, bodyFile, bodyFlag, fileFlag string) (string, int, error) {
 	switch {
 	case body != "" && bodyFile != "":
-		return "", ExitUsage, errors.New("use --body or --body-file, not both")
+		return "", ExitUsage, fmt.Errorf("use %s or %s, not both", bodyFlag, fileFlag)
 	case body != "":
 		return body, ExitOK, nil
 	case bodyFile != "":
@@ -140,7 +145,7 @@ func bodyFrom(body, bodyFile string) (string, int, error) {
 		}
 		return string(data), ExitOK, nil
 	default:
-		return "", ExitUsage, errors.New("--body or --body-file is required (--body must be non-empty)")
+		return "", ExitUsage, fmt.Errorf("%s or %s is required (%s must be non-empty)", bodyFlag, fileFlag, bodyFlag)
 	}
 }
 
@@ -175,6 +180,9 @@ func roomRootWarning(room string) string {
 	if err != nil {
 		return ""
 	}
+	if canonical, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = canonical
+	}
 	if _, err := os.Lstat(filepath.Join(abs, ".git")); err == nil {
 		return "" // room is itself a repo root
 	}
@@ -191,6 +199,9 @@ func roomRootWarning(room string) string {
 			// /home). Advising "pass --room ~" would be actively wrong.
 			// Best-effort: if home can't be determined, don't floor.
 			if home, err := os.UserHomeDir(); err == nil && home != "" {
+				if canonical, err := filepath.EvalSymlinks(home); err == nil {
+					home = canonical
+				}
 				if rel, err := filepath.Rel(dir, home); err == nil {
 					goesUp := rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 					if !goesUp { // home == dir or nested under it ⇒ dir is $HOME or an ancestor
@@ -243,6 +254,10 @@ func cmdSend(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "tincan send: unexpected argument %q\n", fs.Arg(0))
+		return ExitUsage
+	}
 	if *to == "" || *from == "" {
 		fmt.Fprintln(stderr, "tincan send: --to and --from are required")
 		return ExitUsage
@@ -288,6 +303,10 @@ func cmdRecv(args []string, stdout, stderr io.Writer) int {
 		logMsgs = fs.Bool("log", false, "keep consumed messages in .tincan/log/")
 	)
 	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "tincan recv: unexpected argument %q\n", fs.Arg(0))
 		return ExitUsage
 	}
 	if *as == "" {
@@ -374,6 +393,10 @@ func cmdAsk(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "tincan ask: unexpected argument %q\n", fs.Arg(0))
+		return ExitUsage
+	}
 	if *to == "" || *from == "" {
 		fmt.Fprintln(stderr, "tincan ask: --to and --from are required")
 		return ExitUsage
@@ -455,6 +478,10 @@ func cmdReply(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "tincan reply: unexpected argument %q\n", fs.Arg(0))
+		return ExitUsage
+	}
 	if *channel == "" {
 		fmt.Fprintln(stderr, "tincan reply: --channel is required")
 		return ExitUsage
@@ -496,6 +523,10 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		format   = fs.String("format", "table", "output format: table|json")
 	)
 	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "tincan status: unexpected argument %q\n", fs.Arg(0))
 		return ExitUsage
 	}
 	if *format != "table" && *format != "json" {
@@ -612,7 +643,9 @@ func printStatusTable(rows []statusRow, stdout io.Writer) {
 			state, pid = "busy", strconv.Itoa(r.PID)
 		case r.Alive:
 			state, pid = "parked", strconv.Itoa(r.PID)
-			since = time.Since(r.Since).Round(time.Second).String() + " ago"
+			if !r.Since.IsZero() {
+				since = time.Since(r.Since).Round(time.Second).String() + " ago"
+			}
 		}
 		fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t%s\t%s\t%s\n", r.Name, r.Queued, r.InFlight, mode, state, pid, since)
 	}
@@ -627,6 +660,10 @@ func cmdPing(args []string, stdout, stderr io.Writer) int {
 		room = fs.String("room", ".", "room directory")
 	)
 	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "tincan ping: unexpected argument %q\n", fs.Arg(0))
 		return ExitUsage
 	}
 	if *to == "" {
@@ -667,6 +704,10 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 		room = fs.String("room", ".", "room directory")
 	)
 	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "tincan stop: unexpected argument %q\n", fs.Arg(0))
 		return ExitUsage
 	}
 	if *to == "" || *from == "" {

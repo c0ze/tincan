@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/c0ze/tincan/v2/internal/envelope"
 	"github.com/c0ze/tincan/v2/internal/filelock"
@@ -137,7 +139,7 @@ func Get(room, id string) (Record, error) {
 	if err := json.Unmarshal(data, &r); err != nil {
 		return Record{}, &recordError{ErrCorruptRecord, err}
 	}
-	if r.ID != id || r.Envelope == nil || r.Envelope.ID != id || r.Agent != r.Envelope.To {
+	if r.ID != id || r.Envelope == nil || r.Envelope.ID != id || r.Agent != r.Envelope.To || spool.ValidName(r.Agent) != nil || (r.Envelope.From != "" && spool.ValidName(r.Envelope.From) != nil) || (r.Envelope.ReplyTo != "" && spool.ValidName(r.Envelope.ReplyTo) != nil) {
 		return Record{}, &recordError{ErrCorruptRecord, fmt.Errorf("corrupt request record %q", id)}
 	}
 	return r, nil
@@ -161,7 +163,7 @@ func newRecord(e *envelope.Envelope) Record {
 }
 
 func sameRequest(r Record, e *envelope.Envelope) bool {
-	return r.Envelope != nil && r.Envelope.To == e.To && r.Envelope.From == e.From && r.Envelope.Body == e.Body && r.Envelope.Kind == e.Kind && strings.Join(r.Envelope.Artifacts, "\x00") == strings.Join(e.Artifacts, "\x00")
+	return r.Envelope != nil && r.Envelope.To == e.To && r.Envelope.From == e.From && r.Envelope.Body == e.Body && r.Envelope.Kind == e.Kind && slices.Equal(r.Envelope.Artifacts, e.Artifacts)
 }
 
 // Submit is idempotent for an explicitly supplied ID and identical request.
@@ -203,11 +205,15 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 	if !needsReply {
 		channel = ""
 	}
+	sp, err := spool.Open(room)
+	if err != nil {
+		return Record{}, err
+	}
 	e := &envelope.Envelope{ID: id, To: agent, From: from, Body: body, ReplyTo: channel, CorrID: channel, TS: time.Now().UTC()}
 	r, err := Get(room, id)
 	if err == nil {
 		if !sameRequest(r, e) {
-			return Record{}, fmt.Errorf("request ID %q already belongs to different work; use a new ID", id)
+			return Record{}, &recordError{ErrIDCollision, fmt.Errorf("request ID %q already belongs to different work; use a new ID", id)}
 		}
 		if r.Status != "queued" {
 			return r, nil
@@ -221,11 +227,20 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 		if r.Publication != publicationPending {
 			return resolveNativePublication(ctx, room, r)
 		}
-		e = r.Envelope
-		// Mark the attempt before Send: once the envelope may be in the spool,
-		// no retry may send it again, even after a crash.
 		attempt := r
-		attempt.Publication = publicationAttempted
+		if needsReply {
+			attempt.Interactive = true
+			attempt.Publication = ""
+			envCopy := *r.Envelope
+			envCopy.ReplyTo, envCopy.CorrID = channel, channel
+			attempt.Envelope = &envCopy
+			e = attempt.Envelope
+		} else {
+			e = r.Envelope
+			// Mark the attempt before Send: once the envelope may be in the spool,
+			// no retry may send it again, even after a crash.
+			attempt.Publication = publicationAttempted
+		}
 		if err := save(room, attempt); err != nil {
 			return r, fmt.Errorf("request %s was saved but enqueue failed; retry the same request_id: %w", id, err)
 		}
@@ -240,10 +255,6 @@ func submit(ctx context.Context, room, agent, from, body, id string, needsReply 
 			return Record{}, err
 		}
 	} else {
-		return Record{}, err
-	}
-	sp, err := spool.Open(room)
-	if err != nil {
 		return Record{}, err
 	}
 	if err := sp.Send(e); err != nil {
@@ -447,7 +458,11 @@ func finish(ctx context.Context, room string, e *envelope.Envelope, body string,
 		r.InteractivePublicationUncertain = false
 	}
 	if len(body) > MaxResultBytes {
-		body = body[:MaxResultBytes] + "\n[output truncated]"
+		n := MaxResultBytes
+		for n > 0 && !utf8.RuneStart(body[n]) {
+			n--
+		}
+		body = body[:n] + "\n[output truncated]"
 	}
 	outcome := "completed"
 	if reply == nil {
@@ -515,19 +530,34 @@ func Wait(ctx context.Context, room, id string, timeout time.Duration) (Record, 
 	if timeout < 0 {
 		return Record{}, errors.New("wait timeout must be nonnegative")
 	}
+	waitCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		r, err := Poll(ctx, room, id)
-		if err != nil || (r.Terminal() && !r.InteractivePublicationUncertain) || timeout == 0 {
+		r, err := Poll(waitCtx, room, id)
+		if err != nil {
+			if timeout > 0 && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+				return Get(room, id)
+			}
 			return r, err
+		}
+		if (r.Terminal() && !r.InteractivePublicationUncertain) || timeout == 0 {
+			return r, nil
 		}
 		select {
 		case <-ctx.Done():
 			return r, ctx.Err()
 		case <-deadline.C:
+			if r, err := Poll(ctx, room, id); err == nil {
+				return r, nil
+			}
 			return Get(room, id)
 		case <-tick.C:
 		}

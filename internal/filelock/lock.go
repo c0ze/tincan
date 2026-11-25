@@ -32,18 +32,34 @@ func Try(path string) (*Lock, error) {
 }
 
 func Acquire(ctx context.Context, path string) (*Lock, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := fsutil.MkdirPrivate(filepath.Dir(path)); err != nil {
+		return nil, err
+	}
+	f, err := fsutil.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
 	tick := time.NewTicker(20 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		if err := ctx.Err(); err != nil {
+			f.Close()
 			return nil, err
 		}
-		lock, err := Try(path)
+		err := lockFile(f)
+		if err == nil {
+			return &Lock{file: f}, nil
+		}
 		if !errors.Is(err, ErrLocked) {
-			return lock, err
+			f.Close()
+			return nil, err
 		}
 		select {
 		case <-ctx.Done():
+			f.Close()
 			return nil, ctx.Err()
 		case <-tick.C:
 		}

@@ -143,6 +143,11 @@ func New(cfg Config) (*Server, error) {
 	if !publicPathRe.MatchString(trimmed) {
 		return nil, fmt.Errorf("invalid --public-path %q", cfg.PublicPath)
 	}
+	for _, seg := range strings.Split(trimmed, "/") {
+		if seg == ".." {
+			return nil, fmt.Errorf("invalid --public-path %q", cfg.PublicPath)
+		}
+	}
 	base := "/" + trimmed + "/"
 	if base == "//" {
 		base = "/"
@@ -150,7 +155,8 @@ func New(cfg Config) (*Server, error) {
 	var hosts []hostRule
 	if cfg.Origin != "" {
 		u, err := url.Parse(cfg.Origin)
-		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" ||
+			u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 			return nil, fmt.Errorf("invalid --origin %q: want scheme://host[:port]", cfg.Origin)
 		}
 		r := parseHostRule(u.Host)
@@ -172,6 +178,12 @@ func New(cfg Config) (*Server, error) {
 	s.reconcileRoom = s.runRoomPass
 	s.streams, s.stopStreams = context.WithCancel(context.Background())
 	for _, p := range cfg.Peers {
+		if p.Name == "" || p.Name == "local" || (cfg.Machine != "" && p.Name == cfg.Machine) || strings.ContainsAny(p.Name, "/ \t\r\n") {
+			return nil, fmt.Errorf("invalid peer name %q", p.Name)
+		}
+		if _, dup := s.peers[p.Name]; dup {
+			return nil, fmt.Errorf("duplicate peer %q", p.Name)
+		}
 		pp, err := newPeer(p)
 		if err != nil {
 			return nil, err
@@ -285,7 +297,7 @@ func (s *Server) Handler() http.Handler {
 		h := w.Header()
 		// Identity comes from tailscale serve, not cookies, so any page could
 		// frame a working UI: forbid framing (X-Frame-Options for old browsers).
-		h.Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'; frame-ancestors 'none'")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
@@ -298,8 +310,12 @@ func (s *Server) Handler() http.Handler {
 			refuse("host not allowed")
 			return
 		}
-		if r.Header.Get("Tailscale-User-Login") != s.cfg.Owner {
+		if logins := r.Header.Values("Tailscale-User-Login"); len(logins) != 1 || logins[0] != s.cfg.Owner {
 			refuse("forbidden")
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/") && strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
+			refuse("cross-site request refused")
 			return
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -324,14 +340,27 @@ func (s *Server) originOK(origin string, r *http.Request) bool {
 		return strings.EqualFold(strings.TrimRight(origin, "/"), strings.TrimRight(s.cfg.Origin, "/"))
 	}
 	u, err := url.Parse(origin)
-	if err != nil {
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" ||
+		u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	if proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); strings.EqualFold(proto, "https") && u.Scheme != "https" {
 		return false
 	}
 	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
+	if host != "" {
+		host = strings.TrimSpace(strings.Split(host, ",")[0])
+	} else {
 		host = r.Host
 	}
-	return strings.EqualFold(u.Host, host)
+	norm := func(raw, scheme string) hostRule {
+		hr := parseHostRule(raw)
+		if (scheme == "https" && hr.port == "443") || (scheme == "http" && hr.port == "80") {
+			hr.port = ""
+		}
+		return hr
+	}
+	return norm(u.Host, u.Scheme) == norm(host, u.Scheme)
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
@@ -351,6 +380,9 @@ func (s *Server) fail(w http.ResponseWriter, status int, err error) {
 // on the raw body must leave headroom for that, and callers size limit
 // accordingly (see postMessage).
 func readJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) error {
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(30 * time.Second))
+	defer func() { _ = rc.SetReadDeadline(time.Time{}) }()
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -411,7 +443,7 @@ func Listen(spec string) (net.Listener, error) {
 			if info.Mode()&os.ModeSocket == 0 {
 				return nil, fmt.Errorf("refusing to remove %s: not a socket", path)
 			}
-			if c, dialErr := net.Dial("unix", path); dialErr == nil {
+			if c, dialErr := net.DialTimeout("unix", path, time.Second); dialErr == nil {
 				c.Close()
 				return nil, fmt.Errorf("%s is in use by another tincan web", path)
 			}
@@ -466,7 +498,7 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 			run(ctx)
 		}()
 	}
-	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
 	var err error

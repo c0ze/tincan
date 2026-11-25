@@ -128,6 +128,9 @@ func (p *Preset) normalize() error {
 	if len(p.Exec) == 0 {
 		return errors.New("exec is required")
 	}
+	if strings.Contains(p.Exec[0], "{body}") || strings.Contains(p.Exec[0], "{out}") {
+		return errors.New("exec[0] cannot contain {body} or {out}")
+	}
 	switch p.Stdin {
 	case "":
 		p.Stdin = "none"

@@ -67,17 +67,24 @@ func resumeChild(pid uint32) error {
 	}
 	defer windows.CloseHandle(snapshot)
 	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
+	found := false
 	for err = windows.Thread32First(snapshot, &entry); err == nil; err = windows.Thread32Next(snapshot, &entry) {
 		if entry.OwnerProcessID != pid {
 			continue
 		}
+		found = true
 		thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
 		if err != nil {
 			return err
 		}
 		_, err = windows.ResumeThread(thread)
 		windows.CloseHandle(thread)
-		return err
+		if err != nil {
+			return err
+		}
+	}
+	if found {
+		return nil
 	}
 	return fmt.Errorf("cannot find suspended child thread: %w", err)
 }

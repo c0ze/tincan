@@ -227,15 +227,13 @@ func (s *Spool) claim(ctx context.Context, name string, timeout time.Duration, o
 	// The timeout starts before registration, which may wait for the
 	// transport lock: a sender or gc holding it must not stretch the receive.
 	// It bounds only waiting; register still makes one claim attempt.
-	var deadlineC <-chan time.Time
+	var deadlineC <-chan struct{}
 	claimCtx := ctx
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		claimCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
-		t := time.NewTimer(timeout)
-		defer t.Stop()
-		deadlineC = t.C
+		deadlineC = claimCtx.Done()
 	}
 	inbox := s.InboxDir(name)
 	token := envelope.NewID()
@@ -258,21 +256,33 @@ func (s *Spool) claim(ctx context.Context, name string, timeout time.Duration, o
 		events, watchErrors = watcher.Events, watcher.Errors
 	}
 	// Poll even when the watch succeeds: a dropped/coalesced event or closed
-	// watcher must not leave an existing queue parked forever.
-	poll := time.NewTicker(50 * time.Millisecond)
+	// watcher must not leave an existing queue parked forever. Use a relaxed
+	// fallback cadence while fsnotify is armed to avoid hammering transport.lock.
+	const (
+		unarmedPoll = 50 * time.Millisecond
+		armedPoll   = 500 * time.Millisecond
+	)
+	pollInterval := unarmedPoll
+	poll := time.NewTicker(pollInterval)
 	defer poll.Stop()
 	armed := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		select {
-		case <-deadlineC:
+		if timeout > 0 && claimCtx.Err() != nil {
 			return nil, ErrTimeout
-		default:
 		}
 		if !armed && watcher != nil {
 			armed = watcher.Add(inbox) == nil
+		}
+		wantInterval := unarmedPoll
+		if armed {
+			wantInterval = armedPoll
+		}
+		if wantInterval != pollInterval {
+			poll.Reset(wantInterval)
+			pollInterval = wantInterval
 		}
 		delivery, ok, err := s.claimOldest(claimCtx, name, owned)
 		if err != nil {
@@ -285,9 +295,12 @@ func (s *Spool) claim(ctx context.Context, name string, timeout time.Duration, o
 			return delivery, nil
 		}
 		select {
-		case _, ok := <-events:
+		case ev, ok := <-events:
 			if !ok {
 				events = nil
+				armed = false
+			} else if ev.Has(fsnotify.Remove) || ev.Has(fsnotify.Rename) {
+				_ = watcher.Remove(inbox)
 				armed = false
 			}
 		case _, ok := <-watchErrors:
@@ -297,6 +310,9 @@ func (s *Spool) claim(ctx context.Context, name string, timeout time.Duration, o
 			}
 		case <-poll.C:
 		case <-deadlineC:
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, ErrTimeout
 		case <-ctx.Done():
 			return nil, ctx.Err()

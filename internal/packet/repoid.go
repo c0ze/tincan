@@ -2,6 +2,7 @@ package packet
 
 import (
 	"context"
+	"net"
 	"net/url"
 	"strings"
 )
@@ -15,13 +16,16 @@ func RepoID(remote string) string {
 		return ""
 	}
 	var host, port, path string
-	if u, err := url.Parse(remote); err == nil && u.Scheme != "" && u.Host != "" {
+	if u, err := url.Parse(remote); err == nil && u.Scheme != "" && strings.Contains(remote, "://") {
+		if u.Scheme == "file" || u.Host == "" {
+			return ""
+		}
 		host, port, path = strings.ToLower(u.Hostname()), u.Port(), u.Path
 		if (port == "22" && u.Scheme == "ssh") || (port == "443" && u.Scheme == "https") || (port == "80" && u.Scheme == "http") {
 			port = ""
 		}
-	} else if at, colon := strings.Index(remote, "@"), strings.Index(remote, ":"); colon > 0 && !strings.Contains(remote[:colon], "/") && (at < 0 || at < colon) {
-		// scp-style: [user@]host:path
+	} else if at, colon := strings.Index(remote, "@"), strings.Index(remote, ":"); colon > 1 && !strings.Contains(remote[:colon], "/") && (at < 0 || at < colon) {
+		// scp-style: [user@]host:path (colon > 1 avoids Windows drive letters like C:/...)
 		host, path = strings.ToLower(remote[at+1:colon]), remote[colon+1:]
 	} else {
 		return ""
@@ -32,7 +36,7 @@ func RepoID(remote string) string {
 		return ""
 	}
 	if port != "" {
-		host += ":" + port
+		host = net.JoinHostPort(host, port)
 	}
 	return host + "/" + path
 }

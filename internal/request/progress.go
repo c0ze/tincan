@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"unicode/utf8"
 
 	"github.com/c0ze/tincan/v2/internal/fsutil"
 )
@@ -52,6 +53,12 @@ func AppendProgress(room, id, stream string, data []byte) error {
 		n := len(data)
 		if n > 8*1024 {
 			n = 8 * 1024
+			for n > 0 && !utf8.RuneStart(data[n]) {
+				n--
+			}
+			if n == 0 {
+				n = min(len(data), 8*1024)
+			}
 		}
 		line, err := json.Marshal(Event{Stream: stream, Text: string(data[:n]), Time: time.Now().UTC()})
 		if err != nil {
@@ -124,6 +131,9 @@ func Progress(room, id string, offset int64, limit int) ([]Event, int64, error) 
 		if len(events) >= limit {
 			break
 		}
+	}
+	if len(events) == 0 && len(data) == 128*1024 {
+		return nil, offset, errors.New("progress event line exceeds 128 KiB snapshot limit")
 	}
 	return events, offset, nil
 }

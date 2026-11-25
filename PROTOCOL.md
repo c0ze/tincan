@@ -127,7 +127,7 @@ agent CLI for you so no human terminal is needed per agent; see below.
   an ordinary send — the message queues and is delivered on the recipient's
   next `recv`.
 
-**Exit codes: 0 ok, 1 error, 2 usage, 3 timeout.** Branch on these: 3 means
+**Exit codes: 0 ok, 1 error, 2 usage, 3 timeout, 4 review closed with late or unreachable members.** Branch on these: 3 means
 "nothing arrived / no reply yet", never an error.
 
 ## Presence — `status` / `ping`
@@ -329,7 +329,7 @@ are trimmed.
 The `session` field in a preset can be `persistent` or `stateless`. An omitted
 field selects persistent mode when the preset's provider is known: its
 `provider` field, or the base name of its executable (`claude`, `grok`, `agy`,
-`kimi`). So `claude-personal` running `claude` keeps its conversation. A custom
+`kimi`, `cursor-agent`). So `claude-personal` running `claude` keeps its conversation. A custom
 wrapper stays stateless unless it sets `provider`; an ad hoc `--exec` opts in
 with `--session persistent`. Persistent adapters manage output/resume flags, so
 remove conflicting `--continue`, `--resume` or session-ID flags from the

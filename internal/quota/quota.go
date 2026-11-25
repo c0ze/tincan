@@ -8,11 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"time"
+
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 )
 
 const (
@@ -50,12 +53,18 @@ type mapping struct {
 var fileRE = regexp.MustCompile(`^([a-z0-9]+)-quota(?:-([A-Za-z0-9_-]+))?\.json$`)
 
 func DefaultCacheDir() string {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
 	return filepath.Join(home, ".cache")
 }
 
 func DefaultConfigPath() string {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
 	return filepath.Join(home, ".config", "tincan", "quotas.json")
 }
 
@@ -72,10 +81,16 @@ const clockSkew = 5 * time.Minute
 
 func stamp(raw map[string]any, key string, now time.Time, maxAhead time.Duration) *time.Time {
 	v, ok := number(raw, key)
-	if !ok {
+	if !ok || math.IsNaN(v) || math.IsInf(v, 0) {
 		return nil
 	}
-	t := time.Unix(0, int64(v*float64(time.Second))).UTC()
+	minSec := float64(minTime.Unix())
+	maxSec := float64(now.Add(maxAhead).Unix())
+	if v < minSec || v > maxSec {
+		return nil
+	}
+	sec, frac := math.Modf(v)
+	t := time.Unix(int64(sec), int64(frac*float64(time.Second))).UTC()
 	if t.Before(minTime) || t.After(now.Add(maxAhead)) {
 		return nil
 	}
@@ -140,11 +155,12 @@ func Parse(id string, data []byte, now time.Time) (Entry, error) {
 }
 
 func state(e Entry, now time.Time) string {
-	// A failure at or after the last success wins (equal timestamps = failed).
-	if e.Error != "" && e.AttemptedAt != nil && (e.FetchedAt == nil || !e.AttemptedAt.Before(*e.FetchedAt)) {
+	// A failure at or after the last success wins (equal timestamps = failed),
+	// as does an error with no successful reading at all.
+	if e.Error != "" && (e.FetchedAt == nil || (e.AttemptedAt != nil && !e.AttemptedAt.Before(*e.FetchedAt))) {
 		return StateError
 	}
-	if e.FetchedAt == nil || e.Percent == nil {
+	if e.FetchedAt == nil || (e.Percent == nil && e.ShortPercent == nil) {
 		return StateUnknown
 	}
 	if now.Sub(*e.FetchedAt) > StaleAfter {
@@ -158,6 +174,9 @@ func state(e Entry, now time.Time) string {
 
 // Files maps entry IDs to cache files in dir (regular files ≤ 64 KiB only).
 func Files(dir string) (map[string]string, error) {
+	if dir == "" {
+		return map[string]string{}, nil
+	}
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]string{}, nil
@@ -196,15 +215,21 @@ func Load(cacheDir, configPath string, now time.Time) ([]Entry, error) {
 	}
 	maps := map[string]mapping{}
 	var configErr error
-	if data, err := os.ReadFile(configPath); err == nil {
-		if err := json.Unmarshal(data, &maps); err != nil {
+	if configPath != "" {
+		data, err := fsutil.ReadFile(configPath, maxFile)
+		switch {
+		case err == nil:
+			if err := json.Unmarshal(data, &maps); err != nil {
+				configErr = fmt.Errorf("%s: %w", configPath, err)
+				maps = map[string]mapping{}
+			}
+		case !errors.Is(err, os.ErrNotExist):
 			configErr = fmt.Errorf("%s: %w", configPath, err)
-			maps = map[string]mapping{}
 		}
 	}
 	out := []Entry{}
 	for id, path := range files {
-		data, err := os.ReadFile(path)
+		data, err := fsutil.ReadFile(path, maxFile)
 		if err != nil {
 			continue
 		}
@@ -231,6 +256,11 @@ func Load(cacheDir, configPath string, now time.Time) ([]Entry, error) {
 		}
 		out = append(out, e)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Label != out[j].Label {
+			return out[i].Label < out[j].Label
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out, configErr
 }

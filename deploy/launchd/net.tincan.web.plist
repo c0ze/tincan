@@ -15,10 +15,15 @@
     <string>web</string>
     <string>--listen</string><string>127.0.0.1:7788</string>
     <string>--public-path</string><string>/tincan</string>
-    <string>--peer</string><string>cachyos=https://cachyos.brill-decibel.ts.net/tincan/</string>
+    <string>--peer</string><string>cachyos=https://cachyos.&lt;your-tailnet&gt;.ts.net/tincan/</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>ExitTimeOut</key><integer>30</integer>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key><integer>8192</integer>
+  </dict>
   <key>StandardErrorPath</key><string>/Users/USER/Library/Logs/tincan-web.log</string>
 </dict>
 </plist>

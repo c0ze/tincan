@@ -36,6 +36,9 @@ func (s *SessionRun) Reply(spec RunSpec, res Result) (string, error) {
 			return "", fmt.Errorf("provider failed (exit=%d): %s", res.ExitCode, s.parser.failure)
 		}
 	}
+	if s.Preset.Session == "persistent" && s.parser.err != nil {
+		return "", s.parser.err
+	}
 	if res.Err != nil || res.ExitCode != 0 || res.Killed || res.TimedOut {
 		// Avoid returning captured stdout inventories inside an error result.
 		if s.Preset.Session == "persistent" {
@@ -44,7 +47,7 @@ func (s *SessionRun) Reply(spec RunSpec, res Result) (string, error) {
 		return PostProcess(s.record.Provider, ReplyBody(spec, res)), nil
 	}
 	if s.Preset.Session != "persistent" {
-		body := ReplyBody(spec, res)
+		body := PostProcess(s.record.Provider, ReplyBody(spec, res))
 		if strings.TrimSpace(body) == "" {
 			return "", errors.New("agent returned an empty reply")
 		}
@@ -372,7 +375,14 @@ func (p *sessionParser) event(line []byte) (string, error) {
 			}
 			p.final = true
 		}
-		if fieldString(m, "role") == "assistant" {
+		switch fieldString(m, "role") {
+		case "tool":
+			// Commentary before tool execution is not the final answer.
+			p.body, p.stale = p.body[:0], false
+		case "assistant":
+			if len(m["tool_calls"]) > 0 {
+				p.body, p.stale = p.body[:0], false
+			}
 			text := textContent(m["content"])
 			if text != "" {
 				return text, p.setBody(text, false)

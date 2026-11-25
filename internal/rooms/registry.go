@@ -144,17 +144,21 @@ func TooBroad(dir string) bool {
 }
 
 // excluded reports paths never registered: phase 2 review workspaces under
-// <state dir>/reviews/. The state dir is resolved the same way Open resolves
-// its registry path (longest existing prefix through EvalSymlinks), so a
-// state dir that does not exist yet under a symlinked ancestor still compares
-// canonically against the already-canonical paths Touch/Add/Import produce.
-func excluded(path string) bool {
-	d := StateDir()
-	if d == "" {
-		return false
+// <registry dir>/reviews/ or <StateDir>/reviews/. Because Registry.path and
+// StateDir() both resolve their longest existing ancestor, comparing against
+// both stays canonical for default and custom registries alike.
+func (r *Registry) excluded(path string) bool {
+	if r != nil && r.path != "" && underReviews(filepath.Dir(r.path), path) {
+		return true
 	}
-	d = resolveAncestor(d)
-	rel, err := filepath.Rel(filepath.Join(d, "reviews"), path)
+	if d := StateDir(); d != "" && underReviews(d, path) {
+		return true
+	}
+	return false
+}
+
+func underReviews(base, path string) bool {
+	rel, err := filepath.Rel(filepath.Join(base, "reviews"), path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
@@ -216,8 +220,8 @@ func (r *Registry) update(fn func(*file) error) error {
 // upsert is the single insertion point, so the exclusions (review
 // workspaces, and the home directory, its ancestors and filesystem roots)
 // apply to Touch, Add and Import alike. Add reports both as explicit errors.
-func upsert(f *file, path string, used time.Time) {
-	if excluded(path) || TooBroad(path) {
+func (r *Registry) upsert(f *file, path string, used time.Time) {
+	if r.excluded(path) || TooBroad(path) {
 		return
 	}
 	id := ID(path)
@@ -240,7 +244,7 @@ func (r *Registry) Touch(room string) error {
 	if err != nil {
 		return err
 	}
-	return r.update(func(f *file) error { upsert(f, path, time.Now().UTC()); return nil })
+	return r.update(func(f *file) error { r.upsert(f, path, time.Now().UTC()); return nil })
 }
 
 func (r *Registry) Add(dir string) (Room, error) {
@@ -258,13 +262,13 @@ func (r *Registry) Add(dir string) (Room, error) {
 	if TooBroad(path) {
 		return Room{}, fmt.Errorf("%s is the home directory, an ancestor of it, or a filesystem root", path)
 	}
-	if excluded(path) {
+	if r.excluded(path) {
 		return Room{}, fmt.Errorf("%s is a review workspace, not a room", path)
 	}
 	if r.path == "" {
 		return Room{}, errors.New("no state directory for the room registry")
 	}
-	if err := r.update(func(f *file) error { upsert(f, path, time.Now().UTC()); return nil }); err != nil {
+	if err := r.update(func(f *file) error { r.upsert(f, path, time.Now().UTC()); return nil }); err != nil {
 		return Room{}, err
 	}
 	got, _, err := r.Get(ID(path))
@@ -366,7 +370,7 @@ func (r *Registry) Import(dirs []string, depth int) (int, error) {
 			if info != nil {
 				used = info.ModTime().UTC()
 			}
-			upsert(f, p, used)
+			r.upsert(f, p, used)
 			if len(f.Rooms) > before {
 				added++
 			}

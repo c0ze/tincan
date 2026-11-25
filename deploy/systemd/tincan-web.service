@@ -6,7 +6,8 @@ After=network-online.target
 [Service]
 # Add --committees-from macmini to keep committee definitions on the Mac
 # (see docs/web.md "Committees"); without it this machine is its own hub.
-ExecStart=%h/.local/bin/tincan web --public-path /tincan --peer macmini=https://macmini.brill-decibel.ts.net/tincan/
+UMask=0077
+ExecStart=%h/.local/bin/tincan web --public-path /tincan --peer macmini=https://macmini.<your-tailnet>.ts.net/tincan/
 Restart=on-failure
 RestartSec=5
 

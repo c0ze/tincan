@@ -252,3 +252,69 @@ func TestListStatesSkipsTempAndCorruptFiles(t *testing.T) {
 		t.Fatalf("ListStates on a room without hosts dir = %v, %v", empty, err)
 	}
 }
+
+func TestControlCallRejectsNonLoopbackOrURLInjection(t *testing.T) {
+	for _, addr := range []string{
+		"",
+		"evil.example:80",
+		"127.0.0.1:80@evil.example",
+		"127.0.0.1:0",
+		"127.0.0.1:80/extra",
+		"[::1]:8080",
+	} {
+		st := State{ControlAddress: addr, ControlToken: "tok"}
+		if err := st.controlCall(context.Background(), "/health"); err == nil {
+			t.Errorf("controlCall(%q) succeeded, want error", addr)
+		}
+	}
+}
+
+func TestStateMatchesUsesConfigHashWithoutPersistingEnv(t *testing.T) {
+	p := Preset{
+		Exec: []string{"tool", "-p", "{body}"},
+		Env:  map[string]string{"API_SECRET": "s3cr3t"},
+	}
+	if err := p.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	st := State{
+		PID:        os.Getpid(),
+		Preset:     "custom",
+		Exec:       p.Exec,
+		ConfigHash: presetHash(p),
+	}
+	room := t.TempDir()
+	if err := WriteState(room, "agent", st); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(StatePath(room, "agent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"API_SECRET", "s3cr3t"} {
+		if bytesContains(raw, secret) {
+			t.Fatalf("state file leaked %q: %s", secret, raw)
+		}
+	}
+	got, ok, err := ReadState(room, "agent")
+	if err != nil || !ok {
+		t.Fatalf("ReadState = %+v, %v, %v", got, ok, err)
+	}
+	if _, err := existingResult(got, UpOptions{Name: "agent", Label: "custom", Preset: p}); err != nil {
+		t.Fatalf("existingResult rejected identical preset: %v", err)
+	}
+	p2 := p
+	p2.Env = map[string]string{"API_SECRET": "other"}
+	if _, err := existingResult(got, UpOptions{Name: "agent", Label: "custom", Preset: p2}); err == nil {
+		t.Fatal("existingResult accepted changed env")
+	}
+}
+
+func bytesContains(b []byte, sub string) bool {
+	for i := 0; i+len(sub) <= len(b); i++ {
+		if string(b[i:i+len(sub)]) == sub {
+			return true
+		}
+	}
+	return false
+}

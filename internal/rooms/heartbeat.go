@@ -52,7 +52,7 @@ func ReadHeartbeat(stateDir string) (Heartbeat, error) {
 // still this process's (a newer daemon may have replaced it).
 func RemoveHeartbeat(stateDir string, pid int) error {
 	hb, err := ReadHeartbeat(stateDir)
-	if errors.Is(err, os.ErrNotExist) || (err == nil && hb.PID != pid) {
+	if err != nil || hb.PID != pid {
 		return nil
 	}
 	if err := os.Remove(HeartbeatPath(stateDir)); err != nil && !errors.Is(err, os.ErrNotExist) {

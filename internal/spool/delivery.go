@@ -19,13 +19,14 @@ import (
 // evidence across process crashes. This is not an exactly-once side-effect
 // guarantee: a crash after an external effect can leave its outcome uncertain.
 type Delivery struct {
-	Envelope *envelope.Envelope
-	spool    *Spool
-	name     string
-	filename string
-	dir      string
-	mu       sync.Mutex
-	finished bool
+	Envelope  *envelope.Envelope
+	spool     *Spool
+	name      string
+	filename  string
+	dir       string
+	mu        sync.Mutex
+	committed bool
+	finished  bool
 }
 
 func (s *Spool) inFlightDir(name string) string { return filepath.Join(s.root, "inflight", name) }
@@ -46,29 +47,35 @@ func (d *Delivery) Ack(logConsumed bool) error {
 	}
 	defer lock.Close()
 	if err := fsutil.CheckDir(d.dir); err != nil {
+		if d.committed && os.IsNotExist(err) {
+			d.finished = true
+			return nil
+		}
 		return err
 	}
-	if err := d.spool.quarantineQueuedDuplicate(d.name, d.filename); err != nil {
-		return err
-	}
-	if logConsumed {
-		if err := fsutil.MkdirPrivate(d.spool.logDir()); err != nil {
+	if !d.committed {
+		if err := d.spool.quarantineQueuedDuplicate(d.name, d.filename); err != nil {
 			return err
 		}
-		logPath := filepath.Join(d.spool.logDir(), envelope.NewID()+"-"+d.filename)
-		if err := retryClaimOp(func() error { return os.Rename(d.path(), logPath) }); err != nil {
-			return err
+		if logConsumed {
+			if err := fsutil.MkdirPrivate(d.spool.logDir()); err != nil {
+				return err
+			}
+			logPath := filepath.Join(d.spool.logDir(), envelope.NewID()+"-"+d.filename)
+			if err := retryClaimOp(func() error { return os.Rename(d.path(), logPath) }); err != nil {
+				return err
+			}
+			d.committed = true
+			stampMoved(logPath)
+			if err := fsutil.SyncDir(d.spool.logDir()); err != nil {
+				return err
+			}
+		} else {
+			if err := retryClaimOp(func() error { return os.Remove(d.path()) }); err != nil {
+				return err
+			}
+			d.committed = true
 		}
-		d.finished = true
-		stampMoved(logPath)
-		if err := fsutil.SyncDir(d.spool.logDir()); err != nil {
-			return err
-		}
-	} else {
-		if err := retryClaimOp(func() error { return os.Remove(d.path()) }); err != nil {
-			return err
-		}
-		d.finished = true
 	}
 	if err := d.spool.clearOwner(d.name, d.filename); err != nil {
 		return err
@@ -76,9 +83,10 @@ func (d *Delivery) Ack(logConsumed bool) error {
 	if err := fsutil.SyncDir(d.dir); err != nil {
 		return err
 	}
-	if err := os.Remove(d.dir); err != nil {
+	if err := retryClaimOp(func() error { return os.Remove(d.dir) }); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	d.finished = true
 	return fsutil.SyncDir(d.spool.inFlightDir(d.name))
 }
 
@@ -103,41 +111,48 @@ func (d *Delivery) Nack() error {
 // nackLocked is Nack for a caller that holds the transport lock.
 func (d *Delivery) nackLocked() error {
 	if err := fsutil.CheckDir(d.dir); err != nil {
+		if d.committed && os.IsNotExist(err) {
+			d.finished = true
+			return nil
+		}
 		return err
 	}
-	inbox := d.spool.InboxDir(d.name)
-	if err := fsutil.MkdirPrivate(inbox); err != nil {
-		return err
-	}
-	dest := filepath.Join(inbox, d.filename)
-	// Publish without replacement. The gate prevents receivers from taking
-	// this link until the claim is removed. Recovery quarantines any queued
-	// duplicate left by a crash in this interval, preserving uncertain work.
-	if err := os.Link(d.path(), dest); err != nil {
-		// A retry after a partial Nack may already have published this inode.
-		claimInfo, claimErr := os.Lstat(d.path())
-		queuedInfo, queuedErr := os.Lstat(dest)
-		if claimErr != nil || queuedErr != nil || !claimInfo.Mode().IsRegular() ||
-			!queuedInfo.Mode().IsRegular() || !os.SameFile(claimInfo, queuedInfo) {
+	if !d.committed {
+		inbox := d.spool.InboxDir(d.name)
+		if err := fsutil.MkdirPrivate(inbox); err != nil {
 			return err
 		}
+		dest := filepath.Join(inbox, d.filename)
+		// Publish without replacement. The gate prevents receivers from taking
+		// this link until the claim is removed. Recovery quarantines any queued
+		// duplicate left by a crash in this interval, preserving uncertain work.
+		if err := os.Link(d.path(), dest); err != nil {
+			// A retry after a partial Nack may already have published this inode.
+			claimInfo, claimErr := os.Lstat(d.path())
+			queuedInfo, queuedErr := os.Lstat(dest)
+			if claimErr != nil || queuedErr != nil || !claimInfo.Mode().IsRegular() ||
+				!queuedInfo.Mode().IsRegular() || !os.SameFile(claimInfo, queuedInfo) {
+				return err
+			}
+		}
+		if err := fsutil.SyncDir(inbox); err != nil {
+			return err
+		}
+		if err := retryClaimOp(func() error { return os.Remove(d.path()) }); err != nil {
+			return err
+		}
+		d.committed = true
 	}
-	if err := fsutil.SyncDir(inbox); err != nil {
-		return err
-	}
-	if err := retryClaimOp(func() error { return os.Remove(d.path()) }); err != nil {
-		return err
-	}
-	d.finished = true
 	if err := d.spool.clearOwner(d.name, d.filename); err != nil {
 		return err
 	}
 	if err := fsutil.SyncDir(d.dir); err != nil {
 		return err
 	}
-	if err := os.Remove(d.dir); err != nil {
+	if err := retryClaimOp(func() error { return os.Remove(d.dir) }); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	d.finished = true
 	return fsutil.SyncDir(d.spool.inFlightDir(d.name))
 }
 
@@ -168,12 +183,6 @@ func (s *Spool) TryClaim(ctx context.Context, name string) (*Delivery, bool, err
 	if err := s.ensurePrivateRoot(); err != nil {
 		return nil, false, err
 	}
-	if err := fsutil.MkdirPrivate(s.InboxDir(name)); err != nil {
-		return nil, false, err
-	}
-	if err := s.checkCaseAlias(name); err != nil {
-		return nil, false, err
-	}
 	lock, err := filelock.Try(filepath.Join(s.root, "transport.lock"))
 	if errors.Is(err, filelock.ErrLocked) {
 		return nil, false, nil
@@ -182,6 +191,9 @@ func (s *Spool) TryClaim(ctx context.Context, name string) (*Delivery, bool, err
 		return nil, false, err
 	}
 	defer lock.Close()
+	if err := s.checkCaseAlias(name); err != nil {
+		return nil, false, err
+	}
 	return s.claimOldestLocked(ctx, name, false)
 }
 
@@ -200,6 +212,9 @@ func (s *Spool) claimOldestLocked(ctx context.Context, name string, owned bool) 
 	entries, err := os.ReadDir(inbox) // sorted by filename, hence timestamp
 	if err != nil {
 		return nil, false, err
+	}
+	if len(entries) == 0 {
+		return nil, false, nil
 	}
 	flight := s.inFlightDir(name)
 	if err := fsutil.MkdirPrivate(flight); err != nil {
@@ -380,7 +395,7 @@ func (s *Spool) discardGate(name, filename string, readErr error) error {
 // Malformed claims are skipped; RecoverInFlight can quarantine them once no
 // active owner remains.
 func (s *Spool) ListInFlight(name string) ([]*Delivery, error) {
-	return s.listInFlight(name, false)
+	return s.listInFlight(context.Background(), name, false, true)
 }
 
 // RecoverInFlight is for startup after acquiring the exclusive listener lock.
@@ -390,10 +405,16 @@ func (s *Spool) ListInFlight(name string) ([]*Delivery, error) {
 // Interactive claims (ClaimInteractive) whose owner is still running are left
 // to that owner; those of a dead owner are taken over and no longer requeued.
 func (s *Spool) RecoverInFlight(name string) ([]*Delivery, error) {
-	return s.listInFlight(name, true)
+	return s.listInFlight(context.Background(), name, true, true)
 }
 
-func (s *Spool) listInFlight(name string, recoverEmpty bool) ([]*Delivery, error) {
+// TryRecoverInFlight is RecoverInFlight without waiting for transport.lock;
+// returns filelock.ErrLocked when another transition holds the lock.
+func (s *Spool) TryRecoverInFlight(name string) ([]*Delivery, error) {
+	return s.listInFlight(context.Background(), name, true, false)
+}
+
+func (s *Spool) listInFlight(ctx context.Context, name string, recoverEmpty, wait bool) ([]*Delivery, error) {
 	if err := validName(name); err != nil {
 		return nil, err
 	}
@@ -404,13 +425,28 @@ func (s *Spool) listInFlight(name string, recoverEmpty bool) ([]*Delivery, error
 		}
 		return nil, err
 	}
-	lock, err := s.lockTransport(context.Background())
+	var lock *filelock.Lock
+	var err error
+	if wait {
+		lock, err = s.lockTransport(ctx)
+	} else {
+		lock, err = filelock.Try(filepath.Join(s.root, "transport.lock"))
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer lock.Close()
+	if err := fsutil.CheckDir(dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	var deliveries []*Delivery

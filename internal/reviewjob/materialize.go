@@ -9,10 +9,22 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/c0ze/tincan/v2/internal/packet"
 	"github.com/c0ze/tincan/v2/internal/rooms"
 )
+
+func cutUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	n := max
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
 
 // writeFileExclusive creates root/rel as a new 0600 regular file. Every
 // directory on the way is created here or must be a real directory (never a
@@ -78,7 +90,7 @@ func materializePacket(ws string, p *packet.Packet, reason string) (string, erro
 		note += " The packet is partial: the full patch was too large."
 	}
 	if len(note) > 4096 {
-		note = note[:4096]
+		note = cutUTF8(note, 4096)
 	}
 	return note, nil
 }
@@ -205,7 +217,7 @@ func materializeCheckout(ctx context.Context, ws string, p *packet.Packet, reg *
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return "", "", err
 	}
-	if _, err := hermetic(parent).Run(ctx, nil, "clone", "-q", "--no-checkout", "--shared", chosen, ws); err != nil {
+	if _, err := hermetic(parent).Run(ctx, nil, "clone", "-q", "--no-checkout", "--shared", "--", chosen, ws); err != nil {
 		return fail("clone", err)
 	}
 	g := hermetic(ws)
@@ -255,7 +267,7 @@ func materializeCheckout(ctx context.Context, ws string, p *packet.Packet, reg *
 			return fail("patch", err)
 		}
 		defer os.Remove(patchFile)
-		numstat, err := g.Run(ctx, nil, "apply", "--numstat", "-z", patchFile)
+		numstat, err := g.Run(ctx, nil, "apply", "--numstat", "-z", "--", patchFile)
 		if err != nil {
 			return fail("patch check", err)
 		}
@@ -266,7 +278,7 @@ func materializeCheckout(ctx context.Context, ws string, p *packet.Packet, reg *
 				}
 			}
 		}
-		if _, err := g.Run(ctx, nil, "-c", "core.symlinks=false", "apply", "--index", "--binary", patchFile); err != nil {
+		if _, err := g.Run(ctx, nil, "-c", "core.symlinks=false", "apply", "--index", "--binary", "--", patchFile); err != nil {
 			return fail("apply", err)
 		}
 		// --numstat shows neither modes nor rename sources: check what was

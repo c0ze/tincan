@@ -58,7 +58,10 @@ func Poll(ctx context.Context, room, id string) (Record, error) {
 	if err != nil {
 		return r, err
 	}
-	claims, err := sp.RecoverInFlight(channel)
+	claims, err := sp.TryRecoverInFlight(channel)
+	if errors.Is(err, filelock.ErrLocked) {
+		return Get(room, id)
+	}
 	if err != nil {
 		return r, err
 	}
@@ -116,7 +119,7 @@ func reconcileIdleInteractivePublication(ctx context.Context, room string, r Rec
 	if err != nil {
 		return r, err
 	}
-	if presence.Queued > 0 {
+	if presence.Queued > 0 || presence.InFlight > 0 {
 		return r, nil
 	}
 	owner, err := filelock.Try(filepath.Join(Dir(room), "locks", r.ID+".lock"))

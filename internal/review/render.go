@@ -4,10 +4,22 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/c0ze/tincan/v2/internal/committee"
 	"github.com/c0ze/tincan/v2/internal/packet"
 )
+
+func cutUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	n := max
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
 
 const (
 	MaxPrompt = 128 << 10
@@ -44,7 +56,7 @@ func BuildPrompt(c committee.Committee, member string, p *packet.Packet) string 
 	b.WriteString("\nQuestion:\n" + p.Question + "\n")
 	s := b.String()
 	if len(s) > MaxPrompt {
-		s = s[:MaxPrompt-32] + "\n[prompt truncated]\n"
+		s = cutUTF8(s, MaxPrompt-32) + "\n[prompt truncated]\n"
 	}
 	return s
 }
@@ -102,14 +114,14 @@ func RenderBundle(in Input, st State, results map[int]string) []byte {
 		if cm.Included {
 			r := results[cm.Index]
 			if len(r) > per {
-				r = r[:per] + fmt.Sprintf("\n\n[truncated; full result in results/%d.md]", cm.Index)
+				r = cutUTF8(r, per) + fmt.Sprintf("\n\n[truncated; full result in results/%d.md]", cm.Index)
 			}
 			b.WriteString("\n" + r + "\n")
 		}
 	}
 	out := b.String()
 	if len(out) > MaxBundle {
-		out = out[:MaxBundle-40] + "\n[bundle truncated]\n"
+		out = cutUTF8(out, MaxBundle-40) + "\n[bundle truncated]\n"
 	}
 	return []byte(out)
 }

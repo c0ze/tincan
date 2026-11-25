@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+	"unicode/utf8"
 
 	"github.com/c0ze/tincan/v2/internal/buildinfo"
 	"github.com/c0ze/tincan/v2/internal/dispatch"
@@ -61,7 +62,7 @@ func New(o Options) (*mcp.Server, error) {
 	add(server, "tincan_status", "Read listener status or inspect one durable request without waiting. Owner credentials and command arguments are never exposed.", true, true, false, s.statusTool)
 	add(server, "tincan_cancel", "Cancel one queued or running request. Earlier file or external changes are not undone. Wait on the same request_id for acknowledgement.", false, true, false, s.cancelTool)
 	add(server, "tincan_stop", "Stop a listener and interrupt its current request. Queued requests remain available for a future launch.", false, true, false, s.stopTool)
-	add(server, "tincan_review", "Ask a committee (a named group of agents on this and other machines) to review the current change, or answer a question. Returns a review_id immediately; members run in parallel. Needs tincan web running on this machine.", false, true, true, s.reviewTool)
+	add(server, "tincan_review", "Ask a committee (a named group of agents on this and other machines) to review the current change, or answer a question. Returns a review_id immediately; members run in parallel. Needs tincan web running on this machine.", false, false, true, s.reviewTool)
 	add(server, "tincan_review_wait", "Wait up to 30 seconds for a committee review; returns member states and, once it closes, the bundle of every member's review. Keep waiting while it is running; synthesize the bundle yourself.", true, true, false, s.reviewWaitTool)
 	add(server, "tincan_review_cancel", "Cancel a committee review; members still running are stopped.", false, true, false, s.reviewCancelTool)
 	add(server, "tincan_reset", "Stop a listener, interrupt any running request, and clear its saved conversation. Its next launch starts a new conversation.", false, true, false, s.resetTool)
@@ -190,6 +191,9 @@ func (s *service) waitTool(ctx context.Context, req *mcp.CallToolRequest, in Wai
 	if in.TimeoutSeconds < 0 || in.TimeoutSeconds > 30 {
 		return nil, RequestView{}, fmt.Errorf("timeout_seconds must be between 0 and 30")
 	}
+	if in.Cursor < 0 || in.Cursor > request.MaxProgressBytes {
+		return nil, RequestView{}, fmt.Errorf("invalid progress cursor")
+	}
 	r, err := s.waitWithProgress(ctx, req, in)
 	if err != nil {
 		return nil, RequestView{}, err
@@ -197,6 +201,17 @@ func (s *service) waitTool(ctx context.Context, req *mcp.CallToolRequest, in Wai
 	out := view(r)
 	out.Events, out.NextCursor, err = request.Progress(s.Room, in.RequestID, in.Cursor, 100)
 	return nil, out, err
+}
+
+func cutUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	n := max
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func (s *service) waitWithProgress(ctx context.Context, req *mcp.CallToolRequest, in WaitInput) (request.Record, error) {
@@ -218,10 +233,7 @@ func (s *service) waitWithProgress(ctx context.Context, req *mcp.CallToolRequest
 			return r, err
 		}
 		if len(events) > 0 {
-			message := events[len(events)-1].Text
-			if len(message) > 4096 {
-				message = message[:4096]
-			}
+			message := cutUTF8(events[len(events)-1].Text, 4096)
 			if err := req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{ProgressToken: req.Params.GetProgressToken(), Progress: float64(next), Message: message}); err != nil {
 				return r, err
 			}

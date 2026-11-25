@@ -198,14 +198,17 @@ func TestFailedRefreshIsQuiet(t *testing.T) {
 	state, _ := filepath.EvalSymlinks(t.TempDir())
 	local.cfg.StateDir, local.cfg.CommitteesFrom = state, "macmini"
 	peerHTTP.Close()
-	local.refreshCommittees(true)
+	local.refreshCommittees(context.Background(), true)
 	first, err := os.ReadFile(committee.CachePath(state))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ch, unsubscribe := local.hub.subscribe()
+	ch, unsubscribe, ok := local.hub.subscribe()
+	if !ok {
+		t.Fatal("subscribe failed")
+	}
 	defer unsubscribe()
-	local.refreshCommittees(true)
+	local.refreshCommittees(context.Background(), true)
 	second, _ := os.ReadFile(committee.CachePath(state))
 	if string(first) != string(second) {
 		t.Fatalf("identical failure rewrote the cache:\n%s\n%s", first, second)

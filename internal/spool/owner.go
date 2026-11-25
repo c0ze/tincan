@@ -41,6 +41,8 @@ const (
 	ownerDead
 )
 
+const zombieStart = "zombie"
+
 // ownerLiveness classifies the process that recorded pid and start at since.
 // A PID with no live process is dead. A recorded start identity must match
 // the PID's current process exactly. A legacy record without one is alive
@@ -53,6 +55,9 @@ func ownerLiveness(pid int, start string, since time.Time) liveness {
 	current, at, ok := processStart(pid)
 	if !ok {
 		return ownerAlive
+	}
+	if current == zombieStart {
+		return ownerDead
 	}
 	if start != "" {
 		if current != start {

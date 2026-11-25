@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 )
 
 // Decision is a machine-local answer to "is this preset's quota
@@ -24,7 +26,10 @@ type Decision struct {
 func Decide(cacheDir, configPath, preset string, now time.Time) Decision {
 	no := func(reason string) Decision { return Decision{Reason: reason} }
 	maps := map[string]mapping{}
-	data, err := os.ReadFile(configPath)
+	if configPath == "" {
+		return no("no quota entry maps this preset (no quotas.json)")
+	}
+	data, err := fsutil.ReadFile(configPath, maxFile)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return no("no quota entry maps this preset (no quotas.json)")
@@ -64,7 +69,7 @@ func Decide(cacheDir, configPath, preset string, now time.Time) Decision {
 	if !ok {
 		return no("no cached quota reading for " + id)
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := fsutil.ReadFile(path, maxFile)
 	if err != nil {
 		return no("quota cache unreadable: " + err.Error())
 	}

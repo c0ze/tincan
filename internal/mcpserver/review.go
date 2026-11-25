@@ -2,10 +2,12 @@ package mcpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
 
+	"github.com/c0ze/tincan/v2/internal/fsutil"
 	"github.com/c0ze/tincan/v2/internal/review"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -59,6 +61,10 @@ func (s *service) reviewTool(ctx context.Context, req *mcp.CallToolRequest, in R
 	return nil, reviewOut(st), nil
 }
 
+type ReviewCancelInput struct {
+	ReviewID string `json:"review_id"`
+}
+
 func (s *service) reviewWaitTool(ctx context.Context, req *mcp.CallToolRequest, in ReviewWaitInput) (*mcp.CallToolResult, ReviewWaitOutput, error) {
 	if in.TimeoutSeconds < 0 || in.TimeoutSeconds > 30 {
 		return nil, ReviewWaitOutput{}, fmt.Errorf("timeout_seconds must be between 0 and 30")
@@ -72,11 +78,18 @@ func (s *service) reviewWaitTool(ctx context.Context, req *mcp.CallToolRequest, 
 		closed := st.Status == "closed" || st.Status == "cancelled"
 		if closed || !time.Now().Before(deadline) {
 			out := ReviewWaitOutput{ReviewOutput: reviewOut(st), Closed: closed, Settled: st.Settled}
-			if b, ok, _ := review.ReadBundle(s.Room, in.ReviewID); ok {
-				if len(b) <= 256<<10 {
-					out.Bundle = b
-				} else {
+			if closed {
+				b, ok, err := review.ReadBundle(s.Room, in.ReviewID)
+				if errors.Is(err, fsutil.ErrTooLarge) {
 					out.BundlePath = filepath.Join(review.Dir(s.Room, in.ReviewID), "bundle.md")
+				} else if err != nil {
+					return nil, ReviewWaitOutput{}, err
+				} else if ok {
+					if len(b) <= 256<<10 {
+						out.Bundle = b
+					} else {
+						out.BundlePath = filepath.Join(review.Dir(s.Room, in.ReviewID), "bundle.md")
+					}
 				}
 			}
 			return nil, out, nil
@@ -89,7 +102,7 @@ func (s *service) reviewWaitTool(ctx context.Context, req *mcp.CallToolRequest, 
 	}
 }
 
-func (s *service) reviewCancelTool(ctx context.Context, req *mcp.CallToolRequest, in ReviewWaitInput) (*mcp.CallToolResult, ReviewOutput, error) {
+func (s *service) reviewCancelTool(ctx context.Context, req *mcp.CallToolRequest, in ReviewCancelInput) (*mcp.CallToolResult, ReviewOutput, error) {
 	st, err := review.RequestCancel(ctx, s.Room, in.ReviewID)
 	if err != nil {
 		return nil, ReviewOutput{}, err

@@ -182,13 +182,14 @@ func (c *Coordinator) reconcile(ctx context.Context, room, id string, sink Threa
 		return err
 	}
 	save := func() error { return WriteState(room, id, st) }
+	var memberErrs []error
 	for i := range st.Members {
 		if err := c.member(ctx, room, in, &st, i, save); err != nil {
-			return err
+			memberErrs = append(memberErrs, fmt.Errorf("member %s: %w", st.Members[i].Member, err))
 		}
 	}
 	if err := c.close(room, in, &st, save); err != nil {
-		return err
+		return errors.Join(append(memberErrs, err)...)
 	}
 	if _, _, ok := ThreadOrigin(in.Origin); ok && sink != nil {
 		for i := range st.Members {
@@ -201,31 +202,47 @@ func (c *Coordinator) reconcile(ctx context.Context, room, id string, sink Threa
 				continue
 			}
 			if err := sink.PostResult(ctx, in, *m, text); err != nil {
-				return err
+				return errors.Join(append(memberErrs, err)...)
 			}
 			m.Posted = true
 			if err := save(); err != nil {
-				return err
+				return errors.Join(append(memberErrs, err)...)
 			}
 		}
 		if (st.Status == "closed" || st.Status == "cancelled") && !st.ThreadDone {
 			done, err := sink.Complete(ctx, in, st)
 			if err != nil {
-				return err
+				return errors.Join(append(memberErrs, err)...)
 			}
 			if done {
 				st.ThreadDone = true
 				if err := save(); err != nil {
-					return err
+					return errors.Join(append(memberErrs, err)...)
 				}
 			}
 		}
 	}
 	if c.settled(room, in, st) {
 		st.Settled = true
-		return save()
+		c.forgetReview(st)
+		if err := save(); err != nil {
+			return errors.Join(append(memberErrs, err)...)
+		}
 	}
-	return nil
+	return errors.Join(memberErrs...)
+}
+
+func (c *Coordinator) forgetReview(st State) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.last == nil {
+		return
+	}
+	for _, m := range st.Members {
+		for _, op := range []string{"/submit", "/poll", "/cancel", "/ack"} {
+			delete(c.last, m.JobID+op)
+		}
+	}
 }
 
 func split(member string) (preset, machine string) {
@@ -303,7 +320,13 @@ func (c *Coordinator) member(ctx context.Context, room string, in Input, st *Sta
 			return nil
 		}
 		if in.Committee.SkipExhausted {
-			if d, err := c.Transport.QuotaStatus(ctx, machine, preset); err == nil && d.Exhausted {
+			d, err := c.Transport.QuotaStatus(ctx, machine, preset)
+			if err != nil {
+				if Classify(err) == "transient" {
+					noteFailure(ctx, machine, err)
+					return nil
+				}
+			} else if d.Exhausted {
 				m.State, m.Finished = "skipped", now
 				m.Note = "quota exhausted (" + d.Window + ")"
 				if d.ResetAt != nil {
@@ -325,6 +348,9 @@ func (c *Coordinator) member(ctx context.Context, room string, in Input, st *Sta
 		return c.submit(ctx, room, in, m, machine, preset, save)
 	case m.State == "submitted" || m.State == "running" || m.State == "unreachable":
 		if now.After(m.ExpiresAt.Add(collectTail)) {
+			if m.State == "unreachable" && !m.Finished.IsZero() {
+				return nil
+			}
 			if m.State != "unreachable" {
 				m.State, m.Note = "expired", "result not retrievable"
 			}
@@ -336,7 +362,18 @@ func (c *Coordinator) member(ctx context.Context, room string, in Input, st *Sta
 		}
 		js, err := c.Transport.Status(ctx, machine, m.JobID)
 		if err != nil {
-			noteFailure(ctx, machine, err)
+			switch Classify(err) {
+			case "gone":
+				m.State, m.Note, m.Finished = "expired", err.Error(), now
+				return save()
+			case "permanent":
+				if m.State != "unreachable" {
+					m.State, m.Note, m.Finished = "error", err.Error(), now
+					return save()
+				}
+			default:
+				noteFailure(ctx, machine, err)
+			}
 			return nil
 		}
 		before := *m

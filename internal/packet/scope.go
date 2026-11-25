@@ -52,7 +52,10 @@ func Resolve(ctx context.Context, dir, scope string) (Resolved, error) {
 		return r, err
 	}
 	commit := func(rev string) (string, error) {
-		return g.Out(ctx, "rev-parse", "--verify", "-q", rev+"^{commit}")
+		if rev == "" || strings.HasPrefix(rev, "-") {
+			return "", fmt.Errorf("invalid revision %q", rev)
+		}
+		return g.Out(ctx, "rev-parse", "--verify", "-q", "--end-of-options", rev+"^{commit}")
 	}
 	setBase := func(c string) error {
 		if c == "" {

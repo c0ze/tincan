@@ -206,3 +206,35 @@ func TestProxyCancellationDoesNotMarkPeerOffline(t *testing.T) {
 		t.Fatal("cancelled request marked a healthy peer offline")
 	}
 }
+
+func TestProxyStripsPeerSetCookieAndCORSHeaders(t *testing.T) {
+	peerHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "evil=1; Path=/")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer peerHTTP.Close()
+
+	qdir := t.TempDir()
+	hub, err := New(Config{
+		Owner: owner, AllowedHosts: testHosts, Machine: "cachyos",
+		Registry:    rooms.Open(filepath.Join(t.TempDir(), "rooms.json")),
+		Peers:       []Peer{{Name: "macmini", URL: peerHTTP.URL + "/"}},
+		QuotaDir:    qdir,
+		QuotaConfig: filepath.Join(qdir, "quotas.json"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := do(t, hub.Handler(), "GET", "/api/peers/macmini/rooms", "", ownerHdr())
+	if rec.Code != 200 {
+		t.Fatalf("status %d %s", rec.Code, rec.Body)
+	}
+	if got := rec.Header().Get("Set-Cookie"); got != "" {
+		t.Fatalf("peer Set-Cookie leaked: %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("peer CORS header leaked: %q", got)
+	}
+}

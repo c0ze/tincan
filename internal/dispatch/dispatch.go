@@ -40,6 +40,30 @@ func Launch(ctx context.Context, o Options, name, preset, sessionMode string) (L
 	if err := spool.ValidName(name); err != nil {
 		return LaunchResult{}, err
 	}
+	route, err := request.LockRoute(ctx, o.Room, name)
+	if err != nil {
+		return LaunchResult{}, err
+	}
+	defer route.Close()
+	if _, alive := host.Existing(ctx, o.Room, name); !alive {
+		owned, err := host.Owned(ctx, o.Room, name)
+		if err != nil {
+			return LaunchResult{}, err
+		}
+		if !owned {
+			pending, err := request.InteractivePending(ctx, o.Room, name)
+			if err != nil {
+				return LaunchResult{}, err
+			}
+			if pending {
+				return LaunchResult{}, fmt.Errorf("interactive listener %s has pending work; wait for it to finish before launching a hosted listener under the same name", name)
+			}
+		}
+	}
+	return launchUnlocked(ctx, o, name, preset, sessionMode)
+}
+
+func launchUnlocked(ctx context.Context, o Options, name, preset, sessionMode string) (LaunchResult, error) {
 	if st, alive := host.Existing(ctx, o.Room, name); alive && preset == "" {
 		if sessionMode == "" {
 			return LaunchResult{State: st, Already: true}, nil
@@ -130,7 +154,17 @@ func Send(ctx context.Context, o Options, s SendSpec) (request.Record, error) {
 	}
 	defer route.Close()
 	state, alive := host.Existing(ctx, o.Room, s.Agent)
-	interactive := alive && state.Owner == ""
+	owned := alive && state.Owner != ""
+	if !owned {
+		owned, err = host.Owned(ctx, o.Room, s.Agent)
+		if err != nil {
+			return request.Record{}, err
+		}
+		if owned {
+			alive = true
+		}
+	}
+	interactive := alive && !owned
 	if !alive {
 		interactive, err = request.InteractivePending(ctx, o.Room, s.Agent)
 		if err != nil {
@@ -155,7 +189,7 @@ func Send(ctx context.Context, o Options, s SendSpec) (request.Record, error) {
 		return r, err
 	}
 	if !r.Terminal() && !alive && !interactive {
-		if _, err := Launch(ctx, o, s.Agent, s.Preset, ""); err != nil {
+		if _, err := launchUnlocked(ctx, o, s.Agent, s.Preset, ""); err != nil {
 			return r, fmt.Errorf("request %s is saved; launch its listener or retry this same request_id: %w", r.ID, err)
 		}
 	}

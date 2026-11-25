@@ -226,3 +226,33 @@ func TestBuildPatchIgnoresUserDiffConfig(t *testing.T) {
 		t.Fatalf("patch shaped by user config:\n%q", p.Patch)
 	}
 }
+
+func TestBuildRenameAndAddAtOldPathAndSecretDirs(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "old.txt", "line1\nline2\nline3\nline4\n")
+	git("add", ".")
+	git("commit", "-qm", "base")
+
+	// Rename old.txt -> new.txt and create a brand-new file at old.txt, plus
+	// files inside secret directories that must be omitted.
+	if err := os.Rename(filepath.Join(dir, "old.txt"), filepath.Join(dir, "new.txt")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, dir, "old.txt", "replacement\n")
+	write(t, dir, ".ssh/config", "Host prod\n")
+	write(t, dir, "secrets/prod.yaml", "token: abc\n")
+
+	p, err := Build(context.Background(), dir, "uncommitted", "q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(p.Files["old.txt"]) != "replacement\n" || string(p.Files["new.txt"]) != "line1\nline2\nline3\nline4\n" {
+		t.Fatalf("rename+add files lost: %v", keys(p.Files))
+	}
+	if _, leaked := p.Files[".ssh/config"]; leaked {
+		t.Fatal(".ssh/config leaked into packet")
+	}
+	if _, leaked := p.Files["secrets/prod.yaml"]; leaked {
+		t.Fatal("secrets/prod.yaml leaked into packet")
+	}
+}

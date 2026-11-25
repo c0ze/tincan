@@ -114,7 +114,7 @@ summary + artifact pointer — keeping your context clean.
 - If a run was interrupted by a crash, inspect its status, log and workspace
   before deciding whether to submit new work. An interrupted run may have made
   changes; tincan does not automatically replay it.
-- Claude/Grok/Agy/Kimi native executable presets keep a conversation per room and
+- Claude/Grok/Agy/Kimi/Cursor native executable presets keep a conversation per room and
   listener by default. Codex/Gemini/custom commands default to stateless runs and
   need self-contained briefs. Select `--session persistent|stateless` on launch;
   MCP `tincan_reset` stops a listener and explicitly starts its next conversation

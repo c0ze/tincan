@@ -61,7 +61,10 @@ func TestTickPublishesThreadChanges(t *testing.T) {
 	s, rid := apiServer(t)
 	room, _ := s.roomByID(rid)
 	th, _ := thread.Create(room.Path, "t", "claude", "", 6)
-	ch, unsubscribe := s.hub.subscribe()
+	ch, unsubscribe, ok := s.hub.subscribe()
+	if !ok {
+		t.Fatal("subscribe failed")
+	}
 	defer unsubscribe()
 	s.tick(context.Background()) // baseline
 	drain(ch)
@@ -175,7 +178,10 @@ func TestTickRunsRoomPassesConcurrentlyAndSkipsInFlight(t *testing.T) {
 		atomic.AddInt32(&callsB, 1)
 	}
 
-	ch, unsubscribe := s.hub.subscribe()
+	ch, unsubscribe, ok := s.hub.subscribe()
+	if !ok {
+		t.Fatal("subscribe failed")
+	}
 	defer unsubscribe()
 
 	s.tick(context.Background()) // baseline scan; also starts room A's blocking pass
@@ -307,7 +313,10 @@ func TestScanPublishesCommitteesNote(t *testing.T) {
 	s := testServer(t)
 	state, _ := filepath.EvalSymlinks(t.TempDir())
 	s.cfg.StateDir = state
-	ch, unsubscribe := s.hub.subscribe()
+	ch, unsubscribe, ok := s.hub.subscribe()
+	if !ok {
+		t.Fatal("subscribe failed")
+	}
 	defer unsubscribe()
 	s.scan(nil) // baseline
 	drain(ch)

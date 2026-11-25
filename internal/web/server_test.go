@@ -95,7 +95,7 @@ func TestResponsesForbidFraming(t *testing.T) {
 		do(t, h, "GET", "/api/self", "", ownerHdr()),
 		do(t, h, "GET", "/api/self", "", nil),
 	} {
-		if got := rec.Header().Get("Content-Security-Policy"); got != "default-src 'self'; frame-ancestors 'none'" {
+		if got := rec.Header().Get("Content-Security-Policy"); got != "default-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'; frame-ancestors 'none'" {
 			t.Errorf("%d: Content-Security-Policy %q", rec.Code, got)
 		}
 		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {

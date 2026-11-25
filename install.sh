@@ -33,12 +33,45 @@ AGENTS_SKILLS_DIR="${AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
 CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
 TINCAN_BIN_DIR="${TINCAN_BIN_DIR:-$HOME/.local/bin}"
 STAGED=""
-trap 'if [ -n "$STAGED" ]; then rm -f "$STAGED"; fi' EXIT
+CLEANUP_PATHS=()
+cleanup() {
+  if [ -n "$STAGED" ]; then
+    rm -f "$STAGED"
+  fi
+  local p
+  for p in "${CLEANUP_PATHS[@]+"${CLEANUP_PATHS[@]}"}"; do
+    [ -n "$p" ] && rm -rf "$p"
+  done
+}
+trap cleanup EXIT
 DO_BIN=1
 DO_SKILLS=1
 DO_MCP=0
 FROM_RELEASE=0
 INSTALLED_BIN=""
+
+usage() {
+  cat <<'EOF'
+# tincan installer — installs the `tincan` binary and the /tell + /listen skills.
+#
+# Usage:
+#   ./install.sh                 install binary + shared and Claude skills
+#   ./install.sh --skills-only   only (re)install the skills
+#   ./install.sh --bin-only      only install the binary
+#   ./install.sh --from-release  download a prebuilt binary even if Go is present
+#   ./install.sh --mcp           also register `tincan mcp` with Claude Code/Codex
+#
+# Works from a checkout or piped from curl. Without Go, the binary is downloaded
+# from GitHub releases and verified against checksums.txt.
+#
+# Env overrides:
+#   AGENTS_SKILLS_DIR   default: ~/.agents/skills
+#   CLAUDE_SKILLS_DIR   default: ~/.claude/skills
+#   GEMINI_COMMANDS_DIR default: ~/.gemini/commands (if ~/.gemini exists)
+#   TINCAN_BIN_DIR      release binary destination, default: ~/.local/bin
+#   TINCAN_VERSION      release tag to install, default: latest
+EOF
+}
 
 for arg in "$@"; do
   case "$arg" in
@@ -46,7 +79,7 @@ for arg in "$@"; do
     --bin-only)     DO_SKILLS=0 ;;
     --from-release) FROM_RELEASE=1 ;;
     --mcp)          DO_MCP=1 ;;
-    -h|--help)      sed -n '4,21p' "$0"; exit 0 ;;
+    -h|--help)      usage; exit 0 ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
@@ -65,7 +98,11 @@ fi
 
 fetch() { # fetch <url> <dest>
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$1" -o "$2"
+    if [[ "$1" == https://* ]]; then
+      curl --proto '=https' --tlsv1.2 -fsSL "$1" -o "$2"
+    else
+      curl -fsSL "$1" -o "$2"
+    fi
   elif command -v wget >/dev/null 2>&1; then
     wget -qO "$2" "$1"
   else
@@ -87,13 +124,25 @@ latest_tag() {
     echo "$TINCAN_VERSION"
     return
   fi
-  local url
+  local url tag
   command -v curl >/dev/null 2>&1 || { echo "!! need curl to find the latest release; set TINCAN_VERSION=vX.Y.Z" >&2; return 1; }
-  url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$RELEASE_BASE/latest")" || {
-    echo "!! could not resolve the latest release; set TINCAN_VERSION=vX.Y.Z" >&2
+  if [[ "$RELEASE_BASE" == https://* ]]; then
+    url="$(curl --proto '=https' --tlsv1.2 -fsSLI -o /dev/null -w '%{url_effective}' "$RELEASE_BASE/latest")" || {
+      echo "!! could not resolve the latest release; set TINCAN_VERSION=vX.Y.Z" >&2
+      return 1
+    }
+  else
+    url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$RELEASE_BASE/latest")" || {
+      echo "!! could not resolve the latest release; set TINCAN_VERSION=vX.Y.Z" >&2
+      return 1
+    }
+  fi
+  tag="${url##*/}"
+  if ! [[ "$tag" =~ $tag_pattern ]]; then
+    echo "!! resolved release tag is not a valid version: $tag" >&2
     return 1
-  }
-  echo "${url##*/}"
+  fi
+  echo "$tag"
 }
 
 install_release() {
@@ -114,13 +163,13 @@ install_release() {
   [ "$os" = windows ] && { ext=zip; exe=tincan.exe; }
   name="tincan_${tag#v}_${os}_${arch}.${ext}"
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/tincan-release.XXXXXX")"
+  CLEANUP_PATHS+=("$tmp")
   echo ">> downloading $name ($tag)"
   fetch "$RELEASE_BASE/download/$tag/$name" "$tmp/$name"
   fetch "$RELEASE_BASE/download/$tag/checksums.txt" "$tmp/checksums.txt"
-  want="$(awk -v n="$name" '$2 == n { print $1 }' "$tmp/checksums.txt")"
+  want="$(awk -v n="$name" '{ sub(/\r$/, ""); f=$2; sub(/^\*/, "", f); if (f == n) { print $1; exit } }' "$tmp/checksums.txt")"
   got="$(sha256_of "$tmp/$name")"
   if [ -z "$want" ] || [ "$want" != "$got" ]; then
-    rm -rf "$tmp"
     echo "!! checksum mismatch for $name" >&2
     exit 1
   fi
@@ -151,8 +200,10 @@ install_go() {
     echo ">> installing tincan from GitHub"
     go install "github.com/c0ze/tincan/v2/cmd/tincan@${TINCAN_VERSION:-latest}"
   fi
-  local gobin; gobin="$(go env GOBIN)"; [ -n "$gobin" ] || gobin="$(go env GOPATH)/bin"
-  INSTALLED_BIN="$gobin/tincan"
+  local gobin goexe
+  gobin="$(go env GOBIN)"; [ -n "$gobin" ] || gobin="$(go env GOPATH)/bin"
+  goexe="$(go env GOEXE 2>/dev/null || true)"
+  INSTALLED_BIN="$gobin/tincan$goexe"
   echo ">> installed to $INSTALLED_BIN"
 }
 
@@ -212,6 +263,7 @@ remote_skills() {
   local tag tmp f
   tag="$(latest_tag)"
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/tincan-skills.XXXXXX")"
+  CLEANUP_PATHS+=("$tmp")
   for f in tell/SKILL.md listen/SKILL.md gemini/listen.toml; do
     mkdir -p "$tmp/skills/$(dirname "$f")"
     fetch "$RAW_BASE/$tag/skills/$f" "$tmp/skills/$f"

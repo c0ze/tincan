@@ -40,6 +40,7 @@ type Service struct {
 	Presets    func() (map[string]host.Preset, error)
 	Now        func() time.Time
 	Executable string
+	BaseCtx    context.Context // optional parent context for background job creation (cancelled on shutdown)
 
 	// down stops a listener; nil means host.Down (tests inject failures).
 	down func(ctx context.Context, room, name string, wait time.Duration) error
@@ -190,9 +191,14 @@ func (s *Service) create(id string) {
 	if err != nil || !ok || j.State != "creating" {
 		return
 	}
-	// Nothing about creating a job may outlive the job: a hung clone,
-	// repack or checkout is cut off at expiry and releases the lock.
-	ctx, cancel := context.WithDeadline(context.Background(), j.ExpiresAt)
+	// Nothing about creating a job may outlive the job or server shutdown: a
+	// hung clone, repack or checkout is cut off at expiry/shutdown and releases
+	// the lock.
+	base := s.BaseCtx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithDeadline(base, j.ExpiresAt)
 	defer cancel()
 	// A cancel recorded meanwhile (Cancel does not wait for this lock)
 	// cuts materializing short and refuses the launch.
@@ -292,6 +298,9 @@ func (s *Service) create(id string) {
 			st.Save(j)
 			return
 		} else if !errors.Is(err, os.ErrNotExist) {
+			if s.now().After(j.ExpiresAt) {
+				fail("unreadable request record after expiry: " + err.Error())
+			}
 			return // unreadable, not absent: never restart over it; retried next pass
 		}
 		os.RemoveAll(j.Workspace)
@@ -553,7 +562,7 @@ func importRequest(j *Job, r request.Record) {
 	}
 	res := r.Result
 	if len(res) > MaxResult {
-		res = res[:MaxResult] + "\n[truncated]"
+		res = cutUTF8(res, MaxResult) + "\n[truncated]"
 	}
 	switch {
 	case r.Status == "completed" && !strings.HasPrefix(r.Result, "ERROR"):
@@ -586,10 +595,13 @@ func (s *Service) refresh(j *Job) bool {
 // Status returns the job, importing a finished result when the lock is free;
 // while creation holds the lock it returns the stored record.
 func (s *Service) Status(id string) (Job, error) {
+	if err := validID(id); err != nil {
+		return Job{}, invalid(err.Error())
+	}
 	st := s.store()
 	j, ok, err := st.Get(id)
 	if err != nil {
-		return j, invalid(err.Error())
+		return j, err
 	}
 	if !ok {
 		return j, notFound("no such job")
@@ -607,10 +619,13 @@ func (s *Service) Status(id string) (Job, error) {
 
 // Ack records that the requester has the result; cleanup may follow.
 func (s *Service) Ack(ctx context.Context, id string) (Job, error) {
+	if err := validID(id); err != nil {
+		return Job{}, invalid(err.Error())
+	}
 	st := s.store()
 	lock, err := st.Lock(ctx, id)
 	if err != nil {
-		return Job{}, invalid(err.Error())
+		return Job{}, err
 	}
 	defer lock.Close()
 	j, ok, err := st.Get(id)
@@ -634,6 +649,9 @@ func (s *Service) Ack(ctx context.Context, id string) (Job, error) {
 // another operation (creation) holds the job lock, the cancel is recorded for
 // it to honour before launch and is not acknowledged yet.
 func (s *Service) Cancel(ctx context.Context, id string, expiresAt time.Time) (Job, bool, error) {
+	if err := validID(id); err != nil {
+		return Job{}, false, invalid(err.Error())
+	}
 	st := s.store()
 	lock, err := st.TryLock(id)
 	if errors.Is(err, filelock.ErrLocked) {
@@ -650,7 +668,7 @@ func (s *Service) Cancel(ctx context.Context, id string, expiresAt time.Time) (J
 		return j, false, nil
 	}
 	if err != nil {
-		return Job{}, false, invalid(err.Error())
+		return Job{}, false, err
 	}
 	defer lock.Close()
 	j, ok, err := st.Get(id)
@@ -773,6 +791,30 @@ func (s *Service) Janitor(ctx context.Context) error {
 			if got, ok, err := st.Get(cur.ID); err == nil && ok {
 				cur = got
 			}
+		} else if cur.State == "running" && cur.Workspace != "" {
+			// If the reviewer host died/rebooted without finishing the request,
+			// settle the unowned non-terminal request so the review does not
+			// wait until the full 4h deadline.
+			if _, alive := host.Existing(ctx, cur.Workspace, cur.Preset); !alive {
+				var settledReq request.Record
+				ran, err := host.WithoutHost(ctx, cur.Workspace, cur.Preset, func() error {
+					r, rerr := request.Get(cur.Workspace, cur.ID)
+					if rerr != nil {
+						return rerr
+					}
+					if r.Terminal() {
+						settledReq = r
+						return nil
+					}
+					var ferr error
+					settledReq, ferr = request.FinishContext(ctx, cur.Workspace, r.Envelope, "ERROR interrupted: reviewer host exited unexpectedly")
+					return ferr
+				})
+				if err == nil && ran && settledReq.Terminal() {
+					importRequest(&cur, settledReq)
+					st.Save(cur)
+				}
+			}
 		}
 		due := cur.Acked || cur.State == "cancelled" || now.After(cur.ExpiresAt.Add(time.Hour))
 		if due && !cur.Cleaned && s.cleanup(ctx, cur) {
@@ -792,8 +834,10 @@ func (s *Service) cleanup(ctx context.Context, j Job) bool {
 	if j.Workspace == "" {
 		return true
 	}
-	root := filepath.Join(s.StateDir, "reviews", "ws") + string(filepath.Separator)
-	if !strings.HasPrefix(j.Workspace, root) {
+	root := filepath.Clean(filepath.Join(s.StateDir, "reviews", "ws"))
+	ws := filepath.Clean(j.Workspace)
+	rel, err := filepath.Rel(root, ws)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return false
 	}
 	if _, err := os.Stat(j.Workspace); errors.Is(err, os.ErrNotExist) {

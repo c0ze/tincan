@@ -157,4 +157,18 @@ func TestLoadMalformedConfigReturnsEntriesWithError(t *testing.T) {
 	}
 }
 
+func TestParseShortOnlyAndExtremeTimestampOverflow(t *testing.T) {
+	at := ftoa(unix(now.Add(-time.Minute)))
+	shortOnly := []byte(`{"short_percent": 42, "short_reset_at": ` + ftoa(unix(now.Add(time.Hour))) + `, "fetched_at": ` + at + `}`)
+	e, err := Parse("shortonly", shortOnly, now)
+	if err != nil || e.State != StateOK || e.ShortPercent == nil || *e.ShortPercent != 42 {
+		t.Fatalf("short-only entry = %+v, err=%v", e, err)
+	}
+	overflow := []byte(`{"percent": 10, "reset_at": 1e25, "fetched_at": ` + at + `}`)
+	e, err = Parse("overflow", overflow, now)
+	if err != nil || e.ResetAt != nil {
+		t.Fatalf("overflow reset_at accepted: %+v, err=%v", e, err)
+	}
+}
+
 func ftoa(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }

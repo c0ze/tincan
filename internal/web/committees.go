@@ -199,7 +199,7 @@ func (s *Server) validateCommittee(ctx context.Context, c committee.Committee) (
 // peer would otherwise call back into each other until the peer timeout.
 func (s *Server) peerCommittees(refresh bool) committeesView {
 	if refresh {
-		s.refreshCommittees(false)
+		s.refreshCommittees(s.streams, false)
 	}
 	view := committeesView{Role: "peer", From: s.cfg.CommitteesFrom, Committees: []committee.Committee{}}
 	c, ok, err := committee.LoadCache(s.cfg.StateDir)
@@ -223,7 +223,7 @@ func (s *Server) peerCommittees(refresh bool) committeesView {
 // waiting, and the fetch uses its own deadline rather than a browser
 // request's context. The cache file is rewritten, and a committees note
 // published, only when its content changes.
-func (s *Server) refreshCommittees(force bool) error {
+func (s *Server) refreshCommittees(parent context.Context, force bool) error {
 	s.committeesMu.Lock()
 	defer s.committeesMu.Unlock()
 	if !force && time.Since(s.committeesAttempt) < 10*time.Second {
@@ -234,12 +234,16 @@ func (s *Server) refreshCommittees(force bool) error {
 	old, _, _ := committee.LoadCache(s.cfg.StateDir)
 	next := old
 	next.From = s.cfg.CommitteesFrom
+	next.AttemptedAt = s.committeesAttempt.UTC()
 	var view committeesView
 	var err error
 	if p := s.peers[s.cfg.CommitteesFrom]; p == nil {
 		err = fmt.Errorf("%s is not a configured peer", s.cfg.CommitteesFrom)
 	} else {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 		err = p.call(ctx, "GET", "committees", nil, 1<<20, &view)
 		cancel()
 	}
@@ -258,7 +262,7 @@ func (s *Server) refreshCommittees(force bool) error {
 		next.Error = err.Error()
 	} else {
 		next.Error, next.Committees = "", view.Committees
-		next.FetchedAt, next.AttemptedAt = s.committeesAttempt.UTC(), s.committeesAttempt.UTC()
+		next.FetchedAt = s.committeesAttempt.UTC()
 	}
 	if next.Committees == nil {
 		next.Committees = []committee.Committee{}
@@ -289,8 +293,10 @@ func (s *Server) syncCommittees(ctx context.Context) {
 	t := time.NewTicker(60 * time.Second)
 	defer t.Stop()
 	for {
-		if err := s.refreshCommittees(true); err != nil {
+		if err := s.refreshCommittees(ctx, true); err != nil {
 			s.logOnce("committees.refresh", fmt.Sprintf("tincan web: committees from %s: %v", s.cfg.CommitteesFrom, err))
+		} else {
+			s.clearLog("committees.refresh")
 		}
 		select {
 		case <-ctx.Done():

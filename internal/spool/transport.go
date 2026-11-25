@@ -38,6 +38,9 @@ func (s *Spool) lockTransportWithin(ctx context.Context) (*filelock.Lock, error)
 // transport lock so a concurrent claim or Nack cannot hide it between the two
 // locations. Different content at e's filename is ErrEnvelopeConflict.
 func (s *Spool) Published(ctx context.Context, e *envelope.Envelope) (bool, error) {
+	if err := envelope.Validate(e); err != nil {
+		return false, err
+	}
 	lock, err := s.lockTransport(ctx)
 	if err != nil {
 		return false, err
@@ -49,6 +52,9 @@ func (s *Spool) Published(ctx context.Context, e *envelope.Envelope) (bool, erro
 // TryPublished is Published without waiting: it returns filelock.ErrLocked
 // while another transition holds the transport lock.
 func (s *Spool) TryPublished(e *envelope.Envelope) (bool, error) {
+	if err := envelope.Validate(e); err != nil {
+		return false, err
+	}
 	lock, err := filelock.Try(filepath.Join(s.root, "transport.lock"))
 	if err != nil {
 		return false, err
@@ -80,8 +86,14 @@ func (s *Spool) published(e *envelope.Envelope) (bool, error) {
 		// Timestamps with different zone representations denote the same
 		// instant; nil/empty artifact lists are also identical JSON content.
 		want.TS, got.TS = want.TS.UTC(), got.TS.UTC()
-		wantData, _ := envelope.Marshal(&want)
-		gotData, _ := envelope.Marshal(&got)
+		wantData, err := envelope.Marshal(&want)
+		if err != nil {
+			return false, err
+		}
+		gotData, err := envelope.Marshal(&got)
+		if err != nil {
+			return false, err
+		}
 		if !bytes.Equal(wantData, gotData) {
 			return false, fmt.Errorf("%w: %s", ErrEnvelopeConflict, e.ID)
 		}
@@ -92,7 +104,7 @@ func (s *Spool) published(e *envelope.Envelope) (bool, error) {
 	}
 	// A crash may leave an empty gate before claim rename or after Ack. No
 	// transition can still own that gate while this process holds the lock.
-	if err := os.Remove(gate); err != nil && !os.IsNotExist(err) {
+	if _, err := s.clearEmptyGate(e.To, filename); err != nil {
 		return false, err
 	}
 	return false, nil

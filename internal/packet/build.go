@@ -14,13 +14,37 @@ import (
 	"time"
 )
 
-var secretPatterns = []string{".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*", ".npmrc", ".netrc", ".pypirc", "credentials*", "*secret*"}
+var secretPatterns = []string{
+	".env", ".env.*", "*.env", ".envrc",
+	"*.pem", "*.key", "*.p12", "*.pfx", "*.ppk", "*.jks", "*.keystore", "*.kdbx",
+	"id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*",
+	".npmrc", ".netrc", ".pypirc", ".pgpass", ".htpasswd", ".my.cnf",
+	"*.tfstate", "*.tfstate.*", "*kubeconfig*",
+	"*credential*", "*secret*",
+}
+
+var secretDirNames = map[string]bool{
+	".ssh":   true,
+	".aws":   true,
+	".gnupg": true,
+}
 
 func secretPath(p string) bool {
-	base := strings.ToLower(path.Base(p))
-	for _, pat := range secretPatterns {
-		if ok, _ := path.Match(pat, base); ok {
-			return true
+	segs := strings.Split(strings.ToLower(p), "/")
+	for i, seg := range segs {
+		if seg == "" {
+			continue
+		}
+		if i < len(segs)-1 {
+			if secretDirNames[seg] || strings.Contains(seg, "secret") || strings.Contains(seg, "credential") {
+				return true
+			}
+			continue
+		}
+		for _, pat := range secretPatterns {
+			if ok, _ := path.Match(pat, seg); ok {
+				return true
+			}
 		}
 	}
 	return false
@@ -72,11 +96,18 @@ func blobSizes(ctx context.Context, g Git, shas []string) (map[string]int64, err
 		return nil, err
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(res)), "\n") {
-		f := strings.Fields(line)
-		if len(f) == 2 {
-			n, _ := strconv.ParseInt(f[1], 10, 64)
-			out[f[0]] = n
+		if line == "" {
+			continue
 		}
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			return nil, fmt.Errorf("cat-file --batch-check: unexpected line %q", line)
+		}
+		n, err := strconv.ParseInt(f[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("cat-file --batch-check: invalid size in %q: %w", line, err)
+		}
+		out[f[0]] = n
 	}
 	return out, nil
 }
@@ -170,7 +201,7 @@ func Build(ctx context.Context, dir, scope, question string) (*Packet, error) {
 		}
 	}
 	collide := FoldCollisions(includedPaths)
-	var info bytes.Buffer
+	var delInfo, addInfo bytes.Buffer
 	zero := strings.Repeat("0", len(r.BaseTree))
 	for i := range judged {
 		j := &judged[i]
@@ -180,19 +211,24 @@ func Build(ctx context.Context, dir, scope, question string) (*Packet, error) {
 			}
 		}
 		if j.Included {
+			// Emit all removals before all additions so rename+add at the old
+			// path or a two-file swap never deletes a newly added destination.
 			if j.Status == "D" || j.Status == "R" {
 				src := j.Path
 				if j.Status == "R" {
 					src = j.From
 				}
-				fmt.Fprintf(&info, "0 %s\t%s\x00", zero, src)
+				fmt.Fprintf(&delInfo, "0 %s\t%s\x00", zero, src)
 			}
 			if j.Status != "D" {
-				fmt.Fprintf(&info, "%s %s\t%s\x00", j.raw.newMode, j.raw.newSHA, j.Path)
+				fmt.Fprintf(&addInfo, "%s %s\t%s\x00", j.raw.newMode, j.raw.newSHA, j.Path)
 			}
 		}
 		p.Manifest.Changes = append(p.Manifest.Changes, j.Change)
 	}
+	var info bytes.Buffer
+	info.Write(delInfo.Bytes())
+	info.Write(addInfo.Bytes())
 	tmp, err := os.MkdirTemp("", "tincan-index-")
 	if err != nil {
 		return nil, err
@@ -267,7 +303,10 @@ func collectFiles(ctx context.Context, g Git, p *Packet, judged []judgedChange) 
 			if len(f) != 3 {
 				return fmt.Errorf("cat-file: unexpected header %q", header)
 			}
-			n, _ := strconv.Atoi(f[2])
+			n, err := strconv.Atoi(f[2])
+			if err != nil || n < 0 || n > MaxFileContent {
+				return fmt.Errorf("cat-file: invalid blob size %q", f[2])
+			}
 			if cap(scratch) < n {
 				scratch = make([]byte, n)
 			}
@@ -275,7 +314,9 @@ func collectFiles(ctx context.Context, g Git, p *Packet, judged []judgedChange) 
 			if _, err := io.ReadFull(br, body); err != nil {
 				return err
 			}
-			br.ReadByte() // trailing newline
+			if _, err := br.ReadByte(); err != nil { // trailing newline
+				return err
+			}
 			if bytes.IndexByte(body, 0) >= 0 {
 				continue // binary: the patch carries it
 			}

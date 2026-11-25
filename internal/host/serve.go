@@ -113,12 +113,12 @@ func Serve(ctx context.Context, o ServeOptions) error {
 	if err != nil {
 		return err
 	}
-	defer ctl.server.Close()
+	defer ctl.close()
 	sp, err := spool.Open(o.Room)
 	if err != nil {
 		return err
 	}
-	st := State{PID: os.Getpid(), Owner: o.Owner, ControlAddress: ctl.listener.Addr().String(), ControlToken: ctl.token, Preset: o.Label, Session: o.Preset.Session, Config: &o.Preset, Exec: o.Preset.Exec, Started: time.Now().UTC(), State: "parked"}
+	st := State{PID: os.Getpid(), Owner: o.Owner, ControlAddress: ctl.listener.Addr().String(), ControlToken: ctl.token, Preset: o.Label, Session: o.Preset.Session, ConfigHash: presetHash(o.Preset), Exec: o.Preset.Exec, Started: time.Now().UTC(), State: "parked"}
 	// Exclusive ownership makes these claims abandoned. Persist uncertainty;
 	// never execute a possibly completed side effect for a second time.
 	abandoned, err := sp.RecoverInFlight(o.Name)
@@ -301,7 +301,11 @@ func handle(ctx context.Context, o ServeOptions, e *envelope.Envelope) string {
 				return err
 			}
 			if len(filtered) > 0 {
-				return request.AppendProgress(o.Room, e.ID, stream, filtered)
+				// Progress is advisory; a transient lock or disk error must
+				// not kill the running agent.
+				if err := request.AppendProgress(o.Room, e.ID, stream, filtered); err != nil {
+					logf(o.Log, "--- %s progress write failed: %v", e.ID, err)
+				}
 			}
 			return nil
 		},

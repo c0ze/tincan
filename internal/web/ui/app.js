@@ -20,9 +20,12 @@ const state = {
   chains: {},
   seq: 0,
   msgGen: 0,           // bumped per refreshMessages call; drops stale in-flight responses
+  activityGen: 0,      // bumped per showActivity call; drops stale in-flight responses
   agents: { presets: [], listeners: [] },
   progress: new Map(), // request id -> {cursor, text}
+  openLive: new Set(), // request ids whose <details class="live"> is expanded
   sources: {},
+  opened: {},          // key -> true once EventSource opened at least once
   down: {},            // key -> true while that machine's event stream is disconnected
   retries: {},         // key -> reconnects since its event stream last opened
   quotas: {},          // key -> [quota entry]
@@ -107,7 +110,7 @@ function parseHash() {
 }
 
 function go(key, rid, tid) {
-  location.hash = `#/${encodeURIComponent(key)}/${rid}/${tid}`;
+  location.hash = `#/${encodeURIComponent(key)}/${encodeURIComponent(rid)}/${encodeURIComponent(tid)}`;
   $("app").classList.remove("drawer");
 }
 
@@ -120,12 +123,19 @@ async function loadMachines() {
   renderSidebar();
 }
 
-async function loadRooms(m) {
+async function loadRoomsMeta(m) {
   if (!m.online) { state.rooms[m.key] = []; return; }
   try {
     state.rooms[m.key] = await api(m.key, "rooms");
-    await Promise.all(state.rooms[m.key].filter((r) => !r.missing).map((r) => loadThreads(m.key, r.id)));
   } catch (e) { m.online = false; state.rooms[m.key] = []; }
+}
+
+async function loadRooms(m) {
+  await loadRoomsMeta(m);
+  if (!m.online) return;
+  try {
+    await Promise.all(state.rooms[m.key].filter((r) => !r.missing).map((r) => loadThreads(m.key, r.id)));
+  } catch (e) { /* keep rooms already fetched */ }
 }
 
 async function loadThreads(key, rid) {
@@ -173,8 +183,9 @@ function renderRoom(m, r, cur) {
   const showArch = !!state.showArchived[threadKey];
   for (const t of threads) {
     const archived = t.status === "archived";
-    if (archived && !showArch && cur.tid !== t.id) continue;
-    const it = el("div", "item" + (archived ? " archived" : "") + (cur.tid === t.id ? " on" : ""), "› " + t.title);
+    const active = cur.key === m.key && cur.rid === r.id && cur.tid === t.id;
+    if (archived && !showArch && !active) continue;
+    const it = el("div", "item" + (archived ? " archived" : "") + (active ? " on" : ""), "› " + t.title);
     if (t.running) it.append(el("span", "count", ` ${t.running}●`));
     it.onclick = () => go(m.key, r.id, t.id);
     room.append(it);
@@ -307,7 +318,7 @@ function renderThread() {
 
 function renderBody(m) {
   const body = el("div", "body");
-  body.innerHTML = m.html; // server-rendered with every input escaped (RenderMarkdown)
+  body.innerHTML = m.html || ""; // server-rendered with every input escaped (RenderMarkdown)
   return body;
 }
 
@@ -338,6 +349,14 @@ function renderMessage(m) {
     const used = c ? c.used : 0;
     box.append(el("div", "working", `working… (${used}/${state.meta.budget} handoffs used)`));
     const live = el("details", "live");
+    if (m.request_id) {
+      live.dataset.requestId = m.request_id;
+      if (state.openLive.has(m.request_id)) live.open = true;
+      live.ontoggle = () => {
+        if (live.open) state.openLive.add(m.request_id);
+        else state.openLive.delete(m.request_id);
+      };
+    }
     live.append(el("summary", "", "live output"));
     const pre = el("pre", "", (state.progress.get(m.request_id) || {}).text || "");
     live.append(pre);
@@ -359,7 +378,7 @@ function renderMessage(m) {
     const tools = el("div", "tools");
     if (!m.retried) {
       const retry = el("button", "", "Retry");
-      retry.onclick = () => act(`messages/${m.id}/retry`);
+      retry.onclick = () => act(`messages/${encodeURIComponent(m.id)}/retry`);
       tools.append(retry);
     }
     const log = el("button", "secondary", "Open log");
@@ -378,21 +397,31 @@ async function pollProgress() {
   if (pollBusy || !cur || cur.tid === "activity") return;
   pollBusy = true;
   try {
-    let changed = false;
+    const updated = [];
     for (const m of state.messages.values()) {
       if (m.state !== "running" || !m.request_id) continue;
       const p = state.progress.get(m.request_id) || { cursor: 0, text: "" };
       try {
-        const r = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/requests/${m.request_id}/progress?cursor=${p.cursor}`);
+        const r = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/requests/${encodeURIComponent(m.request_id)}/progress?cursor=${p.cursor}`);
         if (r.events && r.events.length) {
           p.text = (p.text + r.events.map((e) => e.text).join("")).slice(-20000);
-          changed = true;
+          updated.push([m.request_id, p.text]);
         }
         p.cursor = r.next_cursor;
         state.progress.set(m.request_id, p);
       } catch (e) { /* next poll retries */ }
     }
-    if (changed && state.current === cur && state.meta) renderThread();
+    if (updated.length && state.current === cur && state.meta && !state.reviewOpen) {
+      // Update <pre> elements in place so expanded <details class="live"> panels
+      // stay open and preserve scroll/selection instead of snapping shut.
+      let needRender = false;
+      for (const [id, text] of updated) {
+        const pre = $("view").querySelector(`details.live[data-request-id="${CSS.escape(id)}"] pre`);
+        if (pre) pre.textContent = text;
+        else needRender = true;
+      }
+      if (needRender) renderThread();
+    }
   } finally {
     pollBusy = false;
   }
@@ -420,22 +449,33 @@ async function post(text, id) {
 
 async function openLog(name) {
   const cur = state.current;
+  const w = window.open("", "_blank");
   try {
     const text = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/agents/${encodeURIComponent(name)}/log`);
-    const w = window.open("", "_blank");
     if (w) { const pre = w.document.createElement("pre"); pre.textContent = text; w.document.body.append(pre); }
-  } catch (e) { alert(e.message); }
+  } catch (e) { if (w) w.close(); alert(e.message); }
 }
 
 // ---------- activity ----------
 async function showActivity() {
   state.reviewOpen = null;
   const cur = state.current;
+  if (!cur) return;
+  const gen = ++state.activityGen;
   const room = (state.rooms[cur.key] || []).find((r) => r.id === cur.rid);
   $("title").textContent = (room ? room.name : "") + " · Activity";
-  const data = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/activity`);
+  let data, reviews;
+  try {
+    [data, reviews] = await Promise.all([
+      api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/activity`),
+      api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/reviews`).catch(() => []),
+    ]);
+  } catch (e) {
+    if (gen === state.activityGen && state.current === cur) $("view").replaceChildren(el("p", "muted", "Error: " + e.message));
+    return;
+  }
   const now = state.current;
-  if (!now || now.key !== cur.key || now.rid !== cur.rid || now.tid !== "activity") return; // view changed while awaiting
+  if (gen !== state.activityGen || !now || now.key !== cur.key || now.rid !== cur.rid || now.tid !== "activity" || state.reviewOpen) return;
   const view = $("view");
   const lt = el("table", "activity");
   lt.append(row("th", ["Listener", "Mode", "State", ""]));
@@ -444,9 +484,11 @@ async function showActivity() {
     if (l.mode === "hosted" && !l.name.includes(".")) {
       const b = el("button", "", "Message this agent");
       b.onclick = async () => {
-        const t = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/threads`, { method: "POST", body: { title: `with ${l.name}`, primary: l.name, client_id: clientId() } });
-        await loadThreads(cur.key, cur.rid);
-        go(cur.key, cur.rid, t.id);
+        try {
+          const t = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/threads`, { method: "POST", body: { title: `with ${l.name}`, primary: l.name, client_id: clientId() } });
+          await loadThreads(cur.key, cur.rid);
+          go(cur.key, cur.rid, t.id);
+        } catch (e) { alert(e.message); }
       };
       tr.lastChild.append(b);
     }
@@ -457,11 +499,6 @@ async function showActivity() {
   for (const r of data.requests) {
     rt.append(row("td", [r.id, `${r.from || "?"} → ${r.agent}`, r.status, new Date(r.updated).toLocaleString(), r.result || ""]));
   }
-  view.replaceChildren(el("h3", "", "Listeners"), data.listeners.length ? lt : el("p", "muted", "No listeners."),
-    el("h3", "", "Recent requests"), data.requests.length ? rt : el("p", "muted", "No journaled requests."));
-  const reviews = await api(cur.key, `rooms/${encodeURIComponent(cur.rid)}/reviews`).catch(() => []);
-  const after = state.current;
-  if (!after || after.key !== cur.key || after.rid !== cur.rid || after.tid !== "activity" || state.reviewOpen) return; // view changed while awaiting
   const vt = el("table", "activity");
   vt.append(row("th", ["Review", "Committee", "Status", "Members", "Created"]));
   for (const r of reviews) {
@@ -471,7 +508,12 @@ async function showActivity() {
     tr.onclick = () => showReview(cur.key, cur.rid, r.review_id);
     vt.append(tr);
   }
-  view.append(el("h3", "", "Reviews"), reviews.length ? vt : el("p", "muted", "No reviews."), reviewForm(cur.key, cur.rid));
+  view.replaceChildren(
+    el("h3", "", "Listeners"), data.listeners.length ? lt : el("p", "muted", "No listeners."),
+    el("h3", "", "Recent requests"), data.requests.length ? rt : el("p", "muted", "No journaled requests."),
+    el("h3", "", "Reviews"), reviews.length ? vt : el("p", "muted", "No reviews."),
+    reviewForm(cur.key, cur.rid),
+  );
 }
 
 // activityBusy reports whether the owner is typing in "Start a review":
@@ -654,13 +696,17 @@ function editCommittee(hubKey, catalogues, c) {
   const del = el("button", "danger", "Delete");
   del.type = save.type = "button";
   save.onclick = async () => {
+    const cname = name.value.trim();
+    if (!cname) { status.textContent = "Name is required."; return; }
+    save.disabled = true;
     try {
-      const res = await api(hubKey, `committees/${encodeURIComponent(name.value)}`, { method: "PUT", body: {
+      const res = await api(hubKey, `committees/${encodeURIComponent(cname)}`, { method: "PUT", body: {
         members: [...chosen], deadline_minutes: Number(deadline.value), instructions: instructions.value, skip_exhausted: skip.checked } });
       const warnings = res.warnings || [];
       state.committeeNotice = `Saved ${res.committee.name} (v${res.committee.version})` + (warnings.length ? ". Warnings: " + warnings.join("; ") : ".");
       showCommittees();
     } catch (e) { status.textContent = e.message; }
+    finally { save.disabled = false; }
   };
   del.onclick = async () => {
     if (!c || !confirm(`Delete committee ${c.name}?`)) return;
@@ -733,17 +779,19 @@ function wireComposer() {
   // One client_id per composed message: a failed post restores the text,
   // and re-sending the same text reuses the id, so a post that reached the
   // server before failing is deduplicated instead of appearing twice.
-  const draft = { text: null, id: null };
+  const draft = { text: null, id: null, scope: null };
   $("composer").addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = input.value;
     if (!text.trim()) return;
-    if (draft.text !== text) { draft.text = text; draft.id = clientId(); }
+    const cur = state.current;
+    const scope = cur ? `${cur.key}/${cur.rid}/${cur.tid}` : "";
+    if (draft.text !== text || draft.scope !== scope) { draft.text = text; draft.id = clientId(); draft.scope = scope; }
     input.value = "";
     $("suggest").hidden = true;
     if (await post(text, draft.id)) {
-      draft.text = draft.id = null;
-    } else if (!input.value) {
+      draft.text = draft.id = draft.scope = null;
+    } else if (!input.value && state.current && `${state.current.key}/${state.current.rid}/${state.current.tid}` === scope) {
       input.value = text;
     }
   });
@@ -760,15 +808,38 @@ function connect(key) {
   const src = new EventSource(BASE + prefix(key) + "events");
   state.sources[key] = src;
   src.onopen = () => {
+    const reconnect = !!state.opened[key];
+    state.opened[key] = true;
     state.retries[key] = 0;
     delete state.down[key];
-    if (key === "local") { loadMachines().then(openCurrent); return; }
+    if (!reconnect) { renderSidebar(); return; }
+    const preserve = () => {
+      if (state.editingCommittee) return;
+      if (state.reviewOpen) {
+        if (key === "local" || state.reviewOpen.key === key) showReview(state.reviewOpen.key, state.reviewOpen.rid, state.reviewOpen.id).catch(() => {});
+        return;
+      }
+      if (key === "local" || (state.current && state.current.key === key)) openCurrent().catch(() => {});
+    };
+    if (key === "local") {
+      const wasOnline = {};
+      for (const m of state.machines) wasOnline[m.key] = m.online;
+      loadMachines().then(() => {
+        for (const m of state.machines) {
+          if (m.key === "local") continue;
+          if (m.online && !wasOnline[m.key]) connect(m.key);
+          else if (!m.online && wasOnline[m.key] && state.sources[m.key]) { state.sources[m.key].close(); delete state.sources[m.key]; }
+        }
+        preserve();
+      }).catch(() => {});
+      return;
+    }
     const m = state.machines.find((x) => x.key === key);
     if (!m) return;
     Promise.all([loadRooms(m), loadQuotas(m)]).then(() => {
       renderSidebar();
-      if (state.current && state.current.key === key) openCurrent();
-    });
+      preserve();
+    }).catch(() => {});
   };
   // The browser retries a dropped stream by itself, but gives up for good
   // when a retry is answered with an error status (a 502 while the server
@@ -782,7 +853,8 @@ function connect(key) {
     setTimeout(() => { if (state.sources[key] === src) connect(key); }, Math.min(30000, 1000 * 2 ** (tries - 1)));
   };
   src.onmessage = async (ev) => {
-    const n = JSON.parse(ev.data);
+    let n;
+    try { n = JSON.parse(ev.data); } catch (e) { return; }
     const cur = state.current;
     if (n.kind === "peer") {
       // Only the local stream's own hub knows about peer up/down; a "peer"
@@ -812,23 +884,23 @@ function connect(key) {
     }
     if (n.kind === "reviews") {
       const cur = state.current;
-      if (state.reviewOpen && state.reviewOpen.key === key && state.reviewOpen.rid === n.room) showReview(key, n.room, state.reviewOpen.id);
-      else if (cur && cur.key === key && cur.rid === n.room && cur.tid === "activity" && !activityBusy()) showActivity();
+      if (state.reviewOpen && state.reviewOpen.key === key && state.reviewOpen.rid === n.room) showReview(key, n.room, state.reviewOpen.id).catch(() => {});
+      else if (cur && cur.key === key && cur.rid === n.room && cur.tid === "activity" && !activityBusy()) showActivity().catch(() => {});
       return;
     }
     if (n.kind === "committees") {
-      if (state.current && state.current.view === "committees" && !state.editingCommittee) showCommittees();
+      if (state.current && state.current.view === "committees" && !state.editingCommittee) showCommittees().catch(() => {});
       return;
     }
     if (n.room) await loadThreads(key, n.room).catch(() => {});
     if (n.kind === "activity" || n.kind === "thread") {
       const m = state.machines.find((x) => x.key === key);
-      if (m) await loadRooms(m);
+      if (m) await loadRoomsMeta(m);
     }
     renderSidebar();
     if (!cur || cur.key !== key || cur.rid !== n.room) return;
-    if (cur.tid === "activity" && n.kind === "activity" && !activityBusy()) showActivity();
-    if (n.thread === cur.tid && !state.reviewOpen) refreshMessages();
+    if (cur.tid === "activity" && n.kind === "activity" && !activityBusy()) showActivity().catch(() => {});
+    if (n.thread === cur.tid && !state.reviewOpen) refreshMessages().catch(() => {});
   };
 }
 

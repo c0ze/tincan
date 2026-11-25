@@ -38,16 +38,22 @@ type hub struct {
 
 func newHub() *hub { return &hub{subs: map[chan note]struct{}{}, fp: map[string]string{}} }
 
-func (h *hub) subscribe() (chan note, func()) {
+const maxSSESubscribers = 64
+
+func (h *hub) subscribe() (chan note, func(), bool) {
 	ch := make(chan note, 64)
 	h.mu.Lock()
+	if len(h.subs) >= maxSSESubscribers {
+		h.mu.Unlock()
+		return nil, nil, false
+	}
 	h.subs[ch] = struct{}{}
 	h.mu.Unlock()
 	return ch, func() {
 		h.mu.Lock()
 		delete(h.subs, ch)
 		h.mu.Unlock()
-	}
+	}, true
 }
 
 // publish never blocks: a slow client misses notes and refetches on reconnect.
@@ -68,12 +74,18 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+	ch, unsubscribe, ok := s.hub.subscribe()
+	if !ok {
+		s.fail(w, http.StatusServiceUnavailable, errors.New("too many active event streams"))
+		return
+	}
+	defer unsubscribe()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
-	ch, unsubscribe := s.hub.subscribe()
-	defer unsubscribe()
-	fmt.Fprint(w, ": connected\n\n")
+	if _, err := fmt.Fprint(w, ": connected\n\n"); err != nil {
+		return
+	}
 	flusher.Flush()
 	heartbeat := time.NewTicker(20 * time.Second)
 	defer heartbeat.Stop()
@@ -85,10 +97,14 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case n := <-ch:
 			data, _ := json.Marshal(n)
-			fmt.Fprintf(w, "data: %s\n\n", data)
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-heartbeat.C:
-			fmt.Fprint(w, ": ping\n\n")
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}
@@ -155,14 +171,20 @@ func (s *Server) scan(list []rooms.Room) {
 		case 'r':
 			notes = append(notes, note{Kind: "thread", Room: key[2:]})
 		case 't':
-			rid, tid := key[2:14], key[15:]
-			notes = append(notes, note{Kind: "messages", Room: rid, Thread: tid})
+			if rid, tid, ok := strings.Cut(key[2:], ":"); ok {
+				notes = append(notes, note{Kind: "messages", Room: rid, Thread: tid})
+			}
 		case 'q':
 			notes = append(notes, note{Kind: "quota"})
 		case 'c':
 			notes = append(notes, note{Kind: "committees"})
 		case 'v':
 			notes = append(notes, note{Kind: "reviews", Room: key[2:]})
+		}
+	}
+	for key := range prev {
+		if _, exists := next[key]; !exists && strings.HasPrefix(key, "a:") {
+			notes = append(notes, note{Kind: "activity", Room: key[2:]})
 		}
 	}
 	for _, n := range notes {
@@ -242,6 +264,12 @@ func (s *Server) logOnceLocked(key, msg string) {
 	fmt.Fprintln(os.Stderr, msg)
 }
 
+func (s *Server) clearLog(key string) {
+	s.mu.Lock()
+	delete(s.lastLog, key)
+	s.mu.Unlock()
+}
+
 // runRoomPass is the default reconcileRoom: it acquires (or reuses) the
 // room's dispatcher and runs one Reconcile, plus a Janitor pass when due.
 func (s *Server) runRoomPass(ctx context.Context, room rooms.Room, janitor bool) {
@@ -252,15 +280,21 @@ func (s *Server) runRoomPass(ctx context.Context, room rooms.Room, janitor bool)
 	// A persistent failure repeats every tick; log each distinct error once.
 	if err := d.Reconcile(ctx); err != nil {
 		s.logOnce(room.ID+"/reconcile", fmt.Sprintf("tincan web: %s: reconcile: %v", room.Name, err))
+	} else {
+		s.clearLog(room.ID + "/reconcile")
 	}
 	if s.coord != nil {
 		if err := s.coord.Reconcile(ctx, room.Path, d); err != nil {
 			s.logOnce(room.ID+"/reviews", fmt.Sprintf("tincan web: %s: reviews: %v", room.Name, err))
+		} else {
+			s.clearLog(room.ID + "/reviews")
 		}
 	}
 	if janitor {
 		if err := d.Janitor(ctx, s.cfg.IdleStop); err != nil {
 			s.logOnce(room.ID+"/janitor", fmt.Sprintf("tincan web: %s: janitor: %v", room.Name, err))
+		} else {
+			s.clearLog(room.ID + "/janitor")
 		}
 	}
 }
@@ -272,20 +306,22 @@ func (s *Server) runRoomPass(ctx context.Context, room rooms.Room, janitor bool)
 // is still running is skipped for this tick rather than re-entered.
 // scan, which only stats files, always runs synchronously so notes keep
 // flowing even while a room's pass is in flight.
-func (s *Server) tick(ctx context.Context) {
+func (s *Server) tick(ctx context.Context) []rooms.Room {
 	if s.cfg.StateDir != "" && time.Since(s.lastHeartbeat) >= 10*time.Second {
 		now := time.Now()
 		if err := rooms.WriteHeartbeat(s.cfg.StateDir, rooms.Heartbeat{PID: os.Getpid(), Machine: s.cfg.Machine, CommitteesFrom: s.cfg.CommitteesFrom, Started: s.started, Updated: now}); err != nil {
 			s.logOnce("heartbeat", fmt.Sprintf("tincan web: heartbeat: %v", err))
 		} else {
+			s.clearLog("heartbeat")
 			s.lastHeartbeat = now
 		}
 	}
 	list, err := s.cfg.Registry.List()
 	if err != nil {
 		s.logOnce("registry.list", fmt.Sprintf("tincan web: registry list: %v", err))
-		return
+		return nil
 	}
+	s.clearLog("registry.list")
 	janitor := time.Since(s.lastJanitor) > time.Minute
 	if janitor {
 		s.lastJanitor = time.Now()
@@ -321,6 +357,7 @@ func (s *Server) tick(ctx context.Context) {
 		s.lastQuotaNote = time.Now()
 		s.hub.publish(note{Kind: "quota"})
 	}
+	return list
 }
 
 // shouldTrigger reports whether an fsnotify event is significant enough to
@@ -382,12 +419,18 @@ var kqueueWatch = runtime.GOOS == "darwin" || runtime.GOOS == "ios" || runtime.G
 // directory: one per request record and progress file, growing toward the
 // process limit. The tick's scan still picks up changes there.
 func watchDirs(room rooms.Room) []string {
+	if room.Missing {
+		return nil
+	}
 	dirs := []string{thread.Root(room.Path), review.Root(room.Path), filepath.Join(room.Path, ".tincan", "hosts"), filepath.Join(room.Path, ".tincan", "present")}
 	if !kqueueWatch {
 		dirs = append(dirs, filepath.Join(room.Path, ".tincan", "requests"))
 	}
 	metas, _ := thread.List(room.Path)
 	for _, m := range metas {
+		if m.Status == thread.StatusArchived {
+			continue
+		}
 		dirs = append(dirs, filepath.Join(thread.Root(room.Path), m.ID))
 	}
 	return dirs
@@ -414,14 +457,21 @@ func (s *Server) loop(ctx context.Context) {
 	debounce := newDebouncer(500 * time.Millisecond)
 	defer debounce.stop()
 	for {
-		s.tick(ctx)
+		list := s.tick(ctx)
 		if watcher != nil {
-			list, _ := s.cfg.Registry.List()
+			want := map[string]bool{}
 			for _, room := range list {
 				for _, d := range watchDirs(room) {
+					want[d] = true
 					if !watched[d] && watcher.Add(d) == nil {
 						watched[d] = true
 					}
+				}
+			}
+			for d := range watched {
+				if !want[d] {
+					_ = watcher.Remove(d)
+					delete(watched, d)
 				}
 			}
 		}
@@ -441,6 +491,12 @@ func (s *Server) loop(ctx context.Context) {
 			case <-debounce.C:
 				break waitForTrigger
 			case ev := <-events:
+				if ev.Has(fsnotify.Remove) || ev.Has(fsnotify.Rename) {
+					if watched[ev.Name] {
+						_ = watcher.Remove(ev.Name)
+						delete(watched, ev.Name)
+					}
+				}
 				if shouldTrigger(ev) {
 					debounce.arm()
 				}

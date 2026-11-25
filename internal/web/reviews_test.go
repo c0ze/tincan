@@ -73,7 +73,10 @@ func TestReviewAcrossTwoMachines(t *testing.T) {
 func TestReviewsNote(t *testing.T) {
 	s, rid := apiServer(t)
 	r, _, _ := s.cfg.Registry.Get(rid)
-	ch, unsubscribe := s.hub.subscribe()
+	ch, unsubscribe, ok := s.hub.subscribe()
+	if !ok {
+		t.Fatal("subscribe failed")
+	}
 	defer unsubscribe()
 	list, _ := s.cfg.Registry.List()
 	s.scan(list)

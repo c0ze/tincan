@@ -44,7 +44,13 @@ func newPeer(p Peer) (*peer, error) {
 		TLSHandshakeTimeout:   10 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 	}
-	pp := &peer{name: p.Name, base: base, client: &http.Client{Transport: transport, Timeout: 5 * time.Second}, rpc: &http.Client{Transport: transport}}
+	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	pp := &peer{
+		name:   p.Name,
+		base:   base,
+		client: &http.Client{Transport: transport, Timeout: 5 * time.Second, CheckRedirect: noRedirect},
+		rpc:    &http.Client{Transport: transport, CheckRedirect: noRedirect},
+	}
 	pp.proxy = &httputil.ReverseProxy{
 		Transport:     transport,
 		FlushInterval: -1, // stream SSE
@@ -57,10 +63,26 @@ func newPeer(p Peer) (*peer, error) {
 					pr.Out.Header.Del(h)
 				}
 			}
-			for _, h := range []string{"Origin", "Cookie", "Referer", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Authorization", "X-Real-Ip"} {
+			for _, h := range []string{"Origin", "Cookie", "Referer", "Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Authorization", "X-Real-Ip", peerCallHeader} {
 				pr.Out.Header.Del(h)
 			}
 			pr.Out.Header.Set("X-Tincan-Request", "1")
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			for _, h := range []string{
+				"Set-Cookie",
+				"Access-Control-Allow-Origin",
+				"Access-Control-Allow-Credentials",
+				"Access-Control-Allow-Headers",
+				"Access-Control-Allow-Methods",
+				"Content-Security-Policy",
+				"X-Frame-Options",
+				"X-Content-Type-Options",
+				"Referrer-Policy",
+			} {
+				resp.Header.Del(h)
+			}
+			return nil
 		},
 		// ErrorHandler never flips the health flag: it fires for every
 		// round-trip error, including a client-cancelled fetch or a slow
@@ -114,13 +136,16 @@ func (s *Server) proxyPeer(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) checkPeers(ctx context.Context) {
 	for _, p := range s.peers {
-		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		req, _ := http.NewRequestWithContext(ctx, "GET", p.base.ResolveReference(&url.URL{Path: "api/self"}).String(), nil)
-		resp, err := p.client.Do(req)
-		online := err == nil && resp.StatusCode == http.StatusOK
-		if resp != nil {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
+		reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		req, err := http.NewRequestWithContext(reqCtx, "GET", p.base.ResolveReference(&url.URL{Path: "api/self"}).String(), nil)
+		online := false
+		if err == nil {
+			resp, err := p.client.Do(req)
+			online = err == nil && resp.StatusCode == http.StatusOK
+			if resp != nil {
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+				resp.Body.Close()
+			}
 		}
 		cancel()
 		if p.online.Swap(online) != online {

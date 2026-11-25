@@ -125,6 +125,10 @@ func cmdPresets(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "tincan presets: unexpected argument %q\n", fs.Arg(0))
+		return ExitUsage
+	}
 	if *format != "table" && *format != "json" {
 		fmt.Fprintln(stderr, "tincan presets: --format must be table or json")
 		return ExitUsage
@@ -190,6 +194,10 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 	if code != ExitOK {
 		return code
 	}
+	if err := requireRoom(h.room); err != nil {
+		fmt.Fprintf(stderr, "tincan serve: %v\n", err)
+		return ExitError
+	}
 	room, err := filepath.Abs(h.room)
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan serve: %v\n", err)
@@ -238,6 +246,10 @@ func cmdUp(args []string, stdout, stderr io.Writer) int {
 	if code != ExitOK {
 		return code
 	}
+	if err := requireRoom(h.room); err != nil {
+		fmt.Fprintf(stderr, "tincan up: %v\n", err)
+		return ExitError
+	}
 	room, err := filepath.Abs(h.room)
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan up: %v\n", err)
@@ -280,15 +292,25 @@ func cmdDown(args []string, stdout, stderr io.Writer) int {
 		return ExitUsage
 	}
 	if name == "" && fs.NArg() > 0 {
-		name = fs.Arg(0)
+		name, rest = fs.Arg(0), fs.Args()[1:]
+	} else {
+		rest = fs.Args()
 	}
 	if name == "" {
 		fmt.Fprintln(stderr, "tincan down: <name> is required")
 		return ExitUsage
 	}
+	if len(rest) > 0 {
+		fmt.Fprintf(stderr, "tincan down: unexpected argument %q\n", rest[0])
+		return ExitUsage
+	}
 	if err := spool.ValidName(name); err != nil {
 		fmt.Fprintf(stderr, "tincan down: %v\n", err)
 		return ExitUsage
+	}
+	if err := requireRoom(*roomFlag); err != nil {
+		fmt.Fprintf(stderr, "tincan down: %v\n", err)
+		return ExitError
 	}
 	room, err := filepath.Abs(*roomFlag)
 	if err != nil {

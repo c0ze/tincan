@@ -21,8 +21,14 @@ const ContentLimit = 1 << 20
 func Root(room string) string { return filepath.Join(room, ".tincan", "reviews") }
 
 func validID(id string) error {
-	if !strings.HasPrefix(id, "rv-") || len(id) != 19 || strings.ContainsAny(id[3:], "./\\") {
+	if !strings.HasPrefix(id, "rv-") || len(id) != 19 {
 		return fmt.Errorf("invalid review id %q", id)
+	}
+	for i := 3; i < len(id); i++ {
+		c := id[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' || c == '_') {
+			return fmt.Errorf("invalid review id %q", id)
+		}
 	}
 	return nil
 }
@@ -118,6 +124,12 @@ func resultPath(room, id string, n int) string {
 
 // WriteResult records member n's result once; an existing result is kept.
 func WriteResult(room, id string, n int, text string) error {
+	if err := validID(id); err != nil {
+		return err
+	}
+	if n < 0 {
+		return fmt.Errorf("invalid member index %d", n)
+	}
 	p := resultPath(room, id, n)
 	if _, err := os.Lstat(p); err == nil {
 		return nil
@@ -129,6 +141,12 @@ func WriteResult(room, id string, n int, text string) error {
 }
 
 func ReadResult(room, id string, n int) (string, bool, error) {
+	if err := validID(id); err != nil {
+		return "", false, err
+	}
+	if n < 0 {
+		return "", false, fmt.Errorf("invalid member index %d", n)
+	}
 	data, err := fsutil.ReadFile(resultPath(room, id, n), ContentLimit+64)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", false, nil
@@ -137,6 +155,9 @@ func ReadResult(room, id string, n int) (string, bool, error) {
 }
 
 func ReadBundle(room, id string) (string, bool, error) {
+	if err := validID(id); err != nil {
+		return "", false, err
+	}
 	data, err := fsutil.ReadFile(filepath.Join(Dir(room, id), "bundle.md"), ContentLimit+64)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", false, nil

@@ -248,7 +248,7 @@ func TestExcludedResolvesStateDirThroughSymlinkedAncestor(t *testing.T) {
 	// The canonical form a review workspace under that (not yet created)
 	// state dir would have.
 	ws := filepath.Join(real, "state", "reviews", "workspaces", "rv-1-0")
-	if !excluded(ws) {
+	if !Default().excluded(ws) {
 		t.Fatalf("excluded(%q) = false, want true", ws)
 	}
 }
