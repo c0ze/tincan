@@ -115,9 +115,18 @@ func TestMutationsNeedCSRFHeaderAndSameOrigin(t *testing.T) {
 	if rec := do(t, h, "POST", "/api/rooms", `{"path":"/nope"}`, hdr); rec.Code != 403 {
 		t.Fatalf("foreign origin: %d", rec.Code)
 	}
-	hdr["Origin"] = "http://example.com" // httptest's default Host
+	hdr["Origin"] = "http://example.com" // non-loopback without X-Forwarded-Proto: http expects https
+	if rec := do(t, h, "POST", "/api/rooms", `{"path":"/nope"}`, hdr); rec.Code != 403 {
+		t.Fatalf("http origin on non-loopback host: %d", rec.Code)
+	}
+	hdr["Origin"] = "https://example.com" // httptest's default Host
 	if rec := do(t, h, "POST", "/api/rooms", `{"path":"/nope"}`, hdr); rec.Code == 403 {
 		t.Fatalf("same origin refused: %s", rec.Body)
+	}
+	hdr["X-Forwarded-Proto"] = "http"
+	hdr["Origin"] = "http://example.com"
+	if rec := do(t, h, "POST", "/api/rooms", `{"path":"/nope"}`, hdr); rec.Code == 403 {
+		t.Fatalf("forwarded http origin refused: %s", rec.Body)
 	}
 }
 

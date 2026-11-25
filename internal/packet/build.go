@@ -141,9 +141,10 @@ func Build(ctx context.Context, dir, scope, question string) (*Packet, error) {
 	}
 	var shas []string
 	for _, c := range raws {
-		if c.status != "D" {
-			shas = append(shas, c.newSHA)
+		if c.status == "D" || c.newMode == "120000" || c.oldMode == "120000" || c.newMode == "160000" || c.oldMode == "160000" {
+			continue
 		}
+		shas = append(shas, c.newSHA)
 	}
 	sizes, err := blobSizes(ctx, g, shas)
 	if err != nil {
@@ -182,7 +183,9 @@ func Build(ctx context.Context, dir, scope, question string) (*Packet, error) {
 		}
 		if raw.status == "R" {
 			c.From = raw.src
-			if ValidPath(raw.src) != nil || ValidPath(raw.dst) != nil || secretPath(raw.src) != secretPath(raw.dst) {
+			// If either endpoint is secret-looking, omit the rename as a whole
+			// so secret content moved to a plain filename is never included.
+			if !secretPath(raw.src) && !secretPath(raw.dst) && (ValidPath(raw.src) != nil || ValidPath(raw.dst) != nil) {
 				del := raw
 				del.status, del.newMode, del.newSHA, del.dst = "D", "000000", strings.Repeat("0", len(raw.oldSHA)), raw.src
 				judge(Change{Status: "D", Path: raw.src, OldMode: raw.oldMode}, del)

@@ -19,14 +19,17 @@ import (
 // evidence across process crashes. This is not an exactly-once side-effect
 // guarantee: a crash after an external effect can leave its outcome uncertain.
 type Delivery struct {
-	Envelope  *envelope.Envelope
-	spool     *Spool
-	name      string
-	filename  string
-	dir       string
-	mu        sync.Mutex
-	committed bool
-	finished  bool
+	Envelope     *envelope.Envelope
+	spool        *Spool
+	name         string
+	filename     string
+	dir          string
+	gateInfo     os.FileInfo
+	mu           sync.Mutex
+	committed    bool
+	ownerCleared bool
+	dirRemoved   bool
+	finished     bool
 }
 
 func (s *Spool) inFlightDir(name string) string { return filepath.Join(s.root, "inflight", name) }
@@ -36,22 +39,35 @@ func (d *Delivery) path() string                { return filepath.Join(d.dir, "m
 // keeping a private copy in log/. A failed Ack leaves the claim available for
 // inspection unless the filesystem operation already committed before failure.
 func (d *Delivery) Ack(logConsumed bool) error {
+	return d.AckContext(context.Background(), logConsumed)
+}
+
+// AckContext is Ack with a caller-supplied context for acquiring transport.lock.
+func (d *Delivery) AckContext(ctx context.Context, logConsumed bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.finished {
 		return nil
 	}
-	lock, err := d.spool.lockTransport(context.Background())
+	lock, err := d.spool.lockTransport(ctx)
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
-	if err := fsutil.CheckDir(d.dir); err != nil {
-		if d.committed && os.IsNotExist(err) {
+	if !d.dirRemoved {
+		if err := fsutil.CheckDir(d.dir); err != nil {
+			if d.committed && os.IsNotExist(err) {
+				d.dirRemoved = true
+				d.ownerCleared = true
+			} else {
+				return err
+			}
+		} else if d.committed && !d.sameGate() {
+			// Another receiver already reclaimed this filename; never remove its
+			// gate or owner metadata.
 			d.finished = true
 			return nil
 		}
-		return err
 	}
 	if !d.committed {
 		if err := d.spool.quarantineQueuedDuplicate(d.name, d.filename); err != nil {
@@ -77,17 +93,36 @@ func (d *Delivery) Ack(logConsumed bool) error {
 			d.committed = true
 		}
 	}
-	if err := d.spool.clearOwner(d.name, d.filename); err != nil {
-		return err
+	if !d.ownerCleared {
+		if err := d.spool.clearOwner(d.name, d.filename); err != nil {
+			return err
+		}
+		d.ownerCleared = true
 	}
-	if err := fsutil.SyncDir(d.dir); err != nil {
-		return err
+	if !d.dirRemoved {
+		if err := fsutil.SyncDir(d.dir); err != nil {
+			return err
+		}
+		if err := retryClaimOp(func() error { return os.Remove(d.dir) }); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		d.dirRemoved = true
 	}
-	if err := retryClaimOp(func() error { return os.Remove(d.dir) }); err != nil && !os.IsNotExist(err) {
+	if err := fsutil.SyncDir(d.spool.inFlightDir(d.name)); err != nil {
 		return err
 	}
 	d.finished = true
-	return fsutil.SyncDir(d.spool.inFlightDir(d.name))
+	return nil
+}
+
+// sameGate reports whether d.dir still refers to the same gate directory that
+// this Delivery claimed. Caller must hold transport.lock.
+func (d *Delivery) sameGate() bool {
+	if d.gateInfo == nil {
+		return true
+	}
+	info, err := os.Lstat(d.dir)
+	return err == nil && os.SameFile(d.gateInfo, info)
 }
 
 // Nack explicitly requeues an envelope. Callers must use it only when retry is
@@ -110,12 +145,20 @@ func (d *Delivery) Nack() error {
 
 // nackLocked is Nack for a caller that holds the transport lock.
 func (d *Delivery) nackLocked() error {
-	if err := fsutil.CheckDir(d.dir); err != nil {
-		if d.committed && os.IsNotExist(err) {
+	if !d.dirRemoved {
+		if err := fsutil.CheckDir(d.dir); err != nil {
+			if d.committed && os.IsNotExist(err) {
+				d.dirRemoved = true
+				d.ownerCleared = true
+			} else {
+				return err
+			}
+		} else if d.committed && !d.sameGate() {
+			// Another receiver already reclaimed this filename after we requeued
+			// it; do not disturb the new claimant's gate or owner record.
 			d.finished = true
 			return nil
 		}
-		return err
 	}
 	if !d.committed {
 		inbox := d.spool.InboxDir(d.name)
@@ -143,17 +186,26 @@ func (d *Delivery) nackLocked() error {
 		}
 		d.committed = true
 	}
-	if err := d.spool.clearOwner(d.name, d.filename); err != nil {
-		return err
+	if !d.ownerCleared {
+		if err := d.spool.clearOwner(d.name, d.filename); err != nil {
+			return err
+		}
+		d.ownerCleared = true
 	}
-	if err := fsutil.SyncDir(d.dir); err != nil {
-		return err
+	if !d.dirRemoved {
+		if err := fsutil.SyncDir(d.dir); err != nil {
+			return err
+		}
+		if err := retryClaimOp(func() error { return os.Remove(d.dir) }); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		d.dirRemoved = true
 	}
-	if err := retryClaimOp(func() error { return os.Remove(d.dir) }); err != nil && !os.IsNotExist(err) {
+	if err := fsutil.SyncDir(d.spool.inFlightDir(d.name)); err != nil {
 		return err
 	}
 	d.finished = true
-	return fsutil.SyncDir(d.spool.inFlightDir(d.name))
+	return nil
 }
 
 // claimOldest uses an exclusive mkdir gate before moving a queued file. The
@@ -320,7 +372,8 @@ func (s *Spool) readDelivery(name, filename string) (*Delivery, error) {
 	if !sameInbox || envelope.Filename(e) != filename {
 		return nil, malformedError{fmt.Errorf("tincan: envelope routing or filename mismatch")}
 	}
-	return &Delivery{Envelope: e, spool: s, name: name, filename: filename, dir: dir}, nil
+	gateInfo, _ := os.Lstat(dir)
+	return &Delivery{Envelope: e, spool: s, name: name, filename: filename, dir: dir, gateInfo: gateInfo}, nil
 }
 
 func (s *Spool) quarantine(path string) error {

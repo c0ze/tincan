@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"syscall"
 	"time"
 
@@ -152,7 +151,7 @@ func Up(ctx context.Context, o UpOptions) (UpResult, error) {
 	defer launch.Close()
 	for {
 		if st, ok := Existing(ctx, room, o.Name); ok {
-			return existingResult(st, o)
+			return existingResult(ctx, st, o)
 		}
 		owner, err := filelock.Try(lifetimePath(room, o.Name))
 		if err == nil {
@@ -208,7 +207,7 @@ func Up(ctx context.Context, o UpOptions) (UpResult, error) {
 		select {
 		case err := <-exited:
 			if st, ok := Existing(ctx, room, o.Name); ok {
-				return existingResult(st, o)
+				return existingResult(ctx, st, o)
 			}
 			return UpResult{}, fmt.Errorf("serve exited before readiness (%v); see %s", err, LogPath(room, o.Name))
 		case <-ctx.Done():
@@ -309,16 +308,10 @@ func removeStalePresetFiles(room, name string) error {
 	return nil
 }
 
-func existingResult(st State, o UpOptions) (UpResult, error) {
+func existingResult(ctx context.Context, st State, o UpOptions) (UpResult, error) {
 	result := UpResult{State: st, Already: true}
 	if len(o.Preset.Exec) > 0 {
-		match := st.Preset == o.Label
-		if st.ConfigHash != "" {
-			match = match && st.ConfigHash == presetHash(o.Preset)
-		} else {
-			match = match && st.Config != nil && reflect.DeepEqual(*st.Config, o.Preset)
-		}
-		if !match {
+		if st.Preset != o.Label || !st.matchConfig(ctx, o.Preset) {
 			return result, fmt.Errorf("listener %s is already running with a different configuration (preset=%s session=%s); stop it before relaunching with new settings", o.Name, st.Preset, st.Session)
 		}
 	}

@@ -62,9 +62,9 @@ func TestProxyForwardsReadsWithPathJoinedOnce(t *testing.T) {
 func TestProxyMutationUsesHubHeaders(t *testing.T) {
 	hub, seen, _, _ := peerPair(t)
 	hdr := mut()
-	hdr["Origin"] = "http://example.com"
+	hdr["Origin"] = "https://example.com"
 	hdr["Cookie"] = "secret=1"
-	hdr["Referer"] = "http://example.com/somewhere"
+	hdr["Referer"] = "https://example.com/somewhere"
 	hdr["Authorization"] = "Bearer secret-token"
 	hdr["X-Forwarded-For"] = "203.0.113.9"
 	rec := do(t, hub.Handler(), "POST", "/api/peers/macmini/rooms", `{"path":"/nonexistent"}`, hdr)

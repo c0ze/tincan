@@ -182,7 +182,11 @@ func (s *Service) start(id string) {
 // listener is launched if no host is running it.
 func (s *Service) create(id string) {
 	st := s.store()
-	lock, err := st.Lock(context.Background(), id)
+	base := s.BaseCtx
+	if base == nil {
+		base = context.Background()
+	}
+	lock, err := st.Lock(base, id)
 	if err != nil {
 		return
 	}
@@ -194,12 +198,11 @@ func (s *Service) create(id string) {
 	// Nothing about creating a job may outlive the job or server shutdown: a
 	// hung clone, repack or checkout is cut off at expiry/shutdown and releases
 	// the lock.
-	base := s.BaseCtx
-	if base == nil {
-		base = context.Background()
-	}
 	ctx, cancel := context.WithDeadline(base, j.ExpiresAt)
 	defer cancel()
+	shuttingDown := func() bool {
+		return base.Err() != nil && !st.cancelRequested(id) && !s.now().After(j.ExpiresAt)
+	}
 	// A cancel recorded meanwhile (Cancel does not wait for this lock)
 	// cuts materializing short and refuses the launch.
 	go func() {
@@ -337,6 +340,10 @@ func (s *Service) create(id string) {
 		return
 	}
 	note, reason, err := materializeCheckout(ctx, j.Workspace, req.Packet, s.Registry)
+	if shuttingDown() {
+		os.RemoveAll(j.Workspace)
+		return
+	}
 	j.Mode = "checkout"
 	if err == nil && reason != "" {
 		j.Mode = "packet"
@@ -344,12 +351,19 @@ func (s *Service) create(id string) {
 	}
 	if err != nil {
 		os.RemoveAll(j.Workspace)
+		if shuttingDown() {
+			return
+		}
 		fail("workspace: " + err.Error())
 		return
 	}
 	j.Note = note
 	if s.materialized != nil {
 		s.materialized(ctx)
+	}
+	if shuttingDown() {
+		os.RemoveAll(j.Workspace)
+		return
 	}
 	if cancelled() {
 		return
@@ -366,6 +380,11 @@ func (s *Service) create(id string) {
 	s.at("launch")
 	r, err := dispatch.Send(ctx, o, dispatch.SendSpec{Agent: j.Preset, Preset: j.Preset, From: "review", Body: body, RequestID: j.ID})
 	if err != nil {
+		if shuttingDown() {
+			// Leave the job in "creating" with its workspace intact so the next
+			// startup can adopt any request that already saved before shutdown.
+			return
+		}
 		// A launch failure after the request was saved must never run later.
 		failAfterCancel("launch: "+err.Error(), st.cancelRequested(id))
 		return

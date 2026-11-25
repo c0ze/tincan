@@ -2,12 +2,10 @@ package host
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -25,32 +23,11 @@ type State struct {
 	PID            int       `json:"pid"`
 	Preset         string    `json:"preset"`
 	Session        string    `json:"session_mode,omitempty"`
-	ConfigHash     string    `json:"config_hash,omitempty"`
-	Config         *Preset   `json:"config,omitempty"` // legacy read-only compatibility; Serve writes ConfigHash only
+	Config         *Preset   `json:"config,omitempty"` // legacy read-only compatibility; live config matching uses authenticated /match
 	Exec           []string  `json:"exec"`
 	Started        time.Time `json:"started"`
 	State          string    `json:"state"`                // "parked" | "busy"
 	CurrentID      string    `json:"current_id,omitempty"` // message id while busy
-}
-
-// presetHash hashes the full resolved Preset (including Env values) so State
-// can verify matching configuration on reconnect without writing Env secrets
-// into the workspace's .tincan/hosts/<name>.json file.
-func presetHash(p Preset) string {
-	unset := append([]string(nil), p.EnvUnset...)
-	sort.Strings(unset)
-	data, _ := json.Marshal(struct {
-		Exec           []string
-		Stdin          string
-		Reply          string
-		ExecTimeoutSec int
-		Session        string
-		Env            map[string]string
-		EnvUnset       []string
-		Provider       string
-		Pinned         bool
-	}{p.Exec, p.Stdin, p.Reply, p.ExecTimeoutSec, p.Session, p.Env, unset, p.Provider, p.Pinned})
-	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
 // WriteState atomically replaces the state file (tmp file in the same dir,

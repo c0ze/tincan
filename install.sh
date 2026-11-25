@@ -104,7 +104,11 @@ fetch() { # fetch <url> <dest>
       curl -fsSL "$1" -o "$2"
     fi
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$2" "$1"
+    if [[ "$1" == https://* ]]; then
+      wget --https-only -qO "$2" "$1"
+    else
+      wget -qO "$2" "$1"
+    fi
   else
     echo "!! need curl or wget to download $1" >&2
     return 1

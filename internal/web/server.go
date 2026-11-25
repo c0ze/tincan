@@ -344,23 +344,36 @@ func (s *Server) originOK(origin string, r *http.Request) bool {
 		u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 		return false
 	}
-	if proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); strings.EqualFold(proto, "https") && u.Scheme != "https" {
-		return false
-	}
 	host := r.Header.Get("X-Forwarded-Host")
 	if host != "" {
 		host = strings.TrimSpace(strings.Split(host, ",")[0])
 	} else {
 		host = r.Host
 	}
-	norm := func(raw, scheme string) hostRule {
+	expectedScheme := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]))
+	if expectedScheme != "http" && expectedScheme != "https" {
+		if r.TLS != nil {
+			expectedScheme = "https"
+		} else {
+			switch parseHostRule(host).name {
+			case "127.0.0.1", "::1", "localhost":
+				expectedScheme = "http"
+			default:
+				expectedScheme = "https"
+			}
+		}
+	}
+	if !strings.EqualFold(u.Scheme, expectedScheme) {
+		return false
+	}
+	norm := func(raw string) hostRule {
 		hr := parseHostRule(raw)
-		if (scheme == "https" && hr.port == "443") || (scheme == "http" && hr.port == "80") {
+		if (expectedScheme == "https" && hr.port == "443") || (expectedScheme == "http" && hr.port == "80") {
 			hr.port = ""
 		}
 		return hr
 	}
-	return norm(u.Host, u.Scheme) == norm(host, u.Scheme)
+	return norm(u.Host) == norm(host)
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {

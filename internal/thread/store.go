@@ -2,6 +2,7 @@
 package thread
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -104,8 +105,8 @@ func List(room string) ([]Meta, error) {
 }
 
 const (
-	maxMetaBytes   = 1 << 20
-	maxEventsBytes = 64 << 20
+	maxMetaBytes      = 1 << 20
+	maxEventLineBytes = 4 << 20
 )
 
 func (t *Thread) readMeta() (Meta, error) {
@@ -125,26 +126,56 @@ func (t *Thread) writeMeta(m Meta) error {
 	return fsutil.WriteFileAtomic(t.metaPath(), append(data, '\n'))
 }
 
-// readEvents reads complete journal lines. Each line is one committed
-// transaction (a JSON array of events), so a torn final line drops that whole
-// transaction and nothing else. It returns the byte length of the complete
-// prefix.
+// readEvents reads complete journal lines incrementally. Each line is one
+// committed transaction (a JSON array of events), so a torn final line drops
+// that whole transaction and nothing else. Reading line-by-line bounds each
+// transaction without making long-lived threads unreadable. It returns the
+// byte length of the complete prefix.
 func (t *Thread) readEvents() ([]Event, int64, error) {
-	data, err := fsutil.ReadFile(t.eventsPath(), maxEventsBytes)
+	f, err := fsutil.OpenFile(t.eventsPath(), os.O_RDONLY, 0)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, 0, nil
 	}
 	if err != nil {
 		return nil, 0, err
 	}
-	valid := int64(bytes.LastIndexByte(data, '\n') + 1)
+	defer f.Close()
+	r := bufio.NewReaderSize(f, 64*1024)
 	var out []Event
-	for _, line := range bytes.Split(data[:valid], []byte{'\n'}) {
-		if len(line) == 0 {
+	var valid int64
+	for {
+		var line []byte
+		var eof bool
+		for {
+			frag, err := r.ReadSlice('\n')
+			if len(line)+len(frag) > maxEventLineBytes {
+				return nil, 0, fmt.Errorf("%s: journal line exceeds %d bytes", t.eventsPath(), maxEventLineBytes)
+			}
+			line = append(line, frag...)
+			if err == nil {
+				break
+			}
+			if errors.Is(err, bufio.ErrBufferFull) {
+				continue
+			}
+			if errors.Is(err, io.EOF) {
+				eof = true
+				break
+			}
+			return nil, 0, err
+		}
+		if eof {
+			// A trailing fragment without '\n' is a torn transaction; stop
+			// at valid so the next append truncates it cleanly.
+			break
+		}
+		valid += int64(len(line))
+		trimmed := bytes.TrimSuffix(line, []byte{'\n'})
+		if len(trimmed) == 0 {
 			continue
 		}
 		var batch []Event
-		if err := json.Unmarshal(line, &batch); err != nil {
+		if err := json.Unmarshal(trimmed, &batch); err != nil {
 			return nil, 0, fmt.Errorf("%s: corrupt journal line: %w", t.eventsPath(), err)
 		}
 		out = append(out, batch...)

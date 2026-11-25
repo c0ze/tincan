@@ -209,7 +209,7 @@ func TestStateAliveRequiresExactOwner(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	_ = ctx
-	ctl, err := newControl("test-owner", cancel)
+	ctl, err := newControl("test-owner", Preset{}, cancel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestControlCallRejectsNonLoopbackOrURLInjection(t *testing.T) {
 	}
 }
 
-func TestStateMatchesUsesConfigHashWithoutPersistingEnv(t *testing.T) {
+func TestStateMatchesOverControlWithoutPersistingEnvOrDigest(t *testing.T) {
 	p := Preset{
 		Exec: []string{"tool", "-p", "{body}"},
 		Env:  map[string]string{"API_SECRET": "s3cr3t"},
@@ -277,11 +277,20 @@ func TestStateMatchesUsesConfigHashWithoutPersistingEnv(t *testing.T) {
 	if err := p.normalize(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctl, err := newControl("test-owner", p, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ctl.close()
 	st := State{
-		PID:        os.Getpid(),
-		Preset:     "custom",
-		Exec:       p.Exec,
-		ConfigHash: presetHash(p),
+		PID:            os.Getpid(),
+		Owner:          "test-owner",
+		ControlAddress: ctl.listener.Addr().String(),
+		ControlToken:   ctl.token,
+		Preset:         "custom",
+		Exec:           p.Exec,
 	}
 	room := t.TempDir()
 	if err := WriteState(room, "agent", st); err != nil {
@@ -291,7 +300,7 @@ func TestStateMatchesUsesConfigHashWithoutPersistingEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"API_SECRET", "s3cr3t"} {
+	for _, secret := range []string{"API_SECRET", "s3cr3t", "config_hash"} {
 		if bytesContains(raw, secret) {
 			t.Fatalf("state file leaked %q: %s", secret, raw)
 		}
@@ -300,12 +309,12 @@ func TestStateMatchesUsesConfigHashWithoutPersistingEnv(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("ReadState = %+v, %v, %v", got, ok, err)
 	}
-	if _, err := existingResult(got, UpOptions{Name: "agent", Label: "custom", Preset: p}); err != nil {
+	if _, err := existingResult(ctx, got, UpOptions{Name: "agent", Label: "custom", Preset: p}); err != nil {
 		t.Fatalf("existingResult rejected identical preset: %v", err)
 	}
 	p2 := p
 	p2.Env = map[string]string{"API_SECRET": "other"}
-	if _, err := existingResult(got, UpOptions{Name: "agent", Label: "custom", Preset: p2}); err == nil {
+	if _, err := existingResult(ctx, got, UpOptions{Name: "agent", Label: "custom", Preset: p2}); err == nil {
 		t.Fatal("existingResult accepted changed env")
 	}
 }

@@ -80,7 +80,7 @@ func Poll(ctx context.Context, room, id string) (Record, error) {
 			return r, err
 		}
 		if d.Envelope.From != "" && d.Envelope.From != r.Agent {
-			if err := d.Ack(true); err != nil {
+			if err := d.AckContext(ctx, true); err != nil {
 				return r, err
 			}
 			return r, fmt.Errorf("reply sender %q does not match request agent %q", d.Envelope.From, r.Agent)
@@ -95,7 +95,12 @@ func Poll(ctx context.Context, room, id string) (Record, error) {
 			return r, err
 		}
 		r = finished
-		if err := d.Ack(false); err != nil {
+		if err := d.AckContext(ctx, false); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				// Reply is already durably persisted in r; leave claim cleanup
+				// for a later poll rather than exceeding the caller's deadline.
+				return r, nil
+			}
 			return r, err
 		}
 	}

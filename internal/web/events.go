@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/c0ze/tincan/v2/internal/committee"
@@ -69,8 +70,7 @@ func (h *hub) publish(n note) {
 }
 
 func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	if _, ok := w.(http.Flusher); !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
@@ -80,13 +80,24 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer unsubscribe()
+	rc := http.NewResponseController(w)
+	writeEvent := func(format string, args ...any) bool {
+		_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if _, err := fmt.Fprintf(w, format, args...); err != nil {
+			return false
+		}
+		if err := rc.Flush(); err != nil {
+			return false
+		}
+		_ = rc.SetWriteDeadline(time.Time{})
+		return true
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
-	if _, err := fmt.Fprint(w, ": connected\n\n"); err != nil {
+	if !writeEvent(": connected\n\n") {
 		return
 	}
-	flusher.Flush()
 	heartbeat := time.NewTicker(20 * time.Second)
 	defer heartbeat.Stop()
 	for {
@@ -97,15 +108,13 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case n := <-ch:
 			data, _ := json.Marshal(n)
-			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			if !writeEvent("data: %s\n\n", data) {
 				return
 			}
-			flusher.Flush()
 		case <-heartbeat.C:
-			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+			if !writeEvent(": ping\n\n") {
 				return
 			}
-			flusher.Flush()
 		}
 	}
 }
@@ -321,6 +330,9 @@ func (s *Server) tick(ctx context.Context) []rooms.Room {
 		s.logOnce("registry.list", fmt.Sprintf("tincan web: registry list: %v", err))
 		return nil
 	}
+	if list == nil {
+		list = []rooms.Room{}
+	}
 	s.clearLog("registry.list")
 	janitor := time.Since(s.lastJanitor) > time.Minute
 	if janitor {
@@ -439,14 +451,18 @@ func watchDirs(room rooms.Room) []string {
 func (s *Server) loop(ctx context.Context) {
 	watcher, err := fsnotify.NewWatcher()
 	var events chan fsnotify.Event
+	var watchReset atomic.Bool
 	if err == nil {
 		defer watcher.Close()
 		events = watcher.Events
 		// Errors must be drained continuously: fsnotify's internal
 		// goroutine blocks sending to it, so a single unread error would
 		// otherwise wedge event delivery for the rest of the process.
+		// Any error (such as queue overflow) also invalidates the cached watch
+		// set so directories recreated during event loss are re-watched.
 		go func() {
 			for e := range watcher.Errors {
+				watchReset.Store(true)
 				fmt.Fprintf(os.Stderr, "tincan web: watch: %v\n", e)
 			}
 		}()
@@ -458,7 +474,13 @@ func (s *Server) loop(ctx context.Context) {
 	defer debounce.stop()
 	for {
 		list := s.tick(ctx)
-		if watcher != nil {
+		if watcher != nil && list != nil {
+			if watchReset.Swap(false) {
+				for d := range watched {
+					_ = watcher.Remove(d)
+				}
+				clear(watched)
+			}
 			want := map[string]bool{}
 			for _, room := range list {
 				for _, d := range watchDirs(room) {

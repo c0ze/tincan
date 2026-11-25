@@ -1,8 +1,10 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,7 +21,11 @@ import (
 	"github.com/c0ze/tincan/v2/internal/envelope"
 )
 
-var errRequestCanceled = errors.New("request canceled")
+var (
+	errRequestCanceled = errors.New("request canceled")
+	errMatchNotFound   = errors.New("host control does not support /match")
+	errConfigMismatch  = errors.New("host config mismatch")
+)
 
 // control is kept responsive while the listener is executing a job. Its
 // random owner credential identifies one lifetime, without ever signalling
@@ -28,17 +35,18 @@ type control struct {
 	current  string
 	cancel   context.CancelCauseFunc
 	stop     context.CancelFunc
+	preset   Preset
 	server   *http.Server
 	listener net.Listener
 	token    string
 }
 
-func newControl(owner string, stop context.CancelFunc) (*control, error) {
+func newControl(owner string, preset Preset, stop context.CancelFunc) (*control, error) {
 	l, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
-	c := &control{stop: stop, listener: l, token: envelope.NewID()}
+	c := &control{stop: stop, preset: preset, listener: l, token: envelope.NewID()}
 	c.server = &http.Server{ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second, IdleTimeout: 2 * time.Second, MaxHeaderBytes: 4096}
 	c.server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+c.token)) != 1 {
@@ -52,6 +60,16 @@ func newControl(owner string, stop context.CancelFunc) (*control, error) {
 		stopAfterReply := false
 		switch r.URL.Path {
 		case "/ready":
+		case "/match":
+			var want Preset
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&want); err != nil {
+				http.Error(w, "invalid preset", http.StatusBadRequest)
+				return
+			}
+			if !presetsEqual(c.preset, want) {
+				http.Error(w, "config mismatch", http.StatusConflict)
+				return
+			}
 		case "/stop":
 			stopAfterReply = true
 		case "/cancel":
@@ -97,6 +115,10 @@ func (c *control) begin(ctx context.Context, id string) (context.Context, func()
 }
 
 func (st State) controlCall(ctx context.Context, action string) error {
+	return st.controlCallBody(ctx, action, nil)
+}
+
+func (st State) controlCallBody(ctx context.Context, action string, body []byte) error {
 	if st.Owner == "" || st.ControlToken == "" {
 		return errors.New("host has no authenticated control identity")
 	}
@@ -106,11 +128,18 @@ func (st State) controlCall(ctx context.Context, action string) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", ap.Port(), action), nil)
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", ap.Port(), action), reader)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+st.ControlToken)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -123,10 +152,53 @@ func (st State) controlCall(ctx context.Context, action string) error {
 	if err != nil {
 		return err
 	}
+	if resp.StatusCode == http.StatusConflict {
+		return errConfigMismatch
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return errMatchNotFound
+	}
 	if resp.StatusCode != http.StatusOK || subtle.ConstantTimeCompare(data, []byte(st.Owner)) != 1 {
 		return fmt.Errorf("host control identity rejected (%d)", resp.StatusCode)
 	}
 	return nil
+}
+
+// matchConfig checks whether the live host's in-memory Preset matches p over
+// the authenticated control endpoint, avoiding any Env values or offline hash
+// verifiers in the room's on-disk state file. Legacy hosts without /match fall
+// back to their on-disk Config field.
+func (st State) matchConfig(ctx context.Context, p Preset) bool {
+	body, err := json.Marshal(p)
+	if err != nil {
+		return false
+	}
+	err = st.controlCallBody(ctx, "/match", body)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, errMatchNotFound) {
+		return st.Config != nil && presetsEqual(*st.Config, p)
+	}
+	return false
+}
+
+// presetsEqual compares two Presets while treating nil and empty maps/slices
+// equivalently (JSON round-trips omit empty maps/slices).
+func presetsEqual(a, b Preset) bool {
+	norm := func(p Preset) Preset {
+		if len(p.Exec) == 0 {
+			p.Exec = nil
+		}
+		if len(p.Env) == 0 {
+			p.Env = nil
+		}
+		if len(p.EnvUnset) == 0 {
+			p.EnvUnset = nil
+		}
+		return p
+	}
+	return reflect.DeepEqual(norm(a), norm(b))
 }
 
 // Ready verifies the exact host lifetime, including while it is busy.

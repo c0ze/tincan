@@ -256,3 +256,42 @@ func TestBuildRenameAndAddAtOldPathAndSecretDirs(t *testing.T) {
 		t.Fatal("secrets/prod.yaml leaked into packet")
 	}
 }
+
+func TestBuildRenameFromSecretPathOmitsBothEnds(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, ".env", "SUPER_SECRET_TOKEN=xyz123\n")
+	git("add", ".")
+	git("commit", "-qm", "base")
+
+	if err := os.Rename(filepath.Join(dir, ".env"), filepath.Join(dir, "public.txt")); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Build(context.Background(), dir, "uncommitted", "q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, leaked := p.Files["public.txt"]; leaked {
+		t.Fatal("renamed secret file leaked into packet.Files")
+	}
+	if strings.Contains(string(p.Patch), "SUPER_SECRET_TOKEN") {
+		t.Fatalf("renamed secret content leaked into patch:\n%s", p.Patch)
+	}
+}
+
+func TestBuildSkipsSubmoduleGitlinkWithoutAbortedBatchCheck(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "ok.txt", "hello\n")
+	git("add", ".")
+	git("commit", "-qm", "base")
+	// Add a gitlink (160000) pointing to a commit OID absent from this repo's object store.
+	git("update-index", "--add", "--cacheinfo", "160000,1111111111111111111111111111111111111111,submod")
+	write(t, dir, "ok.txt", "hello world\n")
+
+	p, err := Build(context.Background(), dir, "uncommitted", "q")
+	if err != nil {
+		t.Fatalf("Build aborted on gitlink: %v", err)
+	}
+	if string(p.Files["ok.txt"]) != "hello world\n" {
+		t.Fatalf("regular file missing: %v", keys(p.Files))
+	}
+}

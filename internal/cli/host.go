@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/c0ze/tincan/v2/internal/dispatch"
 	"github.com/c0ze/tincan/v2/internal/host"
 	"github.com/c0ze/tincan/v2/internal/rooms"
 	"github.com/c0ze/tincan/v2/internal/spool"
@@ -269,7 +270,7 @@ func cmdUp(args []string, stdout, stderr io.Writer) int {
 	if code != ExitOK {
 		return code
 	}
-	result, err := host.Up(context.Background(), host.UpOptions{Room: room, Name: h.name, Label: label, Preset: p, Wait: time.Duration(wait) * time.Second})
+	result, err := dispatch.Up(context.Background(), host.UpOptions{Room: room, Name: h.name, Label: label, Preset: p, Wait: time.Duration(wait) * time.Second})
 	if err != nil {
 		fmt.Fprintf(stderr, "tincan up: %v\n", err)
 		return ExitError

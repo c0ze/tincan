@@ -34,6 +34,44 @@ type LaunchResult struct {
 	Already bool
 }
 
+// Up starts or reconnects a hosted listener while holding the route lock and
+// refusing to steal a name that currently has pending interactive work.
+func Up(ctx context.Context, o host.UpOptions) (host.UpResult, error) {
+	if err := spool.ValidName(o.Name); err != nil {
+		return host.UpResult{}, err
+	}
+	route, err := request.LockRoute(ctx, o.Room, o.Name)
+	if err != nil {
+		return host.UpResult{}, err
+	}
+	defer route.Close()
+	if err := ensureNoInteractivePending(ctx, o.Room, o.Name); err != nil {
+		return host.UpResult{}, err
+	}
+	return host.Up(ctx, o)
+}
+
+func ensureNoInteractivePending(ctx context.Context, room, name string) error {
+	if _, alive := host.Existing(ctx, room, name); alive {
+		return nil
+	}
+	owned, err := host.Owned(ctx, room, name)
+	if err != nil {
+		return err
+	}
+	if owned {
+		return nil
+	}
+	pending, err := request.InteractivePending(ctx, room, name)
+	if err != nil {
+		return err
+	}
+	if pending {
+		return fmt.Errorf("interactive listener %s has pending work; wait for it to finish before launching a hosted listener under the same name", name)
+	}
+	return nil
+}
+
 // Launch starts or reconnects listener name. preset selects the configuration
 // ("" means the name itself, or the live listener's own preset).
 func Launch(ctx context.Context, o Options, name, preset, sessionMode string) (LaunchResult, error) {
@@ -45,20 +83,8 @@ func Launch(ctx context.Context, o Options, name, preset, sessionMode string) (L
 		return LaunchResult{}, err
 	}
 	defer route.Close()
-	if _, alive := host.Existing(ctx, o.Room, name); !alive {
-		owned, err := host.Owned(ctx, o.Room, name)
-		if err != nil {
-			return LaunchResult{}, err
-		}
-		if !owned {
-			pending, err := request.InteractivePending(ctx, o.Room, name)
-			if err != nil {
-				return LaunchResult{}, err
-			}
-			if pending {
-				return LaunchResult{}, fmt.Errorf("interactive listener %s has pending work; wait for it to finish before launching a hosted listener under the same name", name)
-			}
-		}
+	if err := ensureNoInteractivePending(ctx, o.Room, name); err != nil {
+		return LaunchResult{}, err
 	}
 	return launchUnlocked(ctx, o, name, preset, sessionMode)
 }

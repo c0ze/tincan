@@ -109,7 +109,7 @@ func Serve(ctx context.Context, o ServeOptions) error {
 	}
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
-	ctl, err := newControl(o.Owner, stop)
+	ctl, err := newControl(o.Owner, o.Preset, stop)
 	if err != nil {
 		return err
 	}
@@ -118,7 +118,7 @@ func Serve(ctx context.Context, o ServeOptions) error {
 	if err != nil {
 		return err
 	}
-	st := State{PID: os.Getpid(), Owner: o.Owner, ControlAddress: ctl.listener.Addr().String(), ControlToken: ctl.token, Preset: o.Label, Session: o.Preset.Session, ConfigHash: presetHash(o.Preset), Exec: o.Preset.Exec, Started: time.Now().UTC(), State: "parked"}
+	st := State{PID: os.Getpid(), Owner: o.Owner, ControlAddress: ctl.listener.Addr().String(), ControlToken: ctl.token, Preset: o.Label, Session: o.Preset.Session, Exec: o.Preset.Exec, Started: time.Now().UTC(), State: "parked"}
 	// Exclusive ownership makes these claims abandoned. Persist uncertainty;
 	// never execute a possibly completed side effect for a second time.
 	abandoned, err := sp.RecoverInFlight(o.Name)

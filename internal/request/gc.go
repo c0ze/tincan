@@ -54,11 +54,22 @@ func GC(ctx context.Context, room string, before time.Time) (int, error) {
 		if strings.HasSuffix(name, ".jsonl") {
 			id := strings.TrimSuffix(name, ".jsonl")
 			if validID(id) == nil && !presentJSON[id] {
-				if info, err := entry.Info(); err == nil && info.ModTime().Before(before) {
-					if err := os.Remove(filepath.Join(dir, name)); err == nil {
-						count++
-					}
+				l, err := lock(ctx, room, id)
+				if err != nil {
+					return count, err
 				}
+				func() {
+					defer l.Close()
+					if _, err := os.Lstat(recordPath(room, id)); !errors.Is(err, os.ErrNotExist) {
+						return
+					}
+					p := progressPath(room, id)
+					if info, err := os.Lstat(p); err == nil && info.Mode().IsRegular() && info.ModTime().Before(before) {
+						if err := os.Remove(p); err == nil {
+							count++
+						}
+					}
+				}()
 			}
 			continue
 		}

@@ -812,7 +812,6 @@ function connect(key) {
     state.opened[key] = true;
     state.retries[key] = 0;
     delete state.down[key];
-    if (!reconnect) { renderSidebar(); return; }
     const preserve = () => {
       if (state.editingCommittee) return;
       if (state.reviewOpen) {
@@ -825,10 +824,12 @@ function connect(key) {
       const wasOnline = {};
       for (const m of state.machines) wasOnline[m.key] = m.online;
       loadMachines().then(() => {
-        for (const m of state.machines) {
-          if (m.key === "local") continue;
-          if (m.online && !wasOnline[m.key]) connect(m.key);
-          else if (!m.online && wasOnline[m.key] && state.sources[m.key]) { state.sources[m.key].close(); delete state.sources[m.key]; }
+        if (reconnect) {
+          for (const m of state.machines) {
+            if (m.key === "local") continue;
+            if (m.online && !wasOnline[m.key]) connect(m.key);
+            else if (!m.online && wasOnline[m.key] && state.sources[m.key]) { state.sources[m.key].close(); delete state.sources[m.key]; }
+          }
         }
         preserve();
       }).catch(() => {});

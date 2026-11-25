@@ -555,10 +555,7 @@ func Wait(ctx context.Context, room, id string, timeout time.Duration) (Record, 
 		case <-ctx.Done():
 			return r, ctx.Err()
 		case <-deadline.C:
-			if r, err := Poll(ctx, room, id); err == nil {
-				return r, nil
-			}
-			return Get(room, id)
+			return r, nil
 		case <-tick.C:
 		}
 	}
