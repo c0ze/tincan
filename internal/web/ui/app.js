@@ -21,6 +21,7 @@ const state = {
   seq: 0,
   msgGen: 0,           // bumped per refreshMessages call; drops stale in-flight responses
   activityGen: 0,      // bumped per showActivity call; drops stale in-flight responses
+  machinesGen: 0,      // bumped per loadMachines call; drops stale /self responses
   agents: { presets: [], listeners: [] },
   progress: new Map(), // request id -> {cursor, text}
   openLive: new Set(), // request ids whose <details class="live"> is expanded
@@ -33,6 +34,7 @@ const state = {
   committeeNotice: "", // outcome of the last committee save/delete, shown above the list
   editingCommittee: false, // the committee editor is open: notes must not re-render over it
   reviewOpen: null,    // {key, rid, id} while a review's detail is shown
+  reviewPending: 0,    // reviewGen of an in-flight showReview call, or 0
   reviewGen: 0,        // bumped per showReview call; drops stale responses
   reviewDraft: {},     // key/rid -> {committee, scope, question} typed into "Start a review"
 };
@@ -116,11 +118,16 @@ function go(key, rid, tid) {
 
 // ---------- sidebar ----------
 async function loadMachines() {
+  const gen = ++state.machinesGen;
   const self = await api("local", "self");
-  state.machines = [{ key: "local", name: self.machine, online: true },
+  if (gen !== state.machinesGen) return false;
+  const next = [{ key: "local", name: self.machine, online: true },
     ...self.peers.map((p) => ({ key: p.name, name: p.name, online: p.online }))];
-  await Promise.all(state.machines.map((m) => Promise.all([loadRooms(m), loadQuotas(m)])));
+  state.machines = next;
+  await Promise.all(next.map((m) => Promise.all([loadRooms(m), loadQuotas(m)])));
+  if (gen !== state.machinesGen) return false;
   renderSidebar();
+  return true;
 }
 
 async function loadRoomsMeta(m) {
@@ -246,6 +253,8 @@ async function newThread(key, rid) {
 // ---------- thread view ----------
 async function openCurrent() {
   state.reviewOpen = null;
+  state.reviewPending = 0;
+  state.reviewGen++;
   const cur = parseHash();
   state.current = cur;
   state.messages = new Map();
@@ -859,7 +868,8 @@ function connect(key) {
       else openCurrent().catch(() => {});
     };
     if (key === "local") {
-      loadMachines().then(() => {
+      loadMachines().then((fresh) => {
+        if (!fresh) return;
         reconcilePeerSources();
         preserve();
       }).catch(() => {});
@@ -892,8 +902,7 @@ function connect(key) {
       // note relayed through a peer's proxied stream describes that peer's
       // own peers, not ours, and must be ignored here.
       if (key !== "local") return;
-      await loadMachines();
-      reconcilePeerSources();
+      if (await loadMachines()) reconcilePeerSources();
       return;
     }
     if (n.kind === "quota") {

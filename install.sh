@@ -98,7 +98,12 @@ fi
 
 # Resolve a redirect Location against the current https:// URL (RFC 9110).
 resolve_redirect_url() { # resolve_redirect_url <base-url> <location>
-  local base="$1" loc="$2" origin rest path_no_q dir
+  local base="$1" loc="$2" no_frag no_q rest authority origin dir
+  no_frag="${base%%#*}"
+  no_q="${no_frag%%\?*}"
+  rest="${no_q#https://}"
+  authority="${rest%%/*}"
+  origin="https://${authority}"
   case "$loc" in
     http://*|https://*)
       printf '%s\n' "$loc"
@@ -107,18 +112,19 @@ resolve_redirect_url() { # resolve_redirect_url <base-url> <location>
       printf 'https:%s\n' "$loc"
       ;;
     /*)
-      rest="${base#https://}"
-      origin="https://${rest%%/*}"
       printf '%s%s\n' "$origin" "$loc"
       ;;
+    \?*)
+      printf '%s%s\n' "$no_q" "$loc"
+      ;;
+    \#*)
+      printf '%s%s\n' "$no_frag" "$loc"
+      ;;
     *)
-      path_no_q="${base%%\?*}"
-      path_no_q="${path_no_q%%#*}"
-      rest="${path_no_q#https://}"
       if [[ "$rest" == */* ]]; then
-        dir="${path_no_q%/*}/"
+        dir="${no_q%/*}/"
       else
-        dir="${path_no_q}/"
+        dir="${no_q}/"
       fi
       printf '%s%s\n' "$dir" "$loc"
       ;;
